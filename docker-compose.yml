@@ -1,0 +1,32 @@
+# Local infrastructure for development.
+#
+# The pgvector/pgvector image is plain Postgres plus the vector-search
+# extension. Chosen now so that slice 5 does not force recreating the volume
+# later; until then the extension simply sits there unused.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: landmoney-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-landmoney}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-landmoney_local_only}
+      POSTGRES_DB: ${POSTGRES_DB:-landmoney}
+    ports:
+      # Bound to localhost only. Without the 127.0.0.1 prefix Docker publishes
+      # on every interface and punches straight through the Windows firewall.
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # "Container started" and "database accepts queries" are different
+      # events. Without this the first connection loses that race.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-landmoney} -d ${POSTGRES_DB:-landmoney}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  pgdata:
