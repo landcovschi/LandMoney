@@ -90,6 +90,38 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   learning, Postgres runs as a container next to the app. That is not how
   production is run and the difference is to be understood, not glossed over.
 
+## How work flows
+
+Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as
+much as for the owner.
+
+1. **Claude opens an issue** per task: what to do, how it is verified, and the
+   traps worth knowing in advance. Issues are the queue; `docs/roadmap.md`
+   stays the map.
+2. **The owner writes the code** on a branch off `main`
+   (`feature/transaction-model`), and opens a pull request saying `Closes #N`.
+3. **Claude reviews the diff.** The rules above still hold: name the
+   alternative that lost, show the real error output rather than paraphrasing.
+4. Merge closes the issue.
+
+Nobody commits to `main` directly. CI runs on the pull request, which is the
+entire point of having it.
+
+**What Claude does not do here:** authenticate. `gh auth login`, tokens and
+passwords belong to the owner, are never typed by Claude, and never appear in
+an example command. Creating the Projects board is the owner's job too -- it
+needs a token scope a normal login does not grant.
+
+## Where the project lives
+
+`D:\Work Home\LandMoney`, moved there from the desktop on 2026-08-05, with
+netshift beside it in `D:\Work Home\AI`.
+
+Worth knowing for next time: a Python virtual environment does not survive a
+move. Absolute paths to the interpreter are baked into `.venv`, so it breaks
+quietly rather than loudly, and has to be recreated with `uv sync`. Unlike
+`bin/` and `obj/` in .NET, which simply rebuild.
+
 ## Keeping context between sessions
 
 The owner asked for this explicitly, and it is the rule that made the
