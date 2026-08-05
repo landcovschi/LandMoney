@@ -52,7 +52,11 @@ and a container in the loop.
 
 - [ ] GitHub Actions: build, test, on every push
 - [ ] Dockerfile for the web app, multi-stage, non-root user
-- [ ] Image pushed to a registry
+- [ ] Image pushed to `ghcr.io`
+
+Azure Container Registry was the first plan and lost to `ghcr.io`: same job,
+but ACR Basic costs around 5 USD a month while GitHub's registry is free for
+public repositories. One fewer paid service, one fewer set of credentials.
 
 **Done when:** a fresh clone builds and tests on a machine that is not this one.
 
@@ -60,7 +64,16 @@ and a container in the loop.
 
 **Skill:** the gap netshift never closed. This is the "CD" the owner asked for.
 
-- [ ] Azure Container Apps, deployed from GitHub Actions
+- [ ] Azure Container Apps, deployed from GitHub Actions, pulling from
+      `ghcr.io`
+
+**Why not "all of it in GitHub".** GitHub covers two of the three layers: the
+pipeline (Actions) and the registry (`ghcr.io`). It does not cover the third.
+Pages serves static files -- HTML, CSS, JS -- and this application needs a live
+process and a database beside it. Something has to run the container, and that
+is what Azure is here for. Worth knowing the split rather than discovering it
+halfway through a deployment.
+
 - [ ] Real configuration and secrets handling -- no connection string in git
 - [ ] Migrations applied as a deployment step, not on application startup
 - [ ] The URL works from a phone

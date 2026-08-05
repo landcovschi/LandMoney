@@ -70,6 +70,39 @@ usings and imports, typos, boilerplate, running linters and tests.
   contract. Every network client gets a timeout -- without one an outage
   becomes a hang, and a hang costs far more to debug than an error.
 
+## The stack, and what was rejected
+
+Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
+
+- **UI: ASP.NET MVC / Razor Pages.** Blazor Server was the alternative and
+  lost on debuggability: plain request-response is easier to reason about
+  behind a reverse proxy, and there is no SignalR connection to keep alive.
+- **Build and deploy: GitHub Actions.** Public repository, so the minutes are
+  free.
+- **Image registry: `ghcr.io`.** Azure Container Registry does the same job
+  and costs around 5 USD a month for Basic; GitHub's is free for public
+  repositories.
+- **Hosting: Azure Container Apps.** GitHub cannot host this -- Pages serves
+  static files only, and this needs a live process plus a database. Container
+  Apps was picked over App Service because a second container (the Python
+  categorizer) is coming, and it scales to zero when idle.
+- **Database: Postgres.** Azure Database for PostgreSQL is not free; while
+  learning, Postgres runs as a container next to the app. That is not how
+  production is run and the difference is to be understood, not glossed over.
+
+## Keeping context between sessions
+
+The owner asked for this explicitly, and it is the rule that made the
+predecessor project survivable: **a chat thread is not memory.**
+
+- Decisions with a non-obvious alternative go in this file or in
+  `docs/roadmap.md`, together with what lost and why.
+- Progress goes in the roadmap checkboxes, ticked in the same session the work
+  happened.
+- Anything surprising in the code gets a comment next to the surprising line.
+- A fact that exists only in the conversation is already lost. Write it down
+  before the session ends, not after.
+
 ## Session hygiene
 
 The repository is the project's memory; a chat thread is not. Anything that
