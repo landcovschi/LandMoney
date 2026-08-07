@@ -33,17 +33,30 @@ Two things from netshift were kept deliberately, because they were right:
 
 ## Slice 1 -- it runs locally
 
-**Skill:** none new. That is the point -- this is the comfortable part, done
-fast so it stops being an excuse.
+**Skill:** the .NET half is comfortable and is meant to go fast. React is the
+part that is genuinely new, and the reason this slice is no longer "none new".
 
 - [ ] `Transaction`: date (UTC), amount (`decimal`), currency, description,
       category
-- [ ] One form to add, one list to see. Nothing else
 - [ ] Postgres via EF Core, schema created by a migration rather than by hand
 - [ ] `docker compose up` brings the database to healthy
+- [ ] A Web API that creates and lists transactions
+- [ ] A React client in TypeScript, built by Vite: one form, one list
+- [ ] The client served by the .NET app as static files, one image
 
 **Done when:** a transaction typed into the form survives a restart of both the
 app and the container.
+
+**The UI changed on 2026-08-07**, two days in, from Razor Pages to React. The
+reasoning is in `CLAUDE.md`; the short version is that the earlier choice
+optimised for reaching the screen quickly, and the new one optimises for what
+the project is for. The cost was named before it was accepted: roughly a week,
+and a second language ecosystem to keep alive.
+
+Kubernetes was raised at the same time and deliberately left out. Not because
+it is not worth knowing, but because for two containers it produces weeks of
+manifests and nothing visible, and it can be learned for free on a local
+cluster whenever it is actually wanted.
 
 ## Slice 2 -- CI
 

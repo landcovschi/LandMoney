@@ -74,9 +74,34 @@ usings and imports, typos, boilerplate, running linters and tests.
 
 Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
 
-- **UI: ASP.NET MVC / Razor Pages.** Blazor Server was the alternative and
-  lost on debuggability: plain request-response is easier to reason about
-  behind a reverse proxy, and there is no SignalR connection to keep alive.
+- **UI: React with TypeScript, built by Vite. The .NET side is a Web API.**
+  Changed on 2026-08-07, having been Razor Pages for two days. Razor was the
+  faster route to something on screen and it was the right call while the
+  question was "how quickly does this run at all". The reason for changing is
+  not technical but about what the project is for: React is the standard a
+  frontend is expected to be written in, and splitting the API from the client
+  now means the Python categorizer later plugs into a boundary that already
+  exists instead of one invented for it. The cost is real and was accepted
+  knowingly -- roughly a week, and a second language ecosystem.
+
+  **TypeScript, not JavaScript.** For someone coming from C# this is the
+  cheaper of the two: interfaces, generics and compile-time checking already
+  mean what they are expected to mean. Plain JavaScript would save a day of
+  setup and spend it back on runtime mistakes a compiler would have caught.
+
+  **The client is served by the .NET app as static files**, built in CI into
+  `wwwroot`, one image, one deployment. A separate nginx container was the
+  alternative and lost for now on moving parts: it adds CORS, a second image
+  and a second thing to deploy for no benefit at this size. It becomes the
+  right answer once the Python service arrives and there are several
+  containers anyway.
+
+- **Kubernetes: considered on 2026-08-07 and deliberately not adopted.** For
+  two containers it is weeks of manifests, ingress and secrets that produce
+  nothing a user can see, and a managed cluster costs real money for node
+  VMs. The skill is worth having, and when it is wanted the honest way to
+  learn it is a local cluster (`kind`, or the one built into Docker Desktop),
+  which speaks the same API for free. Container Apps stays.
 - **Build and deploy: GitHub Actions.** Public repository, so the minutes are
   free.
 - **Image registry: `ghcr.io`.** Azure Container Registry does the same job
