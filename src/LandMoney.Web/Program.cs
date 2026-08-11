@@ -5,8 +5,18 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddControllersWithViews();
-builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+
+// GetConnectionString returns null when the key is missing or misspelled, and
+// UseNpgsql accepts null without complaint -- the application would then start
+// happily and fail at the first query with an error about the connection rather
+// than about the configuration. Fail here instead, where the message can name
+// the actual cause.
+var connectionString = builder.Configuration.GetConnectionString("Default")
+    ?? throw new InvalidOperationException(
+        "ConnectionStrings:Default is not set. Set it with: "
+        + "dotnet user-secrets set \"ConnectionStrings:Default\" \"<connection string>\"");
+
+builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(connectionString));
 
 var app = builder.Build();
 
