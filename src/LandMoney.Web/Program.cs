@@ -1,7 +1,12 @@
+using LandMoney.Web.Data;          // AppDbContext
+using Microsoft.EntityFrameworkCore; // UseNpgsql
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddControllersWithViews();
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
 
 var app = builder.Build();
 
