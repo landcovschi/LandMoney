@@ -179,6 +179,64 @@ easy to lose. All true as of 2026-08-11.
 - **The connection string lives in user-secrets**, never in a committed file,
   and carries `Timeout` and `Command Timeout`. A network client without a
   timeout turns an outage into a hang.
+- **Permissions are prefix rules in `.claude/settings.json`**, committed, so
+  they work on any machine. They cover the ordinary loop: git inspection and
+  the branch-commit cycle, `gh` for issues and pull requests, `dotnet`
+  build/test/restore and the EF Core migration commands, `docker compose up`
+  and its read-only subcommands. Force-push, history rewriting, hard resets,
+  `docker compose down -v`, `dotnet ef database drop` and `docker compose exec`
+  are left out deliberately -- a confirmation is worth having there, and the
+  last one runs anything at all inside the container.
+
+  Two things about how this works, both learned the hard way. Settings are read
+  when a session starts, so a rule added mid-session does not take effect until
+  the next one. And pressing "always" on a prompt records the **entire command
+  string**: do that to a compound one-liner and the rule matches that exact
+  invocation and nothing else. Thirteen such dead rules accumulated in
+  `settings.local.json` before anyone noticed.
+
+  Turning the confirmation off altogether is a session permission mode, not a
+  settings file, and it belongs to the owner. Claude cannot and should not
+  grant itself permissions.
+
+## How Claude should issue shell commands
+
+One command per call. Not `cd "D:\Work Home\LandMoney"; echo "=== x ==="; git
+status; git log -1 | Select-Object -First 3`.
+
+The reason is mechanical rather than aesthetic. Claude Code recognises
+read-only commands such as `git status` and allows them without asking, but a
+compound line beginning with `cd` is not recognisable as any of them, so it
+prompts -- and the "always" the owner then presses saves the whole string,
+which never recurs. Out of 454 shell calls in the first two weeks, 128 began
+with `cd`, and roughly 109 were read-only git and `gh` commands that should
+never have prompted at all.
+
+Use `git -C <path>`, `--project`, `-f` and the equivalents instead of changing
+directory. Skip the `echo` banners. Accept more tool calls in exchange for
+each one being recognisable.
+
+## Open decisions with a deadline
+
+Recorded here because a comment on a merged pull request is not somewhere
+anyone will look again.
+
+- **Which day does a transaction belong to?** `timestamptz` stores an instant,
+  and an instant only becomes a date once a timezone is applied. A purchase at
+  01:00 local in UTC+3 is stored at 22:00 UTC **on the previous day**. Group by
+  date in UTC and it lands in the wrong day; group by the viewer's zone and the
+  answer changes when the viewer travels. Three ways out, none wrong: keep the
+  instant and fix one reporting timezone; store the original offset in a second
+  column; or make `OccurredAt` a plain date on the grounds that nobody types
+  the minute they paid for coffee. **Decide before #6 groups anything by day.**
+- **`snake_case` for the schema.** EF Core named the table `Transactions`, so
+  it is a quoted identifier in Postgres forever, and every hand-written query
+  needs `"Transactions"`. Fixing it means either the `EFCore.NamingConventions`
+  package (a dependency, therefore a conversation) or about fifteen lines in
+  `OnModelCreating` rewriting names from the model. The cost only grows: the
+  table is empty today, and after slice 4 there is data plus a Python service
+  reading columns by name. **Cheapest before the API in #3 hardens around the
+  current names.**
 
 ## Keeping context between sessions
 

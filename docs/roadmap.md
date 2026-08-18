@@ -45,7 +45,9 @@ part that is genuinely new, and the reason this slice is no longer "none new".
       the running database, not only out of the migration file
 - [x] `docker compose up` brings the database to healthy
 - [ ] A Web API that creates and lists transactions
-- [ ] A React client in TypeScript, built by Vite: one form, one list
+- [ ] A React client in TypeScript, built by Vite: one form, one list --
+      blocked on the day-boundary decision in `CLAUDE.md`, which has to be
+      settled before anything groups transactions by date
 - [ ] The client served by the .NET app as static files, one image
 
 **Done when:** a transaction typed into the form survives a restart of both the
@@ -94,6 +96,15 @@ halfway through a deployment.
 - [ ] Real configuration and secrets handling -- no connection string in git
 - [ ] Migrations applied as a deployment step, not on application startup
 - [ ] The URL works from a phone
+
+**Three ways to apply a migration at deploy time**, named now so the choice is
+not made by default later. `dotnet ef database update` from CI is the obvious
+one and the worst fit: it needs the SDK, the tools and network reach from the
+runner to the database. `dotnet ef migrations script --idempotent` produces SQL
+that can be read before it runs, which is what a DBA would ask for.
+`dotnet ef migrations bundle` produces a self-contained executable that needs
+no SDK where it runs -- the container-shaped answer, and the one expected to
+win here.
 
 **On cost:** Azure Database for PostgreSQL is not free. The cheap route while
 learning is Postgres as a container next to the app. That is not how production
