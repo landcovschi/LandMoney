@@ -1,4 +1,4 @@
-using LandMoney.Web.Data;          // AppDbContext
+﻿using LandMoney.Web.Data;          // AppDbContext
 using Microsoft.EntityFrameworkCore; // UseNpgsql
 
 var builder = WebApplication.CreateBuilder(args);
@@ -16,7 +16,14 @@ var connectionString = builder.Configuration.GetConnectionString("Default")
         "ConnectionStrings:Default is not set. Set it with: "
         + "dotnet user-secrets set \"ConnectionStrings:Default\" \"<connection string>\"");
 
-builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(connectionString));
+// UseSnakeCaseNamingConvention rewrites every table, column, key and index name
+// from the model, so "Transactions" becomes transactions. Postgres folds an
+// unquoted identifier to lower case, which means a PascalCase name is a quoted
+// identifier forever and every hand-written query has to quote it too. This
+// affects the schema only -- the C# property names are untouched.
+builder.Services.AddDbContext<AppDbContext>(options => options
+    .UseNpgsql(connectionString)
+    .UseSnakeCaseNamingConvention());
 
 var app = builder.Build();
 

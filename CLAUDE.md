@@ -115,6 +115,24 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   learning, Postgres runs as a container next to the app. That is not how
   production is run and the difference is to be understood, not glossed over.
 
+  **The schema is `snake_case`, decided 2026-08-18** (#13), applied by the
+  `EFCore.NamingConventions` package -- one call to
+  `UseSnakeCaseNamingConvention()` beside `UseNpgsql`. PascalCase is the EF
+  default and is what SQL Server projects keep; on Postgres it makes every
+  table a quoted identifier forever, and the Python service in slice 4 would
+  meet column names nobody else in that ecosystem writes. The package is
+  maintained by the Npgsql lead, so it is the same author as the provider
+  already in use. What lost: fifteen lines in `OnModelCreating` walking the
+  model and renaming by hand -- no dependency, and it shows how EF metadata is
+  shaped, but it is written once and never reopened.
+
+  The surprise worth keeping: the convention renames the **columns** of
+  `__EFMigrationsHistory` but not the table itself, which the provider names.
+  A database created before the change therefore still has `MigrationId`,
+  while EF now asks for `migration_id`, and `database update` fails with
+  `42703: column "migration_id" does not exist`. Dropping that empty
+  bookkeeping table lets EF recreate it. A fresh volume never sees this.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as
@@ -169,12 +187,11 @@ easy to lose. All true as of 2026-08-11.
   `dotnet tool restore` before any `dotnet ef` command.
 - **Postgres is published on 5433**, not the default. Inspect the schema
   without installing anything:
-  `docker compose exec postgres psql -U landmoney -d landmoney -c '\d "Transactions"'`.
-  The quotes are not decoration. EF Core named the table `Transactions` in
-  PascalCase, Postgres folds unquoted identifiers to lower case, and so the
-  unquoted form answers `Did not find any relation named "transactions"` --
-  which reads like the migration never ran. Making the schema `snake_case` and
-  removing this trap is an open decision, see #10.
+  `docker compose exec postgres psql -U landmoney -d landmoney -c '\d transactions'`.
+  No quotes needed since the schema went `snake_case` on 2026-08-18 -- before
+  that the table was `Transactions` and the unquoted form answered `Did not
+  find any relation named "transactions"`, which reads like the migration never
+  ran. `README.md` has the same connection details for a desktop client.
   Docker Desktop has to be running first; it usually is not.
 - **The connection string lives in user-secrets**, never in a committed file,
   and carries `Timeout` and `Command Timeout`. A network client without a
@@ -229,14 +246,6 @@ anyone will look again.
   instant and fix one reporting timezone; store the original offset in a second
   column; or make `OccurredAt` a plain date on the grounds that nobody types
   the minute they paid for coffee. **Decide before #6 groups anything by day.**
-- **`snake_case` for the schema.** EF Core named the table `Transactions`, so
-  it is a quoted identifier in Postgres forever, and every hand-written query
-  needs `"Transactions"`. Fixing it means either the `EFCore.NamingConventions`
-  package (a dependency, therefore a conversation) or about fifteen lines in
-  `OnModelCreating` rewriting names from the model. The cost only grows: the
-  table is empty today, and after slice 4 there is data plus a Python service
-  reading columns by name. **Cheapest before the API in #3 hardens around the
-  current names.**
 
 ## Keeping context between sessions
 
