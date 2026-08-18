@@ -40,10 +40,6 @@ part that is genuinely new, and the reason this slice is no longer "none new".
       category -- #1, merged 2026-08-11. `DateTimeOffset` rather than
       `DateTime` so there is no `Kind` to get wrong, `Guid` key chosen
       knowingly with the index cost written down next to it
-- [ ] Postgres via EF Core, schema created by a migration rather than by hand
-- [ ] `docker compose up` brings the database to healthy
-- [ ] `Transaction`: date (UTC), amount (`decimal`), currency, description,
-      category
 - [x] Postgres via EF Core, schema created by a migration rather than by hand
       -- #2, 2026-08-18. `numeric(18,2)` and `timestamptz` read back out of
       the running database, not only out of the migration file

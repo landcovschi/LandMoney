@@ -169,7 +169,12 @@ easy to lose. All true as of 2026-08-11.
   `dotnet tool restore` before any `dotnet ef` command.
 - **Postgres is published on 5433**, not the default. Inspect the schema
   without installing anything:
-  `docker compose exec postgres psql -U landmoney -d landmoney -c "\d transactions"`.
+  `docker compose exec postgres psql -U landmoney -d landmoney -c '\d "Transactions"'`.
+  The quotes are not decoration. EF Core named the table `Transactions` in
+  PascalCase, Postgres folds unquoted identifiers to lower case, and so the
+  unquoted form answers `Did not find any relation named "transactions"` --
+  which reads like the migration never ran. Making the schema `snake_case` and
+  removing this trap is an open decision, see #10.
   Docker Desktop has to be running first; it usually is not.
 - **The connection string lives in user-secrets**, never in a committed file,
   and carries `Timeout` and `Command Timeout`. A network client without a
