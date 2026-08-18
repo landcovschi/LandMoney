@@ -28,8 +28,13 @@ The schema and the rows are easiest to inspect from a desktop client. DBeaver
 Community is free and speaks Postgres:
 
 ```powershell
-winget install dbeaver.dbeaver
+winget install DBeaver.DBeaver.Community
 ```
+
+The id has to be the full one. `dbeaver.dbeaver` is a product code that
+`winget search` matches on and `winget install` does not, so the short form
+answers `No package found matching input criteria` while the tool clearly knows
+about the package.
 
 `New Database Connection` -> `PostgreSQL`, then take every value from `.env`
 (or from the defaults in `docker-compose.yml` if there is no `.env` yet):
