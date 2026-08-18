@@ -12,7 +12,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace LandMoney.Web.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20260818190457_InitialCreate")]
+    [Migration("20260818192031_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -58,8 +58,8 @@ namespace LandMoney.Web.Migrations
                         .HasColumnType("character varying(500)")
                         .HasColumnName("description");
 
-                    b.Property<DateTimeOffset>("OccurredAt")
-                        .HasColumnType("timestamp with time zone")
+                    b.Property<DateOnly>("OccurredAt")
+                        .HasColumnType("date")
                         .HasColumnName("occurred_at");
 
                     b.HasKey("Id")

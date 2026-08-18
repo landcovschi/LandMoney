@@ -1,4 +1,4 @@
-using System.ComponentModel.DataAnnotations;
+﻿using System.ComponentModel.DataAnnotations;
 using Microsoft.EntityFrameworkCore;
 
 namespace LandMoney.Web.Models;
@@ -16,8 +16,15 @@ public class Transaction
     // personal transactions, and the reason the trade-off exists at all.
     public Guid Id { get; set; }
 
-    /// <summary>When the money was actually spent. Typed by a human.</summary>
-    public DateTimeOffset OccurredAt { get; set; }
+    // A date, not an instant, deliberately. timestamptz stores a moment, and a
+    // moment only becomes a day once a timezone is applied -- 01:00 in UTC+3 is
+    // stored as 22:00 UTC on the day before, so grouping by day gives a different
+    // answer depending on the zone it is grouped in. A human types this field by
+    // hand and does not remember the minute; dropping the time removes the
+    // question instead of answering it. CreatedAt below keeps full precision,
+    // because that one is produced by a machine.
+    /// <summary>The day the money was spent. Typed by a human; no time of day.</summary>
+    public DateOnly OccurredAt { get; set; }
 
     // decimal, never double: binary floating point cannot represent 0.10 exactly.
     // Without an explicit precision EF Core takes the provider default and you find
