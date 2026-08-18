@@ -147,6 +147,34 @@ move. Absolute paths to the interpreter are baked into `.venv`, so it breaks
 quietly rather than loudly, and has to be recreated with `uv sync`. Unlike
 `bin/` and `obj/` in .NET, which simply rebuild.
 
+## Repository and machine setup
+
+Things that live outside the code and are invisible in a diff, so they are
+easy to lose. All true as of 2026-08-11.
+
+- **Commit identity must be `landcovschi@gmail.com`.** GitHub links a commit to
+  an account by the email address in it, so a commit authored under another
+  address is not attributed and does not appear in the contribution graph. The
+  machine's global config was `landcovschi@yandex.ru` and one commit went out
+  under it before this was noticed; the global config now says gmail. Claude
+  uses whatever git is configured with and does not substitute an address.
+- **`delete_branch_on_merge` is on.** Merging a pull request removes its branch
+  on the server. Locally, `git fetch --prune` clears the stale references and
+  `git branch -d` (lower case, refuses unmerged work) removes the branch
+  itself.
+- **No ruleset on `main` yet, deliberately.** Required status checks are worth
+  having, but there is no CI workflow to require until slice 2. An empty
+  requirement would only block merging without verifying anything.
+- **`dotnet-ef` is pinned in `.config/dotnet-tools.json`.** A fresh clone needs
+  `dotnet tool restore` before any `dotnet ef` command.
+- **Postgres is published on 5433**, not the default. Inspect the schema
+  without installing anything:
+  `docker compose exec postgres psql -U landmoney -d landmoney -c "\d transactions"`.
+  Docker Desktop has to be running first; it usually is not.
+- **The connection string lives in user-secrets**, never in a committed file,
+  and carries `Timeout` and `Command Timeout`. A network client without a
+  timeout turns an outage into a hang.
+
 ## Keeping context between sessions
 
 The owner asked for this explicitly, and it is the rule that made the

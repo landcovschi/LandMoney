@@ -36,6 +36,12 @@ Two things from netshift were kept deliberately, because they were right:
 **Skill:** the .NET half is comfortable and is meant to go fast. React is the
 part that is genuinely new, and the reason this slice is no longer "none new".
 
+- [x] `Transaction`: date (UTC), amount (`decimal`), currency, description,
+      category -- #1, merged 2026-08-11. `DateTimeOffset` rather than
+      `DateTime` so there is no `Kind` to get wrong, `Guid` key chosen
+      knowingly with the index cost written down next to it
+- [ ] Postgres via EF Core, schema created by a migration rather than by hand
+- [ ] `docker compose up` brings the database to healthy
 - [ ] `Transaction`: date (UTC), amount (`decimal`), currency, description,
       category
 - [x] Postgres via EF Core, schema created by a migration rather than by hand
