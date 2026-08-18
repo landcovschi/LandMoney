@@ -16,7 +16,7 @@ namespace LandMoney.Web.Migrations
                 columns: table => new
                 {
                     id = table.Column<Guid>(type: "uuid", nullable: false),
-                    occurred_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
+                    occurred_at = table.Column<DateOnly>(type: "date", nullable: false),
                     amount = table.Column<decimal>(type: "numeric(18,2)", precision: 18, scale: 2, nullable: false),
                     currency = table.Column<string>(type: "character varying(3)", maxLength: 3, nullable: false),
                     description = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: false),

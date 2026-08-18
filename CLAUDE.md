@@ -65,7 +65,9 @@ usings and imports, typos, boilerplate, running linters and tests.
 - .NET 10 (LTS). Python >= 3.12 with `uv` when the categorizer arrives.
 - Money is `decimal`, never `double` or `float`. Amounts are stored with their
   currency; there is no implicit conversion anywhere.
-- Dates and times are stored in UTC, converted only for display.
+- Dates and times are stored in UTC, converted only for display. A field that
+  a human types a day into is a `date` instead, with no zone at all -- see
+  `Transaction.OccurredAt` below.
 - The .NET app and the Python service talk over HTTP with an explicit
   contract. Every network client gets a timeout -- without one an outage
   becomes a hang, and a hang costs far more to debug than an error.
@@ -125,6 +127,20 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   already in use. What lost: fifteen lines in `OnModelCreating` walking the
   model and renaming by hand -- no dependency, and it shows how EF metadata is
   shaped, but it is written once and never reopened.
+
+  **`OccurredAt` is a `DateOnly`, decided 2026-08-18** (#17), mapped to a
+  Postgres `date`. `timestamptz` stores an instant, and an instant is only a day
+  once a timezone is applied: 01:00 in UTC+3 is stored at 22:00 UTC on the day
+  before, so a report grouped in UTC and the same report grouped in the viewer's
+  zone disagree. Dropping the time removes the question rather than answering
+  it, and it matches how the value is made -- typed by hand, weekly, by someone
+  who does not recall the minute. What lost: keeping the instant and fixing one
+  reporting timezone (more data, but `AT TIME ZONE` then has to appear in every
+  query that counts by day, and is silently wrong when forgotten); and storing
+  the original offset in a second column (the faithful answer for spending
+  recorded abroad, and an extra write on every row for a distinction this
+  application never reports on). `CreatedAt` keeps `timestamptz`: it is a
+  machine's audit fact, and precision is its whole point.
 
   The surprise worth keeping: the convention renames the **columns** of
   `__EFMigrationsHistory` but not the table itself, which the provider names.
@@ -238,14 +254,10 @@ each one being recognisable.
 Recorded here because a comment on a merged pull request is not somewhere
 anyone will look again.
 
-- **Which day does a transaction belong to?** `timestamptz` stores an instant,
-  and an instant only becomes a date once a timezone is applied. A purchase at
-  01:00 local in UTC+3 is stored at 22:00 UTC **on the previous day**. Group by
-  date in UTC and it lands in the wrong day; group by the viewer's zone and the
-  answer changes when the viewer travels. Three ways out, none wrong: keep the
-  instant and fix one reporting timezone; store the original offset in a second
-  column; or make `OccurredAt` a plain date on the grounds that nobody types
-  the minute they paid for coffee. **Decide before #6 groups anything by day.**
+Nothing is open right now. The two that were here -- the schema naming and the
+day boundary -- were settled on 2026-08-18 in #13 and #17, and both records live
+in "The stack, and what was rejected" above. The heading stays so the next one
+has somewhere to go.
 
 ## Keeping context between sessions
 
