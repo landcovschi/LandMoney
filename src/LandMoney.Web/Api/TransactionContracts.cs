@@ -23,7 +23,7 @@ namespace LandMoney.Web.Api;
 public sealed record CreateTransactionRequest
 {
     /// <summary>How far ahead of today an entry may be dated. See the field comment.</summary>
-    // One day, not zero. The comparison below happens against UTC today, while
+    // One day, not zero. The comparison happens against UTC today, while
     // OccurredAt is a plain date with no zone -- so someone typing at 01:00 on
     // the 20th in UTC+3 is submitting the 20th while the server still calls it
     // the 19th, and a strict "not after today" rejects a correct entry. A day of
@@ -32,6 +32,23 @@ public sealed record CreateTransactionRequest
     // This is the same day-boundary problem #17 settled in storage, arriving
     // again in validation -- it does not go away, it only moves.
     public const int MaxDaysAhead = 1;
+
+    /// <summary>How far behind today an entry may be dated. See the field comment.</summary>
+    // Five years, added in review: the future bound alone caught a mistyped year
+    // in one direction only, so 2062 was refused while 1900 was stored happily.
+    // A rule that exists because a hand-typed year goes wrong should not care
+    // which way it went.
+    //
+    // Five rather than something larger, because this is spending typed weekly by
+    // one person: entries older than that are not something this application is
+    // for. It is deliberately tight enough to catch the near miss as well as the
+    // absurd one -- 2026 mistyped as 2016 is ten years back and refused, where a
+    // ten-year bound would have waved it through.
+    //
+    // This is the number to revisit first if CSV import of old statements ever
+    // arrives, since that is the one feature on the roadmap that would legitimately
+    // post dates from further back.
+    public const int MaxYearsBehind = 5;
 
     /// <summary>The day the money was spent. Sent as "2026-08-19", no time, no zone.</summary>
     // `required` is doing validation work that no attribute can do here.
@@ -42,10 +59,10 @@ public sealed record CreateTransactionRequest
     // absent, only default. The alternative is DateOnly? plus [Required], which
     // reports the error more prettily and makes every read site deal with a null
     // that cannot occur.
-    [NotFarInFuture(MaxDaysAhead)]
+    [PlausibleDate(MaxDaysAhead, MaxYearsBehind)]
     public required DateOnly OccurredAt { get; init; }
 
-    /// <summary>A positive amount with at most two decimal places.</summary>
+    /// <summary>A positive amount with at most two decimal places, matching numeric(18,2).</summary>
     // The ceiling is not decorative: it is exactly what numeric(18,2) holds.
     // Without it an oversized amount reaches Postgres and comes back as a 500
     // from a numeric field overflow; with it the client gets a 400 naming the
@@ -59,6 +76,11 @@ public sealed record CreateTransactionRequest
     [Range(typeof(decimal), "0.01", "9999999999999999.99",
         ParseLimitsInInvariantCulture = true,
         ErrorMessage = "Amount must be between {1} and {2}.")]
+    // [Range] bounds the magnitude and says nothing about the precision, which is
+    // the gap this closes: numeric(18,2) accepts a third decimal place and rounds
+    // it away without complaint, so a 201 built from the in-memory entity reported
+    // 12.345 while the row held 12.35. Found in review of #19.
+    [DecimalScale(2)]
     public required decimal Amount { get; init; }
 
     /// <summary>ISO 4217 code: EUR, MDL, USD. Stored as sent, uppercased by the handler.</summary>

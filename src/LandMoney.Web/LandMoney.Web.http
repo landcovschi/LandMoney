@@ -114,6 +114,50 @@ Content-Type: application/json
   "description": "A house, apparently"
 }
 
+### Three decimal places. Expect 400 -- numeric(18,2) would round it to 12.35 in silence.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 12.345,
+  "currency": "EUR",
+  "description": "Rounded away without asking"
+}
+
+### Trailing zeros. Expect 201: 12.30 stores exactly, so the scale rule must not refuse it.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 12.30,
+  "currency": "EUR",
+  "description": "Precise about nothing"
+}
+
+### A year typed wrong the other way. Expect 400 -- the past bound, added in review of #19.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "1900-01-01",
+  "amount": 5,
+  "currency": "EUR",
+  "description": "Coffee, historically"
+}
+
+### 2026 mistyped as 2016. Expect 400: ten years back is outside the five-year bound.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2016-08-18",
+  "amount": 12.34,
+  "currency": "EUR",
+  "description": "Coffee, a decade ago"
+}
+
 ### Missing amount. Expect 400 from binding: `required` makes System.Text.Json refuse it.
 POST {{host}}/api/transactions
 Content-Type: application/json
