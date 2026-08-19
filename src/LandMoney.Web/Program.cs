@@ -1,4 +1,5 @@
-﻿using LandMoney.Web.Data;          // AppDbContext
+﻿using LandMoney.Web.Api;            // MapTransactionEndpoints
+using LandMoney.Web.Data;          // AppDbContext
 using Microsoft.EntityFrameworkCore; // UseNpgsql
 
 var builder = WebApplication.CreateBuilder(args);
@@ -46,6 +47,12 @@ app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}")
     .WithStaticAssets();
+
+// Mapped after the MVC route and it makes no difference: routing matches on the
+// pattern, not on registration order, and /api/transactions cannot be confused
+// with {controller}/{action}/{id?}. The MVC route and the Razor views under it
+// are leftovers from the two Razor days and go away in #6.
+app.MapTransactionEndpoints();
 
 
 app.Run();
