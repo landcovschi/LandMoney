@@ -1,0 +1,184 @@
+# Requests for #3. Run the app first: dotnet run --project src/LandMoney.Web
+#
+# Use the https port. The pipeline calls UseHttpsRedirection, so a POST to
+# http://localhost:5150 is answered with a 307 -- and while a browser and this
+# file follow it with the body intact, plain curl does not follow a redirect at
+# all unless told to, and drops the body when it does unless it is given
+# --post307. The result reads as "the endpoint ignored my JSON".
+#
+# The certificate is the local development one. curl rejects it until
+# `dotnet dev-certs https --trust` has been run once on the machine; -k skips
+# the check for a throwaway request.
+
+@host = https://localhost:7063
+
+### Create one. Expect 201 with the created transaction, including a server-assigned id.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 12.34,
+  "currency": "EUR",
+  "description": "Coffee and a croissant"
+}
+
+### List them, newest first. Expect the row above.
+GET {{host}}/api/transactions
+
+### Amount zero. Expect 400, errors keyed on "amount".
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 0,
+  "currency": "EUR",
+  "description": "Free sample"
+}
+
+### Negative amount. Expect 400. A refund is not modelled; it would be a signed amount or its own concept.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": -5,
+  "currency": "EUR",
+  "description": "Refund"
+}
+
+### Description of three spaces. Expect 400 -- [Required] trims before it checks.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 12.34,
+  "currency": "EUR",
+  "description": "   "
+}
+
+### Two-letter currency. Expect 400. The floor matters as much as the ceiling.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 12.34,
+  "currency": "EU",
+  "description": "Coffee"
+}
+
+### Lower-case currency. Expect 201, stored as "MDL" -- the handler uppercases.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 250,
+  "currency": "mdl",
+  "description": "Groceries"
+}
+
+### A year typed wrong. Expect 400: more than one day past today in UTC.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2062-08-18",
+  "amount": 12.34,
+  "currency": "EUR",
+  "description": "Coffee, eventually"
+}
+
+### Tomorrow. Expect 201 -- the one day of slack that lets UTC+13 enter today's date.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-20",
+  "amount": 12.34,
+  "currency": "EUR",
+  "description": "Coffee, tomorrow"
+}
+
+### Amount past numeric(18,2). Expect 400 from validation, not a 500 from Postgres.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 99999999999999999.99,
+  "currency": "EUR",
+  "description": "A house, apparently"
+}
+
+### Three decimal places. Expect 400 -- numeric(18,2) would round it to 12.35 in silence.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 12.345,
+  "currency": "EUR",
+  "description": "Rounded away without asking"
+}
+
+### Trailing zeros. Expect 201: 12.30 stores exactly, so the scale rule must not refuse it.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "amount": 12.30,
+  "currency": "EUR",
+  "description": "Precise about nothing"
+}
+
+### A year typed wrong the other way. Expect 400 -- the past bound, added in review of #19.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "1900-01-01",
+  "amount": 5,
+  "currency": "EUR",
+  "description": "Coffee, historically"
+}
+
+### 2026 mistyped as 2016. Expect 400: ten years back is outside the five-year bound.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2016-08-18",
+  "amount": 12.34,
+  "currency": "EUR",
+  "description": "Coffee, a decade ago"
+}
+
+### Missing amount. Expect 400 from binding: `required` makes System.Text.Json refuse it.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-08-18",
+  "currency": "EUR",
+  "description": "Coffee"
+}
+
+### Fields a client must never set. Expect them to be ignored, not honoured:
+### the response carries a fresh id, a server CreatedAt, and category null.
+POST {{host}}/api/transactions
+Content-Type: application/json
+
+{
+  "id": "00000000-0000-0000-0000-000000000001",
+  "occurredAt": "2026-08-18",
+  "amount": 12.34,
+  "currency": "EUR",
+  "description": "Coffee",
+  "category": "Groceries",
+  "createdAt": "2000-01-01T00:00:00+00:00"
+}

@@ -45,7 +45,13 @@ part that is genuinely new, and the reason this slice is no longer "none new".
       -- #2, 2026-08-18. `numeric(18,2)` and `timestamptz` read back out of
       the running database, not only out of the migration file
 - [x] `docker compose up` brings the database to healthy
-- [ ] A Web API that creates and lists transactions
+- [x] A Web API that creates and lists transactions -- #3, 2026-08-19.
+      Minimal APIs over controllers, since the automatic 400 that used to
+      be the reason to prefer a controller is fifteen lines of endpoint
+      filter here. .NET 10 ships that filter as `AddValidation()` and it
+      was the first choice until the build refused it: the whole
+      `Microsoft.Extensions.Validation` surface is `[Experimental]`
+      (ASP0029) and needs a suppression to compile
 - [ ] A React client in TypeScript, built by Vite: one form, one list. The
       day-boundary question that blocked this was settled on 2026-08-18 in #17
       -- `OccurredAt` is a plain date, so grouping by day needs no timezone
