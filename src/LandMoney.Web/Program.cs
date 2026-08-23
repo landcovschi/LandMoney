@@ -51,7 +51,11 @@ app.MapControllerRoute(
 // Mapped after the MVC route and it makes no difference: routing matches on the
 // pattern, not on registration order, and /api/transactions cannot be confused
 // with {controller}/{action}/{id?}. The MVC route and the Razor views under it
-// are leftovers from the two Razor days and go away in #6.
+// are leftovers from the two Razor days and go away in #20, which is the issue
+// that puts the built React client in wwwroot and therefore has to decide what
+// answers "/". This said #6 until #6 was done and did not touch them: #6 is the
+// React screen, served by Vite on its own port, and it never asks this app for
+// a page at all.
 app.MapTransactionEndpoints();
 
 

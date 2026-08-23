@@ -52,10 +52,15 @@ part that is genuinely new, and the reason this slice is no longer "none new".
       was the first choice until the build refused it: the whole
       `Microsoft.Extensions.Validation` surface is `[Experimental]`
       (ASP0029) and needs a suppression to compile
-- [ ] A React client in TypeScript, built by Vite -- the scaffold and the dev
-      proxy are #4, the form and the list are #6. The day-boundary question
-      that blocked this was settled on 2026-08-18 in #17 -- `OccurredAt` is a
-      plain date, so grouping by day needs no timezone
+- [x] A React client in TypeScript, built by Vite -- the scaffold and the dev
+      proxy are #4, the form and the list are #6, merged 2026-08-23. The
+      day-boundary question that blocked this was settled on 2026-08-18 in #17
+      -- `OccurredAt` is a plain date, so grouping by day needs no timezone.
+      The client validates the *shape* of a value and leaves the *bounds* to
+      the server, so no limit is written down in two languages; the one thing
+      #6 found that reading the diff would not have is that the dev proxy
+      answers a refused connection with its own 502, so "the API is not
+      running" never reaches the browser as a failed `fetch`
 - [ ] The client served by the .NET app as static files, one image -- #20,
       which also removes the last MVC leftovers: `HomeController`, `Views/`,
       and the jQuery and Bootstrap under `wwwroot/lib`
