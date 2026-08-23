@@ -61,17 +61,33 @@ part that is genuinely new, and the reason this slice is no longer "none new".
       #6 found that reading the diff would not have is that the dev proxy
       answers a refused connection with its own 502, so "the API is not
       running" never reaches the browser as a failed `fetch`
-- [ ] The client served by the .NET app as static files, one image -- #20.
-      **The MVC leftovers are already gone**, pulled forward out of #20 on
-      2026-08-23 rather than waiting for it: `HomeController`, `Views/`,
-      `ErrorViewModel`, and the whole of `wwwroot` including the jQuery and
-      Bootstrap under `lib`. The reason was not tidiness -- F5 in Visual Studio
-      opened the Razor template's "Welcome" page on the API port, and being
-      shown a stranger's landing page is a good way to believe the wrong
-      application is running. What #20 still owns is the part that needs the
-      built client to exist: `index.html` out of `wwwroot`, and the fallback for
-      client-side routes. Until then `/` redirects to the Vite dev server, in
-      Development only
+- [x] The client served by the .NET app as static files, one image -- #20,
+      2026-08-23. The MVC leftovers went first, pulled forward earlier the same
+      day because F5 in Visual Studio opened the Razor template's "Welcome" page
+      on the API port, and being shown a stranger's landing page is a good way
+      to believe the wrong application is running. What #20 then did: Vite's
+      `build.outDir` points at `src/LandMoney.Web/wwwroot`, so there is no
+      `dist/` and no copy step that CI performs and a developer does not;
+      `UseStaticFiles` serves it with `immutable` on the hashed assets and
+      `no-cache` on `index.html`; and `MapFallbackToFile` hands a client route
+      the index page. `wwwroot` is git-ignored now that it is build output, and
+      the Development-only redirect to the Vite dev server is gone -- `/` is the
+      client on every environment.
+
+      Three things reading the diff would not have shown, all found by sending
+      requests. `MapFallbackToFile` matches `{*path:nonfile}`, and `nonfile`
+      means "no extension", not "not the API" -- so `/api/nope` answered **200
+      with `index.html`** until an explicit `/api/{**path}` catch-all was put in
+      front of it. The fallback builds its own `StaticFileMiddleware` rather
+      than reusing the registered one, so `/` and `/index.html` were two
+      different answers for one file, and the one with no `Cache-Control` at all
+      was `/`. And `MapStaticAssets`, the .NET 10 default that stood here,
+      resolves everything through a manifest written when the .NET project
+      compiles: a file appearing in `wwwroot` after `dotnet publish` is a silent
+      404, which is what a wrong build order would produce. Its own warning
+      names the alternative, and that alternative is what is in place now. The
+      price is written beside the line -- `MapStaticAssets` emits `.br` at
+      publish time, and on this bundle that was 196,604 bytes down to 52,814
 
 **Done when:** a transaction typed into the form survives a restart of both the
 app and the container.
@@ -97,7 +113,15 @@ and a container in the loop.
       nothing in the repository was testable. The rules from #3 come first,
       because each of them fails silently when broken
 - [ ] GitHub Actions: build, test, on every push -- #22
-- [ ] Dockerfile for the web app, multi-stage, non-root user -- #23
+- [ ] Dockerfile for the web app, multi-stage, non-root user -- #23.
+      **The node stage has to produce `wwwroot` before `dotnet publish` runs**,
+      and nothing will say so if it does not: `wwwroot` is build output and no
+      longer exists in a clone, so the publish succeeds, the image builds, the
+      API answers, and only `/` is a 404. Raised in review of #30, where the
+      same failure through the other door is why `UseStaticFiles` was picked
+      over `MapStaticAssets`. Cheap insurance: after `docker build`, request `/`
+      and assert a 200 rather than trusting that the stages ran in the order
+      they are written in
 - [ ] Image pushed to `ghcr.io` -- #24
 
 Azure Container Registry was the first plan and lost to `ghcr.io`: same job,

@@ -96,12 +96,61 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   mean what they are expected to mean. Plain JavaScript would save a day of
   setup and spend it back on runtime mistakes a compiler would have caught.
 
-  **The client is served by the .NET app as static files**, built in CI into
+  **The client is served by the .NET app as static files**, built into
   `wwwroot`, one image, one deployment. A separate nginx container was the
   alternative and lost for now on moving parts: it adds CORS, a second image
   and a second thing to deploy for no benefit at this size. It becomes the
   right answer once the Python service arrives and there are several
   containers anyway.
+
+  **Vite writes straight into `wwwroot`, decided 2026-08-23** (#20):
+  `build.outDir` is `../LandMoney.Web/wwwroot`, there is no `dist/`, and no
+  copy step anywhere. What lost is Vite's default plus a copy in the CI
+  workflow -- it keeps the client self-contained and drops cleanly into the
+  multi-stage Dockerfile of #23, and it is a step CI performs that local
+  development does not, so `dotnet run` would serve whatever was copied last
+  with nothing reporting its age. The price of the route taken: the client's
+  config now knows the server project's folder layout, and it is what has to be
+  undone the day the client gets its own nginx container. `emptyOutDir: true`
+  is required rather than chosen -- `outDir` is outside Vite's root and Vite
+  will not delete anything out there unasked -- which is also why `wwwroot` no
+  longer holds a `.gitkeep`: it is build output, it is git-ignored, and a fresh
+  clone has no such folder until the client is built.
+
+  **`UseStaticFiles`, not `MapStaticAssets`, decided 2026-08-23** (#20).
+  `MapStaticAssets` is the .NET 10 default and resolves every file through a
+  manifest written when the .NET project compiles; everything under `wwwroot`
+  is produced by Vite, at a different moment. A file missing from that manifest
+  is a **404 in a published application, with nothing in the log**, so building
+  the client after `dotnet publish` fails as a blank page rather than as an
+  error. In a Debug build a development handler serves it anyway and prints a
+  warning that names the alternative outright: "If the file was not added to
+  the project during development, and is created at runtime, use the StaticFiles
+  middleware to serve it instead."
+
+  What that costs, measured rather than guessed: `MapStaticAssets` writes `.br`
+  and `.gz` beside every asset at publish time and negotiates them per request,
+  taking this client's bundle from 196,604 bytes to 52,814. `UseStaticFiles`
+  serves the file as it finds it. The 143 KB matters for slice 3's "the URL
+  works from a phone" and is recoverable without touching the line --
+  `ResponseCompression`, or the nginx container above. Also rejected:
+  `MapStaticAssets` with the cache headers overridden, because the obvious
+  override emits **two** `Cache-Control` headers -- the handler writes its own
+  while the response is going out -- and the working version needs an
+  `OnStarting` callback whose reason for existing nobody will remember.
+
+  **Two things about the fallback that only requests reveal**, both fixed in
+  #20 and both worth not rediscovering. `MapFallbackToFile("index.html")`
+  matches `{*path:nonfile}`, and `nonfile` asks whether the last segment looks
+  like a filename -- not whether the request was meant for the API. `/api/nope`
+  has no extension, so it matched, and a wrong API path came back as **200 with
+  `index.html`**. An explicit `app.Map("/api/{**path}", ...)` returning
+  `Results.Problem(statusCode: 404)` sits in front of it; routing scores a
+  literal segment above a catch-all, so the real endpoints are untouched. And
+  `MapFallbackToFile` constructs its own `StaticFileMiddleware` instead of
+  reusing the registered one, so a cache policy set on `UseStaticFiles` reached
+  `/index.html` and not `/`. The overload taking `StaticFileOptions` is what
+  makes the two agree.
 
 - **Kubernetes: considered on 2026-08-07 and deliberately not adopted.** For
   two containers it is weeks of manifests, ingress and secrets that produce

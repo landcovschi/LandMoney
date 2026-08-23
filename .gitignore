@@ -31,6 +31,16 @@ __pycache__/
 node_modules/
 dist/
 
+# The client's build output, and therefore not source. Vite's outDir points
+# straight here (see vite.config.ts), so every `npm run build` rewrites the
+# whole folder with freshly hashed filenames -- committed, that is a diff of
+# renamed binaries on every build. The folder itself is gone from git too: it
+# no longer holds a .gitkeep, because emptyOutDir deletes everything it finds
+# except .git. A fresh clone therefore has no wwwroot until the client is
+# built, which is correct -- the application has nothing to serve until then,
+# and it answers 404 and says so.
+src/LandMoney.Web/wwwroot/
+
 # --- Tooling and OS ---
 .idea/
 .vscode/

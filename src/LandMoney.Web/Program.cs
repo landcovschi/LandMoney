@@ -87,35 +87,150 @@ if (!app.Environment.IsDevelopment())
 
 app.UseRouting();
 
-// Serves whatever is in wwwroot, which is nothing at all today -- the folder was
-// emptied with the Razor pages that referenced it, jQuery and Bootstrap
-// included. It stays because #20 fills that folder with the built React client,
-// and this is the line that will serve it.
-app.MapStaticAssets();
+// The built React client, out of wwwroot, on the same origin as the API. One
+// process, one image, one deployment -- and no CORS, because from the browser's
+// point of view there is only ever one server.
+//
+// UseStaticFiles rather than MapStaticAssets, which is what stood here and is
+// the .NET 10 default. MapStaticAssets resolves every file from a manifest
+// written when the *.NET* project is compiled, and everything under wwwroot is
+// produced by a different build system at a different moment. A file that is
+// not in that manifest is a 404 in a published application -- verified, not
+// assumed -- with nothing in the log to explain it, so getting `npm run build`
+// and `dotnet publish` the wrong way round fails as a blank page. The
+// framework's own warning names the alternative in as many words: "If the file
+// was not added to the project during development, and is created at runtime,
+// use the StaticFiles middleware to serve it instead."
+//
+// What that costs, exactly: MapStaticAssets generates .br and .gz beside every
+// asset at publish time and negotiates them at request time. On this client's
+// bundle that is 196,604 bytes down to 52,814. UseStaticFiles serves the file
+// as it finds it. The 143 KB is worth paying attention to when slice 3 asks
+// whether the URL works from a phone, and it is recoverable without touching
+// this line -- ResponseCompression here, or the nginx container that CLAUDE.md
+// already expects once the Python service makes it several containers anyway.
+//
+// The options are held in a variable because MapFallbackToFile below needs the
+// same ones. It does not reuse this middleware -- it constructs its own -- so a
+// policy set only here would apply to /index.html and not to "/", which is the
+// URL people actually type.
+var staticFileOptions = new StaticFileOptions
+{
+    // Vite writes content hashes into asset filenames precisely so they can be
+    // cached forever: a changed file is a changed name, so there is nothing to
+    // invalidate. index.html is the opposite -- its name never changes and it
+    // is what names the current hashes, so caching it is how a browser pins
+    // itself to a deployment that no longer exists.
+    //
+    // "immutable" is the part that earns this: without it a reload still sends
+    // a conditional request per asset and spends a round trip being told 304.
+    //
+    // no-cache does not mean "do not store". It means "store it, but ask before
+    // reusing it", which is exactly right for index.html: the answer is a 304
+    // and no body whenever the deployment has not moved.
+    //
+    // Note what the test is actually keyed on, raised in review of #30: the
+    // folder, not whether the filename carries a hash. Those coincide today
+    // because Vite has two ways of emitting a file and only one lands here --
+    // bundled output is hashed and written to /assets, while anything in
+    // public/ is copied to the root untouched. That is why favicon.svg, which
+    // keeps its name across deployments, correctly gets no-cache.
+    //
+    // The coincidence is what to remember. Drop a large image into public/
+    // expecting asset caching and it will revalidate on every load, with the
+    // reason three folders away in a build tool's conventions.
+    OnPrepareResponse = file => file.Context.Response.Headers.CacheControl =
+        file.Context.Request.Path.StartsWithSegments("/assets")
+            ? "public, max-age=31536000, immutable"
+            : "no-cache",
+};
+
+app.UseStaticFiles(staticFileOptions);
 
 app.MapTransactionEndpoints();
 
-// What answers "/" in development, and only in development.
+// A wrong path under /api answers 404 as JSON, and this line is the only reason
+// it does. MapFallbackToFile below matches "{*path:nonfile}", and `nonfile`
+// asks whether the last segment looks like a filename -- not whether the
+// request was meant for the API. /api/nope has no extension, so without this it
+// matched the fallback and returned index.html with a 200: a client asking for
+// a route that does not exist would be handed HTML, and whatever it does with
+// that, it will not be reporting a 404.
 //
-// The client is served by Vite on its own port while developing, so this
-// application has no page to give anyone -- it is an API. Before this it
-// answered with the Razor template's "Welcome" page, which was worse than
-// nothing: pressing F5 and being shown a stranger's landing page suggests the
-// wrong thing is running.
+// It sits after MapTransactionEndpoints but does not shadow it. Routing scores
+// a literal segment above a catch-all parameter, so /api/transactions still
+// reaches its own endpoint; this only collects what nothing else claimed.
 //
-// A redirect rather than a 404, because the browser Visual Studio opens on F5
-// lands here, and sending it where the application actually is costs one line.
-// It is deliberately not a general fallback -- only the root -- so a wrong URL
-// still 404s honestly instead of being bounced to a dev server that may not be
-// up.
+// GET and HEAD, and deliberately not every method -- this exists only to
+// counter the fallback, so it matches exactly what the fallback matches and
+// nothing else. MapFallbackToFile answers `Allow: GET, HEAD`; no other method
+// could ever have reached index.html, so no other method needs guarding here.
 //
-// #20 replaces this with index.html out of wwwroot, at which point "/" is the
-// client on every environment and this branch goes away. The port is Vite's
-// default and is written down in src/landmoney.client/README.md; if it ever
-// moves, both change together or F5 lands on nothing.
-if (app.Environment.IsDevelopment())
-{
-    app.MapGet("/", () => Results.Redirect("http://localhost:5173"));
-}
+// Written as MapMethods after review of #30, where the unrestricted Map was
+// found to be answering questions that routing answers better. An endpoint
+// matching every method is a candidate for every request, and a surviving
+// candidate is what stops routing from reporting *why* the real endpoint was
+// rejected. Measured on the running app, before and after:
+//
+//   DELETE /api/transactions        404  ->  405, Allow: GET, HEAD, POST
+//   POST   /api/transactions        404  ->  400, "Implicit body inferred for
+//          with no Content-Type                   parameter \"request\" but no
+//                                                 body was provided"
+//
+// The second is the worse of the two: a caller who forgot a header was being
+// sent to hunt for a typo in their URL, when the API could tell them exactly
+// what was missing. Restricting the methods leaves the real endpoint as the
+// only candidate, and routing produces both answers by itself.
+//
+// HEAD is the one that does not come out clean, and it is in the list anyway.
+// With it, `HEAD /api/transactions` is a 404 where 405 would be right -- no
+// endpoint here declares HEAD, so this catch-all is what claims it. Without it,
+// measured rather than assumed, both `HEAD /api/transactions` and
+// `HEAD /api/nope` come back **200 text/html**: the fallback serves HEAD, so
+// dropping HEAD reopens the whole hole for it. A 404 on a route that exists is
+// a smaller lie than the index page on a route that does not.
+//
+// What would fix it properly is the list endpoint answering HEAD itself, at
+// which point the literal route wins and this line never sees it. That belongs
+// to #3's endpoints rather than to this one, and is left alone on purpose.
+//
+// A request under /api with any other method matches nothing at all and gets a
+// bare 404 with no body -- honest, and not index.html.
+//
+// Results.Problem rather than Results.NotFound: the latter sends a bare status
+// with no body, and the client's readProblem is looking for the RFC 9457 shape
+// that AddProblemDetails writes everywhere else.
+app.MapMethods(
+    "/api/{**path}",
+    [HttpMethods.Get, HttpMethods.Head],
+    () => Results.Problem(statusCode: StatusCodes.Status404NotFound));
+
+// What answers "/", and every client route under it.
+//
+// This replaces the redirect to the Vite dev server that stood here: with
+// index.html in wwwroot, "/" is the client on every environment, and the
+// Development-only branch that existed because this application had no page to
+// give anyone is gone.
+//
+// The reason a fallback is needed at all is that a client that owns its routes
+// will one day ask the server for /transactions/42 -- on a refresh, or on a
+// link opened cold. There is no such file and no such endpoint, and without
+// this line the honest answer is a 404 for a page the client can render
+// perfectly well. Handing it index.html lets the client read the URL and route
+// itself. There are no client routes yet -- App.tsx renders one screen -- so
+// today this only serves "/", and it is here so that adding the first route is
+// a client-side change and not a debugging session.
+//
+// Passing staticFileOptions is not decoration. MapFallbackToFile builds its own
+// StaticFileMiddleware rather than reusing the one registered above, so without
+// this argument "/" comes back with no Cache-Control at all while /index.html
+// comes back with no-cache -- two answers for one file, and the one that is
+// wrong is the one everybody requests.
+//
+// If index.html is missing -- a clone where `npm run build` has not run -- this
+// answers 404 rather than pretending. That is the intended behaviour and it is
+// also what F5 in Visual Studio now shows when only the API has been started:
+// the fix is to build the client once, not to bring the redirect back.
+app.MapFallbackToFile("index.html", staticFileOptions);
 
 app.Run();
