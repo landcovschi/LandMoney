@@ -67,6 +67,14 @@ This is also why a Visual Studio session shows the bare exe in its command line
 and still listens on 5150 -- Visual Studio launches the exe and applies the
 profile itself.
 
+Which it did only halfway once, on 2026-08-23: `ASPNETCORE_ENVIRONMENT` arrived
+and `applicationUrl` did not, so the app ran in Development on port 5000.
+`applicationUrl` is the tooling's spelling of `ASPNETCORE_URLS`, and it is the
+translation step that failed. Both profiles now name the port a second time
+under `environmentVariables`, in the form the app reads directly, so there is
+nothing left to translate. `launchBrowser` is off there too -- it opened the
+leftover Razor page on the API port, which is not this project's screen.
+
 ## Scripts
 
 | Command | What it does |
