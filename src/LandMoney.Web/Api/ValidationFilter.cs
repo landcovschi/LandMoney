@@ -38,7 +38,7 @@ public sealed class ValidationFilter<T> : IEndpointFilter where T : class
 
         // validateAllProperties: true is the whole game. The parameter defaults
         // to false, and false runs [Required] and nothing else -- every [Range],
-        // [RegularExpression] and [NotFarInFuture] is skipped without a word. The
+        // [RegularExpression] and [PlausibleDate] is skipped without a word. The
         // endpoint then accepts a negative amount while the attributes sit there
         // looking correct, which is why this is the most common way the API is
         // misused.
@@ -46,9 +46,18 @@ public sealed class ValidationFilter<T> : IEndpointFilter where T : class
         // TryValidateObject also does not descend into nested objects. Flat
         // record, so it does not matter today; it stops not mattering the day
         // this type holds a child.
+        //
+        // RequestServices is the second argument, and it is the whole reason a
+        // ValidationAttribute can reach anything at all: an attribute is built
+        // by the runtime from its brackets, so validationContext.GetService is
+        // the only door it has. PlausibleDateAttribute walks through it to find
+        // a TimeProvider. Leave the argument off -- the one-argument
+        // ValidationContext constructor, which is what stood here -- and that
+        // lookup returns null on every request, the attribute falls back to the
+        // system clock, and nothing anywhere says so.
         var isValid = Validator.TryValidateObject(
             argument,
-            new ValidationContext(argument),
+            new ValidationContext(argument, context.HttpContext.RequestServices, items: null),
             results,
             validateAllProperties: true);
 

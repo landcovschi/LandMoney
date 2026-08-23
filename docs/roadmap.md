@@ -108,10 +108,55 @@ cluster whenever it is actually wanted.
 **Skill:** the same discipline as netshift's CI, now with a compiled language
 and a container in the loop.
 
-- [ ] A test project, and the first tests worth having -- #21. This was
-      missing from the plan: slice 2 asked CI to run "build, test" while
-      nothing in the repository was testable. The rules from #3 come first,
-      because each of them fails silently when broken
+- [x] A test project, and the first tests worth having -- #21, 2026-08-24.
+      This was missing from the plan: slice 2 asked CI to run "build, test"
+      while nothing in the repository was testable. The rules from #3 came
+      first, because each of them fails silently when broken. 49 tests in
+      `tests/LandMoney.Web.Tests`, xUnit, no `Microsoft.AspNetCore.Mvc.Testing`
+      -- an `IEndpointFilter` is an object with one method, and
+      `EndpointFilterInvocationContext.Create` builds its argument, so
+      `WebApplicationFactory` bought nothing that was needed yet
+
+      **`PlausibleDateAttribute` now takes its clock from a `TimeProvider`**,
+      reached through `validationContext.GetService`. The alternative -- test
+      relative to `DateTime.UtcNow`, change no production code -- lost because a
+      test that computes today the way the attribute does asserts only that two
+      copies of one expression agree, and it cannot ask what happens on a named
+      day. Two of the tests live on named days: one pins a clock at 23:00 UTC
+      whose local zone is UTC+14, so reading the local time would call it
+      tomorrow, and one sits on 29 February to record that `DateOnly.AddYears`
+      clamps the five-year bound to the 28th
+
+      **The tests were checked by breaking the code.** 24 mutations, one rule at
+      a time; every one was caught, and 48 of the 49 tests failed under at least
+      one. The first attempt at the sweep reverted each mutation with
+      `git checkout --`, which threw away the uncommitted production changes and
+      quietly ran the next twelve mutations against the old code -- reverting from
+      a file copy is what the script does now. The one test no mutation reaches
+      asserts that `decimal` keeps its trailing zeros, which is a fact about .NET
+      rather than about this repository, and is there to keep the test beside it
+      honest
+
+      Found in the review of #31, and the one that would have shipped:
+      `PlausibleDateAttribute` built its failure messages with an interpolated
+      `{latest:yyyy-MM-dd}`, which formats with the ambient culture -- and for a
+      date that does not merely choose separators, it chooses the **calendar**.
+      With `CurrentCulture` set to `ar-SA` the same format string answered
+      "cannot be later than **1448-01-01**", a Hijri year, no exception and
+      nothing in a log, under a date input reading `2026-06-16`. Nothing sets a
+      culture in this application, so it was latent rather than live. Both
+      messages now format with `InvariantCulture`, and a `[Theory]` over `ar-SA`
+      and `de-DE` holds them there
+
+      Two more found by running rather than reading. `Validator` tests
+      `[Required]` on a property first and returns at once if it fails, so the
+      other rules on that property never run -- an empty description reports
+      "required" and never "too short", which means the count of messages under a
+      key is not the count of broken rules. And the test project resolved EF Core
+      10.0.4 while `LandMoney.Web` was compiled against 10.0.10, because
+      `Microsoft.EntityFrameworkCore.Design` is what raises that version and
+      `PrivateAssets="all"` correctly stops it flowing: 66 MSB3277 warnings, and
+      a `FileLoadException` waiting for the first test that touches EF
 - [ ] GitHub Actions: build, test, on every push -- #22
 - [ ] Dockerfile for the web app, multi-stage, non-root user -- #23.
       **The node stage has to produce `wwwroot` before `dotnet publish` runs**,

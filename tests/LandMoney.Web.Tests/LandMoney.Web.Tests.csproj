@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\LandMoney.Web\LandMoney.Web.csproj" />
+  </ItemGroup>
+
+  <!--
+    Nothing here uses EF Core. This reference exists to stop 66 MSB3277 warnings,
+    and the reason is worth writing down, because the fix looks arbitrary
+    otherwise.
+
+    LandMoney.Web references Microsoft.EntityFrameworkCore.Design with
+    PrivateAssets="all", which is right: it is a design-time tool for
+    `dotnet ef` and has no business in anything downstream. Design 10.0.10 is
+    also what raises the whole EF graph to 10.0.10 in that project, because
+    Npgsql.EntityFrameworkCore.PostgreSQL 10.0.3 asks only for 10.0.4. Private
+    assets do not flow, so this project resolves 10.0.4 while the LandMoney.Web
+    assembly it references was compiled against 10.0.10.
+
+    That is a warning today and a FileLoadException the first time a test touches
+    EF, since assembly binding rolls forward to a higher version and never down.
+    Pinning Relational is enough: it drags Microsoft.EntityFrameworkCore and
+    .Abstractions up with it.
+
+    The real answer is Directory.Packages.props, central package management, one
+    PackageVersion per package for the whole repository. That was not worth a
+    repository-wide change inside #21 for two projects, and it is the thing to
+    reach for the moment there is a third. Until then this version has to be kept
+    equal to the one LandMoney.Web resolves. If it drifts, the warnings come back
+    and say so, which is the whole reason for not suppressing them instead.
+
+    (An MSBuild comment is XML, so the double dash this repository writes prose
+    with is a parse error inside one. Learned by writing this comment.)
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>
