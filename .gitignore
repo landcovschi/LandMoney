@@ -27,6 +27,10 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 
+# --- Node (the React client) ---
+node_modules/
+dist/
+
 # --- Tooling and OS ---
 .idea/
 .vscode/
