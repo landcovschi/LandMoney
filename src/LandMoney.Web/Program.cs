@@ -128,6 +128,17 @@ var staticFileOptions = new StaticFileOptions
     // no-cache does not mean "do not store". It means "store it, but ask before
     // reusing it", which is exactly right for index.html: the answer is a 304
     // and no body whenever the deployment has not moved.
+    //
+    // Note what the test is actually keyed on, raised in review of #30: the
+    // folder, not whether the filename carries a hash. Those coincide today
+    // because Vite has two ways of emitting a file and only one lands here --
+    // bundled output is hashed and written to /assets, while anything in
+    // public/ is copied to the root untouched. That is why favicon.svg, which
+    // keeps its name across deployments, correctly gets no-cache.
+    //
+    // The coincidence is what to remember. Drop a large image into public/
+    // expecting asset caching and it will revalidate on every load, with the
+    // reason three folders away in a build tool's conventions.
     OnPrepareResponse = file => file.Context.Response.Headers.CacheControl =
         file.Context.Request.Path.StartsWithSegments("/assets")
             ? "public, max-age=31536000, immutable"
@@ -150,10 +161,49 @@ app.MapTransactionEndpoints();
 // a literal segment above a catch-all parameter, so /api/transactions still
 // reaches its own endpoint; this only collects what nothing else claimed.
 //
+// GET and HEAD, and deliberately not every method -- this exists only to
+// counter the fallback, so it matches exactly what the fallback matches and
+// nothing else. MapFallbackToFile answers `Allow: GET, HEAD`; no other method
+// could ever have reached index.html, so no other method needs guarding here.
+//
+// Written as MapMethods after review of #30, where the unrestricted Map was
+// found to be answering questions that routing answers better. An endpoint
+// matching every method is a candidate for every request, and a surviving
+// candidate is what stops routing from reporting *why* the real endpoint was
+// rejected. Measured on the running app, before and after:
+//
+//   DELETE /api/transactions        404  ->  405, Allow: GET, HEAD, POST
+//   POST   /api/transactions        404  ->  400, "Implicit body inferred for
+//          with no Content-Type                   parameter \"request\" but no
+//                                                 body was provided"
+//
+// The second is the worse of the two: a caller who forgot a header was being
+// sent to hunt for a typo in their URL, when the API could tell them exactly
+// what was missing. Restricting the methods leaves the real endpoint as the
+// only candidate, and routing produces both answers by itself.
+//
+// HEAD is the one that does not come out clean, and it is in the list anyway.
+// With it, `HEAD /api/transactions` is a 404 where 405 would be right -- no
+// endpoint here declares HEAD, so this catch-all is what claims it. Without it,
+// measured rather than assumed, both `HEAD /api/transactions` and
+// `HEAD /api/nope` come back **200 text/html**: the fallback serves HEAD, so
+// dropping HEAD reopens the whole hole for it. A 404 on a route that exists is
+// a smaller lie than the index page on a route that does not.
+//
+// What would fix it properly is the list endpoint answering HEAD itself, at
+// which point the literal route wins and this line never sees it. That belongs
+// to #3's endpoints rather than to this one, and is left alone on purpose.
+//
+// A request under /api with any other method matches nothing at all and gets a
+// bare 404 with no body -- honest, and not index.html.
+//
 // Results.Problem rather than Results.NotFound: the latter sends a bare status
 // with no body, and the client's readProblem is looking for the RFC 9457 shape
 // that AddProblemDetails writes everywhere else.
-app.Map("/api/{**path}", () => Results.Problem(statusCode: StatusCodes.Status404NotFound));
+app.MapMethods(
+    "/api/{**path}",
+    [HttpMethods.Get, HttpMethods.Head],
+    () => Results.Problem(statusCode: StatusCodes.Status404NotFound));
 
 // What answers "/", and every client route under it.
 //

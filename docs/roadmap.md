@@ -113,7 +113,15 @@ and a container in the loop.
       nothing in the repository was testable. The rules from #3 come first,
       because each of them fails silently when broken
 - [ ] GitHub Actions: build, test, on every push -- #22
-- [ ] Dockerfile for the web app, multi-stage, non-root user -- #23
+- [ ] Dockerfile for the web app, multi-stage, non-root user -- #23.
+      **The node stage has to produce `wwwroot` before `dotnet publish` runs**,
+      and nothing will say so if it does not: `wwwroot` is build output and no
+      longer exists in a clone, so the publish succeeds, the image builds, the
+      API answers, and only `/` is a 404. Raised in review of #30, where the
+      same failure through the other door is why `UseStaticFiles` was picked
+      over `MapStaticAssets`. Cheap insurance: after `docker build`, request `/`
+      and assert a 200 rather than trusting that the stages ran in the order
+      they are written in
 - [ ] Image pushed to `ghcr.io` -- #24
 
 Azure Container Registry was the first plan and lost to `ghcr.io`: same job,
