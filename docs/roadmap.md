@@ -52,10 +52,13 @@ part that is genuinely new, and the reason this slice is no longer "none new".
       was the first choice until the build refused it: the whole
       `Microsoft.Extensions.Validation` surface is `[Experimental]`
       (ASP0029) and needs a suppression to compile
-- [ ] A React client in TypeScript, built by Vite: one form, one list. The
-      day-boundary question that blocked this was settled on 2026-08-18 in #17
-      -- `OccurredAt` is a plain date, so grouping by day needs no timezone
-- [ ] The client served by the .NET app as static files, one image
+- [ ] A React client in TypeScript, built by Vite -- the scaffold and the dev
+      proxy are #4, the form and the list are #6. The day-boundary question
+      that blocked this was settled on 2026-08-18 in #17 -- `OccurredAt` is a
+      plain date, so grouping by day needs no timezone
+- [ ] The client served by the .NET app as static files, one image -- #20,
+      which also removes the last MVC leftovers: `HomeController`, `Views/`,
+      and the jQuery and Bootstrap under `wwwroot/lib`
 
 **Done when:** a transaction typed into the form survives a restart of both the
 app and the container.
@@ -76,9 +79,13 @@ cluster whenever it is actually wanted.
 **Skill:** the same discipline as netshift's CI, now with a compiled language
 and a container in the loop.
 
-- [ ] GitHub Actions: build, test, on every push
-- [ ] Dockerfile for the web app, multi-stage, non-root user
-- [ ] Image pushed to `ghcr.io`
+- [ ] A test project, and the first tests worth having -- #21. This was
+      missing from the plan: slice 2 asked CI to run "build, test" while
+      nothing in the repository was testable. The rules from #3 come first,
+      because each of them fails silently when broken
+- [ ] GitHub Actions: build, test, on every push -- #22
+- [ ] Dockerfile for the web app, multi-stage, non-root user -- #23
+- [ ] Image pushed to `ghcr.io` -- #24
 
 Azure Container Registry was the first plan and lost to `ghcr.io`: same job,
 but ACR Basic costs around 5 USD a month while GitHub's registry is free for
@@ -125,6 +132,11 @@ is run, and the difference should be understood rather than glossed over.
 
 1. [ ] **Evals first.** 30-50 hand-labelled transactions with the category they
        should get. Metric and baseline defined **before** the first model call
+       -- #25, and it is deliberately open now rather than when slice 4 starts.
+       It is the only item in the project that depends on no code at all, and
+       the only one that cannot be caught up later: data does not accumulate
+       retroactively. Starting it now also forces the app to be used weekly,
+       which is the habit netshift never formed
 2. [ ] **A rules baseline.** String matching on the description. Score it.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat

@@ -62,6 +62,11 @@ usings and imports, typos, boilerplate, running linters and tests.
   messages, UI strings. It is the working language of the ecosystem, and
   Windows PowerShell 5.1 reads `.ps1` files as ANSI unless they carry a UTF-8
   BOM, so non-ASCII in tooling breaks the parser in miserable ways.
+  **This extends to everything on GitHub**: issue titles and bodies, pull
+  request descriptions, review comments. They are not literally in the
+  repository, which is why this had to be said out loud on 2026-08-23. The
+  chat conversation is Russian and stays that way -- it is not published, and
+  nobody has to read it later.
 - .NET 10 (LTS). Python >= 3.12 with `uv` when the categorizer arrives.
 - Money is `decimal`, never `double` or `float`. Amounts are stored with their
   currency; there is no implicit conversion anywhere.
@@ -161,6 +166,10 @@ much as for the owner.
    (`feature/transaction-model`), and opens a pull request saying `Closes #N`.
 3. **Claude reviews the diff.** The rules above still hold: name the
    alternative that lost, show the real error output rather than paraphrasing.
+   Where there is something to run, run it: the review of #19 read correct and
+   the endpoint still returned an amount the database had rounded away, which
+   no amount of reading the diff would have shown. A review of an endpoint
+   sends requests to it; a review of a schema reads the running database.
 4. Merge closes the issue.
 
 Nobody commits to `main` directly. CI runs on the pull request, which is the
@@ -209,6 +218,23 @@ easy to lose. All true as of 2026-08-11.
   find any relation named "transactions"`, which reads like the migration never
   ran. `README.md` has the same connection details for a desktop client.
   Docker Desktop has to be running first; it usually is not.
+- **Node is the LTS line, installed with `winget install OpenJS.NodeJS.LTS`**
+  (24.19.0 as of 2026-08-23), not `OpenJS.NodeJS`, which is the current major
+  and supported for six months against the LTS thirty. The same reasoning that
+  picked .NET 10 LTS. Two things learned installing it: the winget id has to be
+  the full one -- a short `publisher.name` guess matches `winget search` and
+  fails `winget install` -- and a tool installed while a process is already
+  running is invisible to that process, because PATH is read at start. Claude's
+  shells therefore cannot see a program the owner just installed until the
+  session is restarted.
+- **The app listens on 5150 (http) and 7063 (https)**, and the pipeline calls
+  `UseHttpsRedirection`, so anything sent to 5150 is answered with a 307. This
+  is why `LandMoney.Web.http` uses the https port, and why the Vite dev proxy
+  in #4 has to target `https://localhost:7063` with `secure: false` rather than
+  the http port the issue originally suggested: a proxy does not follow the
+  redirect, it hands the 307 to the browser, which then makes exactly the
+  cross-origin request the proxy existed to avoid. `secure: false` is for the
+  development certificate, which Node will not otherwise accept.
 - **The connection string lives in user-secrets**, never in a committed file,
   and carries `Timeout` and `Command Timeout`. A network client without a
   timeout turns an outage into a hang.
