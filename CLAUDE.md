@@ -158,6 +158,80 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   VMs. The skill is worth having, and when it is wanted the honest way to
   learn it is a local cluster (`kind`, or the one built into Docker Desktop),
   which speaks the same API for free. Container Apps stays.
+- **Tests: xUnit, in `tests/LandMoney.Web.Tests`, decided 2026-08-24** (#21).
+  The template's default, and the honest reason is that there was no argument to
+  have: xUnit, NUnit and MSTest all do this job, the SDK ships a template for
+  each, and the one whose `[Fact]`/`[Theory]` split is written most widely is
+  worth more than a comparison nobody will reread.
+
+  What was decided is what stayed out. **`Microsoft.AspNetCore.Mvc.Testing` and
+  `WebApplicationFactory` were not added.** An `IEndpointFilter` is an ordinary
+  object with one method, and `EndpointFilterInvocationContext.Create` builds its
+  argument, so every rule #21 listed is reachable without starting a server. What
+  that leaves untested is real: that the filter hangs on the POST and not on the
+  group, and that a 400 leaving the process carries the body `AddProblemDetails`
+  writes. Both were checked by hand against the running app instead, and the day
+  they need checking automatically is the day the package earns its place -- #23
+  already has a candidate in "after `docker build`, request `/` and assert a
+  200". **`Microsoft.Extensions.TimeProvider.Testing` stayed out** for the
+  smaller reason that a frozen clock is six lines.
+
+  The tests need no Postgres, no Docker and no network: nothing in them touches
+  `AppDbContext`. Worth knowing for #22, where it means the job is `dotnet test`
+  and not `dotnet test` plus a service container.
+
+  A `FrameworkReference` flows through a `ProjectReference`, so referencing the
+  web project is all it takes to reach `DefaultHttpContext`, `TypedResults` and
+  `ServiceCollection`. Nothing has to be declared for them.
+
+  **One version pin that looks arbitrary and is not.** The test project carries
+  `Microsoft.EntityFrameworkCore.Relational` and uses no EF at all.
+  `Microsoft.EntityFrameworkCore.Design` is what raises the EF graph to 10.0.10
+  in `LandMoney.Web` -- the Npgsql provider only asks for 10.0.4 -- and its
+  `PrivateAssets="all"` correctly stops that flowing downstream, so the test
+  project resolved 10.0.4 against an assembly compiled for 10.0.10: 66 MSB3277
+  warnings, and a `FileLoadException` waiting for the first test that touches EF,
+  since assembly binding rolls forward and never down. The real answer is
+  `Directory.Packages.props`, and it is what to reach for when there is a third
+  project; it was not worth a repository-wide change inside #21. The version has
+  to be kept equal to the web project's, and the warnings come back and say so if
+  it drifts, which is the reason for not suppressing them instead.
+
+- **`TimeProvider` reached through `validationContext.GetService`, decided
+  2026-08-24** (#21). `PlausibleDateAttribute` read `DateTime.UtcNow` inside
+  itself, and its own comment named this as the thing to fix "the day this gains
+  a test". A DataAnnotations attribute is constructed by the runtime out of the
+  arguments in its brackets, so there is no constructor to inject into and a
+  service locator is the only door there is. `ValidationFilter<T>` now builds its
+  `ValidationContext` with `HttpContext.RequestServices`, and `Program.cs`
+  registers `TimeProvider.System` -- **which the framework does not do by
+  default**, measured rather than assumed. Behaviour is unchanged either way; what
+  the registration buys is that production and the tests walk the same path
+  instead of production always taking the fallback.
+
+  What lost: testing relative to `DateTime.UtcNow`, which needs no production
+  change at all. A test that computes today the way the attribute does asserts
+  only that two copies of one expression agree, and it would keep passing if the
+  attribute switched to `DateTime.Today` -- the exact mistake the comment on that
+  line exists to prevent. It also cannot ask what happens on a named day, and two
+  tests live on named days: a clock at 23:00 UTC whose local zone is UTC+14, where
+  reading local time lands on tomorrow, and 29 February, where `DateOnly.AddYears`
+  clamps the five-year bound to the 28th.
+
+- **A test suite is checked by breaking the code.** #21 asked for it in as many
+  words -- "a test that cannot fail is decoration" -- and the answer was 24
+  mutations, one rule at a time, each reverted before the next. Every mutation was
+  caught; 48 of 49 tests failed under at least one. Three things that only doing
+  it revealed. The first sweep reverted with `git checkout --` and threw away the
+  uncommitted production changes, then ran twelve more mutations against the old
+  code and reported nonsense -- **revert from a file copy, or commit first**. A
+  substitution without `/g` hits the first match in the file, which for
+  `validateAllProperties: true` was the *comment* above the call, so the mutation
+  that mattered most silently changed nothing. And a rule guarded twice cannot be
+  killed by a one-line mutation: the null check in `PlausibleDateAttribute` is
+  redundant with the type check below it, which is fine, and means the mutation
+  has to make the rule fail rather than merely removing a line.
+
 - **Build and deploy: GitHub Actions.** Public repository, so the minutes are
   free.
 - **Image registry: `ghcr.io`.** Azure Container Registry does the same job
@@ -312,6 +386,11 @@ easy to lose. All true as of 2026-08-11.
   just not where the proxy looks, so the screen reports it unreachable and is
   right. Read the port off `Now listening on:` rather than trusting that it
   started.
+- **`dotnet test LandMoney.slnx` runs everything.** `dotnet test` reads an
+  `.slnx` directly, so there is one command and no project path to remember.
+  It needs nothing running: the suite is unit tests over the validation rules,
+  and the database is never opened.
+
 - **The connection string lives in user-secrets**, never in a committed file,
   and carries `Timeout` and `Command Timeout`. A network client without a
   timeout turns an outage into a hang.

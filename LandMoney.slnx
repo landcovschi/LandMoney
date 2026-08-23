@@ -2,4 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/LandMoney.Web/LandMoney.Web.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LandMoney.Web.Tests/LandMoney.Web.Tests.csproj" />
+  </Folder>
 </Solution>

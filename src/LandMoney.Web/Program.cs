@@ -20,6 +20,22 @@ var builder = WebApplication.CreateBuilder(args);
 // which api/transactions.ts has a branch for.
 builder.Services.AddProblemDetails();
 
+// TimeProvider is not registered by the framework. Measured rather than assumed
+// while writing #21: a default WebApplication answers null for it.
+//
+// The registration exists so that production and the tests walk the same path.
+// PlausibleDateAttribute finds its clock with
+// validationContext.GetService(typeof(TimeProvider)) -- the only door an
+// attribute has -- and ValidationFilter<T> hands it this container to ask. With
+// nothing registered the lookup always misses and the attribute always takes its
+// fallback, so the lookup would be a line only tests ever exercise. That is the
+// shape of code that works until the day it matters.
+//
+// Nothing about today's behaviour changes: the fallback is TimeProvider.System,
+// which is what is being registered. What changes is that swapping the clock is
+// now one line here rather than an edit to the attribute.
+builder.Services.AddSingleton(TimeProvider.System);
+
 // GetConnectionString returns null when the key is missing or misspelled, and
 // UseNpgsql accepts null without complaint -- the application would then start
 // happily and fail at the first query with an error about the connection rather

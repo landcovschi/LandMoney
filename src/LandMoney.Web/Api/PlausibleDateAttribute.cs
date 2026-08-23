@@ -17,12 +17,26 @@ namespace LandMoney.Web.Api;
 // half the reasoning. The cost is that neither bound can be applied without the
 // other, which nothing here wants to do.
 //
-// What this gives up: DateTime.UtcNow is read inside, so the rule cannot be
-// tested at a chosen date without moving the clock. TimeProvider is the modern
-// answer, but DataAnnotations attributes are constructed by the runtime and
-// cannot take an injected dependency -- reaching one means a service locator
-// through validationContext.GetService, worth doing the day this gains a test
-// and not before.
+// The clock is a TimeProvider found through validationContext.GetService. That
+// is a service locator, and it is the only way an attribute can take a
+// dependency at all: DataAnnotations attributes are constructed by the runtime
+// out of the arguments in their brackets, so there is no constructor to inject
+// into. The previous version of this comment said this was "worth doing the day
+// this gains a test"; #21 is that day.
+//
+// What lost: testing relative to DateTime.UtcNow, needing no production change.
+// It fails at two things. A test that computes today the same way the attribute
+// does is asserting that two copies of one expression agree -- it would keep
+// passing if this switched to DateTime.Today, which is the exact mistake the
+// comment inside IsValid exists to prevent, and which local time hides on this
+// machine for all but a few hours a day. And it cannot ask what happens on a
+// chosen date, so the leap-day clamp in DateOnly.AddYears has nowhere to be
+// written down.
+//
+// The fallback to TimeProvider.System is what keeps the attribute usable from a
+// bare Validator.TryValidateObject, where the ValidationContext carries no
+// service provider. ValidationFilter<T> passes the request's, and Program.cs
+// registers TimeProvider.System into it, so the two paths agree.
 [AttributeUsage(AttributeTargets.Property | AttributeTargets.Parameter, AllowMultiple = false)]
 public sealed class PlausibleDateAttribute : ValidationAttribute
 {
@@ -58,12 +72,23 @@ public sealed class PlausibleDateAttribute : ValidationAttribute
             return ValidationResult.Success;
         }
 
-        // FromDateTime(DateTime.UtcNow) rather than DateTime.Today, and the
-        // difference is not cosmetic: Today reads the machine's local zone. In a
-        // Container Apps container that is UTC and on this machine it is not, so
-        // the rule would agree with itself here and quietly shift by a day once
-        // deployed -- passing every local test on the way.
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        // GetService returns null when nothing is registered and when the
+        // ValidationContext was built without a service provider at all, which
+        // is what `as` plus the fallback is for. A cast would throw on the first
+        // and a null-reference on the second.
+        var clock = validationContext.GetService(typeof(TimeProvider)) as TimeProvider
+            ?? TimeProvider.System;
+
+        // GetUtcNow().UtcDateTime rather than GetLocalNow() or DateTime.Today,
+        // and the difference is not cosmetic: both of those read a local zone.
+        // In a Container Apps container that is UTC and on this machine it is
+        // not, so the rule would agree with itself here and quietly shift by a
+        // day once deployed -- passing every local test on the way. TimeProvider
+        // does not remove that trap, it renames it, which is why one test pins a
+        // clock whose LocalTimeZone is UTC+14 at an instant late in the UTC day:
+        // reaching for the local time there lands on tomorrow and the test says
+        // so.
+        var today = DateOnly.FromDateTime(clock.GetUtcNow().UtcDateTime);
         var latest = today.AddDays(MaxDaysAhead);
         var earliest = today.AddYears(-MaxYearsBehind);
 
