@@ -1,7 +1,9 @@
 # LandMoney
 
-Personal spending tracker. ASP.NET MVC on top of Postgres, deployed to Azure,
-with a Python service for transaction categorisation arriving later.
+Personal spending tracker. An ASP.NET Core Web API on top of Postgres with a
+React and TypeScript client, deployed to Azure, and a Python service for
+transaction categorisation arriving later. The client is built into the API's
+`wwwroot` and served by it: one origin, one image, one deployment.
 
 It is a real application -- meant to be used, not demonstrated -- but the
 reason it exists is a move from .NET development into AI engineering. See
@@ -10,6 +12,7 @@ reason it exists is a move from .NET development into AI engineering. See
 ## Requirements
 
 - .NET 10 SDK
+- Node 24 LTS, for the client
 - Docker Desktop
 - Azure CLI (from slice 3 onwards)
 
@@ -18,9 +21,27 @@ reason it exists is a move from .NET development into AI engineering. See
 ```powershell
 copy .env.example .env
 docker compose up -d
+dotnet tool restore
+dotnet ef database update --project src\LandMoney.Web
 ```
 
-The rest arrives with slice 1.
+The connection string lives in user-secrets and is not in any committed file;
+`Program.cs` fails at startup with the command to set it if it is missing.
+
+Then build the client once and run the app on its own:
+
+```powershell
+npm ci --prefix src\landmoney.client
+npm run build --prefix src\landmoney.client
+dotnet run --project src\LandMoney.Web
+```
+
+`http://localhost:5150` is the whole application. `npm run build` writes into
+`src\LandMoney.Web\wwwroot`, which is build output and git-ignored -- a clone
+that skips it gets a 404 at `/`, because there is genuinely nothing to serve.
+
+For working on the client itself, run the Vite dev server beside the API and use
+its port instead; `src/landmoney.client/README.md` has the details.
 
 ## Looking into the database
 

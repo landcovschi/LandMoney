@@ -5,6 +5,11 @@ React and TypeScript, built by Vite. In production these files are served by the
 served by Vite on its own port, and `/api` is forwarded to the API by the dev
 proxy in `vite.config.ts`.
 
+There is no `dist/`. `build.outDir` points at `../LandMoney.Web/wwwroot`, so
+`npm run build` writes straight into the folder the .NET app serves, with no
+copy step to run and none to forget -- see #20 and the comment in
+`vite.config.ts` for what that costs.
+
 ## Requirements
 
 Node 24. The number lives in `.nvmrc`, so `nvm use` and `fnm use` pick it up
@@ -72,17 +77,65 @@ and `applicationUrl` did not, so the app ran in Development on port 5000.
 `applicationUrl` is the tooling's spelling of `ASPNETCORE_URLS`, and it is the
 translation step that failed. Both profiles now name the port a second time
 under `environmentVariables`, in the form the app reads directly, so there is
-nothing left to translate. `launchBrowser` is off there too -- it opened the
-leftover Razor page on the API port, which is not this project's screen.
+nothing left to translate.
+
+`launchBrowser` stays on, and this sentence used to claim the opposite -- it was
+never true of `launchSettings.json`, where both profiles have always had it set.
+The complaint behind it was real: F5 opened a browser on the API port and the
+API had no screen there, only the leftover Razor page. #20 is what makes the
+setting right rather than wrong, because the API port is now where the client
+is. It is still the wrong port for working *on* the client -- that is 5173, with
+hot reload -- and the page F5 opens is whatever `npm run build` last produced.
+
+## Running the whole thing without Vite
+
+`npm run build` once, then `dotnet run` on its own -- no dev server anywhere:
+
+```powershell
+npm run build
+dotnet run --project ..\LandMoney.Web
+```
+
+`http://localhost:5150` is then the client and the API on one origin, which is
+how it is deployed. This is worth doing before opening a pull request: it is the
+only arrangement that exercises `UseStaticFiles`, the fallback and the cache
+headers, and the dev server exercises none of them.
+
+Two things it will show that `npm run dev` never does. A stale build is served
+silently -- `wwwroot` holds whatever the last `npm run build` produced, and
+nothing reports its age. And `/` answers 404 in a clone where the client has not
+been built yet: the API is fine and still answers, there is simply no
+`index.html`, and that is the intended answer rather than a fault to work
+around.
+
+### Deleting `wwwroot` after a build stops the app from starting
+
+Not the same thing as never having built it, and it fails much louder. The SDK
+records the folder in a static web assets manifest while compiling, and the
+manifest is read during `WebApplication.CreateBuilder` -- so a folder that was
+there at build time and is gone at run time throws before a single line of
+`Program.cs` executes:
+
+```
+Unhandled exception. System.IO.DirectoryNotFoundException: D:\Work Home\LandMoney\src\LandMoney.Web\wwwroot\
+   at Microsoft.Extensions.FileProviders.PhysicalFileProvider..ctor(String root, ExclusionFilters filters)
+   at Microsoft.AspNetCore.Hosting.StaticWebAssets.StaticWebAssetsLoader.UseStaticWebAssetsCore(...)
+   at Microsoft.AspNetCore.Builder.WebApplication.CreateBuilder(String[] args)
+```
+
+Nothing in that names the client, and `dotnet build` will not fix it on its own
+because the manifest is only regenerated when the build is not incremental.
+Either put the folder back with `npm run build`, or delete `obj/` and `bin/` so
+the next build writes a manifest that does not mention it.
 
 ## Scripts
 
 | Command | What it does |
 |---|---|
 | `npm run dev` | dev server on 5173, with HMR and the `/api` proxy |
-| `npm run build` | type-check with `tsc -b`, then bundle into `dist/` |
+| `npm run build` | type-check with `tsc -b`, then bundle into `../LandMoney.Web/wwwroot`, emptying it first |
 | `npm run lint` | oxlint |
-| `npm run preview` | serve the built `dist/` locally |
+| `npm run preview` | serve the build output locally. Of limited use now that the .NET app serves the same folder, and with no `/api` proxy behind it |
 
 `vite` strips TypeScript types without checking them, which is why `build` runs
 `tsc -b` first and why a type error does not stop `npm run dev`.
