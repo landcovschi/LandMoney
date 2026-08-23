@@ -228,13 +228,25 @@ easy to lose. All true as of 2026-08-11.
   shells therefore cannot see a program the owner just installed until the
   session is restarted.
 - **The app listens on 5150 (http) and 7063 (https)**, and the pipeline calls
-  `UseHttpsRedirection`, so anything sent to 5150 is answered with a 307. This
-  is why `LandMoney.Web.http` uses the https port, and why the Vite dev proxy
-  in #4 has to target `https://localhost:7063` with `secure: false` rather than
-  the http port the issue originally suggested: a proxy does not follow the
-  redirect, it hands the 307 to the browser, which then makes exactly the
-  cross-origin request the proxy existed to avoid. `secure: false` is for the
-  development certificate, which Node will not otherwise accept.
+  `UseHttpsRedirection`. Under the `https` launch profile anything sent to 5150
+  is therefore answered with a 307 to 7063, which is why `LandMoney.Web.http`
+  uses the https port. It is also the trap a dev proxy has to get past: a proxy
+  does not follow the redirect, it hands the 307 to the browser, which then
+  makes exactly the cross-origin request the proxy existed to avoid, against a
+  self-signed certificate.
+
+  **Settled in #4: the Vite proxy targets `http://localhost:5150`, and the API
+  runs under `--launch-profile http`.** That profile declares no https port, so
+  `UseHttpsRedirection` finds none, logs `Failed to determine the https port for
+  redirect.` and degrades to a no-op -- there is no redirect left to outrun.
+  What lost: `https://localhost:7063` with `secure: false`, which also works and
+  was the first answer written down here. It moves knowledge of the development
+  certificate into the client's config to solve a problem the `http` profile
+  does not have. The price of the route taken is that the requirement is
+  invisible -- Visual Studio's run dropdown defaults to `https` for a project
+  that has one, and the symptom is a CORS error naming neither the profile nor
+  the redirect. It is written down in `src/landmoney.client/README.md` for that
+  reason.
 - **The connection string lives in user-secrets**, never in a committed file,
   and carries `Timeout` and `Command Timeout`. A network client without a
   timeout turns an outage into a hang.
