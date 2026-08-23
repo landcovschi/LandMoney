@@ -1,0 +1,4 @@
+# Kept so the folder survives a fresh clone. It is empty on purpose: the Razor
+# template's css, js, jQuery and Bootstrap left with the pages that used them,
+# and #20 fills this folder with the built React client, which is what
+# MapStaticAssets in Program.cs is waiting to serve.

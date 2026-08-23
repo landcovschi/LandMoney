@@ -4,8 +4,21 @@ using Microsoft.EntityFrameworkCore; // UseNpgsql
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-builder.Services.AddControllersWithViews();
+// AddProblemDetails, and no AddControllersWithViews above it. The MVC services
+// went with the Razor pages they existed for; what is left is minimal APIs,
+// which need nothing registered.
+//
+// This is what UseExceptionHandler below writes when something throws: an RFC
+// 9457 body, the same shape ValidationFilter<T> already answers a bad request
+// with. Without it the handler has no formatter and an unhandled exception
+// leaves an empty 500 -- a status with nothing in it, where the client's
+// readProblem is looking for something to show.
+//
+// Worth knowing what else it turns on, because it is easy to mistake for a bug
+// later: with this registered, minimal APIs also give the model binder's own
+// 400 a body. Until now a request missing a `required` member got a bare 400,
+// which api/transactions.ts has a branch for.
+builder.Services.AddProblemDetails();
 
 // GetConnectionString returns null when the key is missing or misspelled, and
 // UseNpgsql accepts null without complaint -- the application would then start
@@ -31,7 +44,14 @@ var app = builder.Build();
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
 {
-    app.UseExceptionHandler("/Home/Error");
+    // No path argument any more. UseExceptionHandler("/Home/Error") re-executed
+    // the pipeline against a Razor action that no longer exists, which would
+    // have turned every unhandled exception into a 404 about the error page --
+    // the failure mode where the thing reporting failures is the thing that
+    // broke. The parameterless overload pairs with AddProblemDetails and writes
+    // the body itself.
+    app.UseExceptionHandler();
+
     // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
     app.UseHsts();
 
@@ -67,24 +87,35 @@ if (!app.Environment.IsDevelopment())
 
 app.UseRouting();
 
-app.UseAuthorization();
-
+// Serves whatever is in wwwroot, which is nothing at all today -- the folder was
+// emptied with the Razor pages that referenced it, jQuery and Bootstrap
+// included. It stays because #20 fills that folder with the built React client,
+// and this is the line that will serve it.
 app.MapStaticAssets();
 
-app.MapControllerRoute(
-    name: "default",
-    pattern: "{controller=Home}/{action=Index}/{id?}")
-    .WithStaticAssets();
-
-// Mapped after the MVC route and it makes no difference: routing matches on the
-// pattern, not on registration order, and /api/transactions cannot be confused
-// with {controller}/{action}/{id?}. The MVC route and the Razor views under it
-// are leftovers from the two Razor days and go away in #20, which is the issue
-// that puts the built React client in wwwroot and therefore has to decide what
-// answers "/". This said #6 until #6 was done and did not touch them: #6 is the
-// React screen, served by Vite on its own port, and it never asks this app for
-// a page at all.
 app.MapTransactionEndpoints();
 
+// What answers "/" in development, and only in development.
+//
+// The client is served by Vite on its own port while developing, so this
+// application has no page to give anyone -- it is an API. Before this it
+// answered with the Razor template's "Welcome" page, which was worse than
+// nothing: pressing F5 and being shown a stranger's landing page suggests the
+// wrong thing is running.
+//
+// A redirect rather than a 404, because the browser Visual Studio opens on F5
+// lands here, and sending it where the application actually is costs one line.
+// It is deliberately not a general fallback -- only the root -- so a wrong URL
+// still 404s honestly instead of being bounced to a dev server that may not be
+// up.
+//
+// #20 replaces this with index.html out of wwwroot, at which point "/" is the
+// client on every environment and this branch goes away. The port is Vite's
+// default and is written down in src/landmoney.client/README.md; if it ever
+// moves, both change together or F5 lands on nothing.
+if (app.Environment.IsDevelopment())
+{
+    app.MapGet("/", () => Results.Redirect("http://localhost:5173"));
+}
 
 app.Run();

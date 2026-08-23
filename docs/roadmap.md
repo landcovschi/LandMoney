@@ -61,9 +61,17 @@ part that is genuinely new, and the reason this slice is no longer "none new".
       #6 found that reading the diff would not have is that the dev proxy
       answers a refused connection with its own 502, so "the API is not
       running" never reaches the browser as a failed `fetch`
-- [ ] The client served by the .NET app as static files, one image -- #20,
-      which also removes the last MVC leftovers: `HomeController`, `Views/`,
-      and the jQuery and Bootstrap under `wwwroot/lib`
+- [ ] The client served by the .NET app as static files, one image -- #20.
+      **The MVC leftovers are already gone**, pulled forward out of #20 on
+      2026-08-23 rather than waiting for it: `HomeController`, `Views/`,
+      `ErrorViewModel`, and the whole of `wwwroot` including the jQuery and
+      Bootstrap under `lib`. The reason was not tidiness -- F5 in Visual Studio
+      opened the Razor template's "Welcome" page on the API port, and being
+      shown a stranger's landing page is a good way to believe the wrong
+      application is running. What #20 still owns is the part that needs the
+      built client to exist: `index.html` out of `wwwroot`, and the fallback for
+      client-side routes. Until then `/` redirects to the Vite dev server, in
+      Development only
 
 **Done when:** a transaction typed into the form survives a restart of both the
 app and the container.

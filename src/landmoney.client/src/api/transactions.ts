@@ -12,9 +12,12 @@ import type { FieldErrors, NewTransaction, Transaction } from './types'
 // This is a backstop against a hang, not a latency budget.
 const REQUEST_TIMEOUT_MS = 10_000
 
-// One path for both verbs, written once. No trailing slash: the group is
-// MapGroup("/api/transactions") and both routes are "/", which ASP.NET combines
-// back into the bare path -- the same one LandMoney.Web.http posts to.
+// One path for both verbs, written once, and no trailing slash. The route the
+// server registers does have one -- MapGroup("/api/transactions") combined with
+// MapPost("/") produces the pattern "/api/transactions/", which is visible in
+// the endpoint name ASP.NET reports. It matches either way, because routing
+// treats a trailing slash as optional, which is the only reason this and
+// LandMoney.Web.http can both post to the bare path.
 const TRANSACTIONS_URL = '/api/transactions'
 
 /**
@@ -160,11 +163,18 @@ function unreachable(): ApiError {
 }
 
 /** The parts of an RFC 9457 problem document this client reads. */
-// Every field optional, because two different things produce a non-2xx here and
-// only one of them fills these in. ValidationFilter<T> returns a full
-// application/problem+json with `errors`; a failure in the model binder -- a
-// missing `required` member, malformed JSON -- returns a bare 400 with no body
-// at all, because Program.cs does not call AddProblemDetails().
+// Every field optional, because several things produce a non-2xx here and they
+// fill in different parts. ValidationFilter<T> returns `errors` keyed by field.
+// A failure in the model binder -- a missing `required` member, malformed JSON
+// -- returns `detail` and no `errors`, which is why `toApiError` falls back
+// through detail and then title rather than assuming the dictionary is there.
+//
+// That second case used to be a bare 400 with no body at all. Program.cs calls
+// AddProblemDetails() as of the day the Razor leftovers went, because
+// UseExceptionHandler needs it to have anything to write, and giving the binder
+// a body came with it. Still keep the null path below: a proxy or the host can
+// answer with something that is not a problem document at all, and 502 from the
+// dev proxy is exactly that.
 interface Problem {
   title?: string
   detail?: string
