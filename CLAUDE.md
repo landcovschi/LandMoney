@@ -227,26 +227,42 @@ easy to lose. All true as of 2026-08-11.
   running is invisible to that process, because PATH is read at start. Claude's
   shells therefore cannot see a program the owner just installed until the
   session is restarted.
-- **The app listens on 5150 (http) and 7063 (https)**, and the pipeline calls
-  `UseHttpsRedirection`. Under the `https` launch profile anything sent to 5150
-  is therefore answered with a 307 to 7063, which is why `LandMoney.Web.http`
-  uses the https port. It is also the trap a dev proxy has to get past: a proxy
-  does not follow the redirect, it hands the 307 to the browser, which then
-  makes exactly the cross-origin request the proxy existed to avoid, against a
-  self-signed certificate.
+- **The app listens on 5150 (http) and 7063 (https)**, and the Vite dev proxy
+  targets `http://localhost:5150`. Both launch profiles publish 5150, so either
+  one works, from a terminal or from Visual Studio with the debugger attached.
 
-  **Settled in #4: the Vite proxy targets `http://localhost:5150`, and the API
-  runs under `--launch-profile http`.** That profile declares no https port, so
-  `UseHttpsRedirection` finds none, logs `Failed to determine the https port for
-  redirect.` and degrades to a no-op -- there is no redirect left to outrun.
-  What lost: `https://localhost:7063` with `secure: false`, which also works and
-  was the first answer written down here. It moves knowledge of the development
-  certificate into the client's config to solve a problem the `http` profile
-  does not have. The price of the route taken is that the requirement is
-  invisible -- Visual Studio's run dropdown defaults to `https` for a project
-  that has one, and the symptom is a CORS error naming neither the profile nor
-  the redirect. It is written down in `src/landmoney.client/README.md` for that
-  reason.
+  **`UseHttpsRedirection` is gated to non-Development, decided 2026-08-23.**
+  This replaces the answer #4 settled on, which was to keep the redirect and
+  always pass `--launch-profile http` -- a profile with no https port, so the
+  redirect found none and degraded to a no-op. That worked and it made the
+  requirement invisible: Visual Studio's run dropdown prefers `https` for a
+  project that has one and cannot be told otherwise, so F5 broke the client and
+  the symptom was a CORS error naming neither the profile nor the redirect. A
+  rule that only holds when someone remembers a flag is not a rule.
+
+  The line now sits beside `UseHsts`, which was already gated for the same
+  reason: both exist to keep real traffic out of the clear, and in development
+  there is none -- two loopback ports and a certificate this machine issued to
+  itself. Having one gated and not the other was the actual inconsistency.
+
+  What lost, again: the proxy pointing at `https://localhost:7063` with
+  `secure: false`. It works, and it moves knowledge of the development
+  certificate into the client's config while teaching a browser client to accept
+  a certificate it did not verify -- a setting to keep out of a file that ships.
+  The price of the route taken is that development no longer exercises the
+  redirect, so a mistake in it would first appear in production; small, because
+  behind Container Apps the ingress terminates TLS and http never reaches the
+  process.
+
+  **A port other than 5150 means the profile was not applied.** Starting
+  `bin\Debug\net10.0\LandMoney.Web.exe` directly gets 5000: `launchSettings.json`
+  is a tooling file that `dotnet run` and the IDE read and pass on through
+  environment variables, and the app has never heard of it. Visual Studio does
+  launch that same exe, which is why a VS session shows a bare exe in its command
+  line and still listens on 5150. The API is up and answering the whole time,
+  just not where the proxy looks, so the screen reports it unreachable and is
+  right. Read the port off `Now listening on:` rather than trusting that it
+  started.
 - **The connection string lives in user-secrets**, never in a committed file,
   and carries `Timeout` and `Command Timeout`. A network client without a
   timeout turns an outage into a hang.

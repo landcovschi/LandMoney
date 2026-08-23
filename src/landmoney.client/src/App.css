@@ -1,184 +1,211 @@
-.counter {
-  font-size: 16px;
-  padding: 5px 10px;
-  border-radius: 5px;
-  color: var(--accent);
-  background: var(--accent-bg);
-  border: 2px solid transparent;
-  transition: border-color 0.3s;
-  margin-bottom: 24px;
+/* The one screen: a form, then the list. Tokens are in index.css. */
 
-  &:hover {
-    border-color: var(--accent-border);
-  }
-  &:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-}
-
-.hero {
-  position: relative;
-
-  .base,
-  .framework,
-  .vite {
-    inset-inline: 0;
-    margin: 0 auto;
-  }
-
-  .base {
-    width: 170px;
-    position: relative;
-    z-index: 0;
-  }
-
-  .framework,
-  .vite {
-    position: absolute;
-  }
-
-  .framework {
-    z-index: 1;
-    top: 34px;
-    height: 28px;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
-      scale(1.4);
-  }
-
-  .vite {
-    z-index: 0;
-    top: 107px;
-    height: 26px;
-    width: auto;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
-      scale(0.8);
-  }
-}
-
-#center {
+main {
+  width: 900px;
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 25px;
-  place-content: center;
-  place-items: center;
-  flex-grow: 1;
-
-  @media (max-width: 1024px) {
-    padding: 32px 20px 24px;
-    gap: 18px;
-  }
+  gap: 28px;
 }
 
-#next-steps {
+header p {
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+/* --- the form ------------------------------------------------------------ */
+
+.entry {
   display: flex;
-  border-top: 1px solid var(--border);
-  text-align: left;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
 
-  & > div {
-    flex: 1 1 0;
-    padding: 32px;
-    @media (max-width: 1024px) {
-      padding: 24px 20px;
-    }
-  }
+.fields {
+  display: grid;
+  gap: 16px;
 
-  .icon {
-    margin-bottom: 16px;
-    width: 22px;
-    height: 22px;
-  }
+  /* Four named columns, so each field keeps a width that suits it: a date and
+     an amount are short and fixed, a description takes what is left. The
+     alternative -- repeat(auto-fit, minmax(...)) -- reflows on its own and
+     gives the description the same width as the currency, which is the one
+     thing this layout is for. */
+  grid-template-columns: max-content minmax(9ch, 12ch) max-content 1fr;
+  align-items: start;
+}
 
-  @media (max-width: 1024px) {
-    flex-direction: column;
-    text-align: center;
+/* One breakpoint, and everything stacks. Two columns of half-width inputs on a
+   phone is worse than one column of full-width ones. */
+@media (max-width: 720px) {
+  .fields {
+    grid-template-columns: 1fr;
   }
 }
 
-#docs {
-  border-right: 1px solid var(--border);
-
-  @media (max-width: 1024px) {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-  }
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 
-#next-steps ul {
+.field label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.field input,
+.field select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  min-width: 0;
+}
+
+.field input:focus-visible,
+.field select:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Driven by aria-invalid rather than a class of its own. The attribute is
+   already there for the screen reader, so the two cannot drift apart -- a
+   field cannot look wrong while being announced as fine. */
+.field [aria-invalid='true'] {
+  border-color: var(--danger-border);
+}
+
+.field-amount input {
+  font-family: var(--mono);
+  text-align: right;
+}
+
+.field-error {
   list-style: none;
+  margin: 0;
   padding: 0;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+button {
+  align-self: flex-start;
+  padding: 9px 16px;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  color: var(--accent);
+  background: var(--accent-bg);
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent-border);
+}
+
+button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+/* --- states -------------------------------------------------------------- */
+
+.banner {
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.banner-error {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
   display: flex;
-  gap: 8px;
-  margin: 32px 0 0;
-
-  .logo {
-    height: 18px;
-  }
-
-  a {
-    color: var(--text-h);
-    font-size: 16px;
-    border-radius: 6px;
-    background: var(--social-bg);
-    display: flex;
-    padding: 6px 12px;
-    align-items: center;
-    gap: 8px;
-    text-decoration: none;
-    transition: box-shadow 0.3s;
-
-    &:hover {
-      box-shadow: var(--shadow);
-    }
-    .button-icon {
-      height: 18px;
-      width: 18px;
-    }
-  }
-
-  @media (max-width: 1024px) {
-    margin-top: 20px;
-    flex-wrap: wrap;
-    justify-content: center;
-
-    li {
-      flex: 1 1 calc(50% - 8px);
-    }
-
-    a {
-      width: 100%;
-      justify-content: center;
-      box-sizing: border-box;
-    }
-  }
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-#spacer {
-  height: 88px;
-  border-top: 1px solid var(--border);
-  @media (max-width: 1024px) {
-    height: 48px;
-  }
+.banner-error button {
+  color: var(--danger);
+  background: transparent;
+  border-color: var(--danger-border);
 }
 
-.ticks {
-  position: relative;
+.banner-error button:hover:not(:disabled) {
+  border-color: var(--danger);
+}
+
+.list-status {
+  padding: 24px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  text-align: center;
+  color: var(--muted);
+}
+
+/* --- the list ------------------------------------------------------------ */
+
+.transactions {
   width: 100%;
+  border-collapse: collapse;
+}
 
-  &::before,
-  &::after {
-    content: '';
-    position: absolute;
-    top: -4.5px;
-    border: 5px solid transparent;
-  }
+.transactions caption {
+  text-align: left;
+  color: var(--muted);
+  font-size: 13px;
+  padding-bottom: 8px;
+}
 
-  &::before {
-    left: 0;
-    border-left-color: var(--border);
-  }
-  &::after {
-    right: 0;
-    border-right-color: var(--border);
-  }
+.transactions th,
+.transactions td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.transactions th {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.transactions td {
+  color: var(--text-h);
+}
+
+.transactions .numeric {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.transactions td.numeric {
+  font-family: var(--mono);
+
+  /* Digits of equal width, so the amounts line up on the decimal point rather
+     than wandering by a pixel per 1 in the column. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* time carries a title, which browsers show as a tooltip on hover. The dotted
+   underline is the only hint that there is something to hover over. */
+.transactions time[title] {
+  border-bottom: 1px dotted var(--border);
+  cursor: help;
+}
+
+.uncategorised {
+  color: var(--muted);
+  font-style: italic;
 }

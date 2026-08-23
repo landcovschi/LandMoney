@@ -1,121 +1,114 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
+import { useEffect, useState } from 'react'
+import { createTransaction, listTransactions } from './api/transactions'
+import type { NewTransaction } from './api/types'
+import { TransactionForm } from './components/TransactionForm'
+import { TransactionList, type ListState } from './components/TransactionList'
 import './App.css'
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [list, setList] = useState<ListState>({ status: 'loading' })
+
+  // A counter, incremented to ask for the list again. It is a dependency of the
+  // effect below, so changing it re-runs the effect -- which is the boring way
+  // to say "do that again" to a useEffect.
+  //
+  // The alternative is a useCallback that fetches, called from the effect and
+  // from both buttons. It reads better right up to the point where that
+  // callback has to cancel the request the previous call started, which the
+  // effect's own cleanup already does for nothing.
+  const [reloads, setReloads] = useState(0)
+
+  // The status is moved here rather than set at the top of the effect, where it
+  // reads more naturally. Two reasons, and the linter only knows the first:
+  // a setState inside an effect starts a second render before the browser has
+  // painted the first, so the extra one is pure waste. And the effect does not
+  // run on mount only to announce a state it was already in -- useState above
+  // starts at 'loading'. This is the state belonging to the event that caused
+  // it, which is where React wants it.
+  const reload = () => {
+    setList({ status: 'loading' })
+    setReloads((count) => count + 1)
+  }
+
+  useEffect(() => {
+    // React runs every effect twice in development under StrictMode, on
+    // purpose: it is hunting for exactly the effects that break when run twice.
+    // Two requests go out, and without an abort the slower of the two wins and
+    // writes its answer over the newer one.
+    //
+    // The C# parallel is passing a CancellationToken into an async method and
+    // cancelling it when the caller goes away. It matters more here because a
+    // component can unmount mid-request and React will not mention it to the
+    // request.
+    const controller = new AbortController()
+
+    listTransactions(controller.signal)
+      .then((transactions) => setList({ status: 'ready', transactions }))
+      .catch((error: unknown) => {
+        // Aborted means this effect was superseded or the component went away.
+        // Nobody is left to read a message, and writing state here would land
+        // on top of whatever the newer request has already put there.
+        if (controller.signal.aborted) {
+          return
+        }
+
+        setList({
+          status: 'failed',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Could not load the transactions.',
+        })
+      })
+
+    return () => controller.abort()
+  }, [reloads])
+
+  // Deliberately not caught here. The form needs the ApiError itself to put the
+  // server's messages beside its own fields, and catching it in this function
+  // would leave the form with a rejected promise it never sees.
+  async function handleCreate(transaction: NewTransaction) {
+    await createTransaction(transaction)
+
+    // Asking the server for the list again rather than pushing the returned row
+    // onto it -- and the 201's body is thrown away for it, knowingly. The order
+    // is (OccurredAt desc, CreatedAt desc), decided in TransactionEndpoints, and
+    // a back-dated entry belongs in the middle of the list rather than at the
+    // top. Inserting client-side means writing that comparator a second time, in
+    // another language, with nothing keeping the two in step. One extra round
+    // trip is cheaper than a sort order that drifts.
+    //
+    // The visible cost is that the list drops to "Loading..." for the length of
+    // that round trip instead of keeping the rows on screen. Holding the
+    // previous list while a newer one is on the way is the fix, and it needs a
+    // fourth state; not worth it while the round trip is a few milliseconds
+    // against a local Postgres.
+    //
+    // The sharper cost, seen in review of #28 and left in on purpose: these are
+    // two requests, and only the first one decides whether the transaction was
+    // saved. If the create succeeds and the list request then fails -- the API
+    // going down between the two, a timeout on a slow connection -- the form
+    // clears, correctly, and the list says "Could not reach the API". The row is
+    // in Postgres and the screen says the opposite.
+    //
+    // Rare, and every fix costs the fourth state this comment just argued
+    // against: keeping the previous rows and reporting the refresh as a refresh
+    // is the honest one. It is written down rather than fixed because the fix is
+    // the same fix as the paragraph above, and both become worth it together --
+    // not because nobody noticed.
+    reload()
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <main>
+      <header>
+        <h1>LandMoney</h1>
+        <p>What has been spent, and when.</p>
+      </header>
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+      <TransactionForm onSubmit={handleCreate} />
+      <TransactionList state={list} onRetry={reload} />
+    </main>
   )
 }
 

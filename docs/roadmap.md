@@ -52,13 +52,26 @@ part that is genuinely new, and the reason this slice is no longer "none new".
       was the first choice until the build refused it: the whole
       `Microsoft.Extensions.Validation` surface is `[Experimental]`
       (ASP0029) and needs a suppression to compile
-- [ ] A React client in TypeScript, built by Vite -- the scaffold and the dev
-      proxy are #4, the form and the list are #6. The day-boundary question
-      that blocked this was settled on 2026-08-18 in #17 -- `OccurredAt` is a
-      plain date, so grouping by day needs no timezone
-- [ ] The client served by the .NET app as static files, one image -- #20,
-      which also removes the last MVC leftovers: `HomeController`, `Views/`,
-      and the jQuery and Bootstrap under `wwwroot/lib`
+- [x] A React client in TypeScript, built by Vite -- the scaffold and the dev
+      proxy are #4, the form and the list are #6, merged 2026-08-23. The
+      day-boundary question that blocked this was settled on 2026-08-18 in #17
+      -- `OccurredAt` is a plain date, so grouping by day needs no timezone.
+      The client validates the *shape* of a value and leaves the *bounds* to
+      the server, so no limit is written down in two languages; the one thing
+      #6 found that reading the diff would not have is that the dev proxy
+      answers a refused connection with its own 502, so "the API is not
+      running" never reaches the browser as a failed `fetch`
+- [ ] The client served by the .NET app as static files, one image -- #20.
+      **The MVC leftovers are already gone**, pulled forward out of #20 on
+      2026-08-23 rather than waiting for it: `HomeController`, `Views/`,
+      `ErrorViewModel`, and the whole of `wwwroot` including the jQuery and
+      Bootstrap under `lib`. The reason was not tidiness -- F5 in Visual Studio
+      opened the Razor template's "Welcome" page on the API port, and being
+      shown a stranger's landing page is a good way to believe the wrong
+      application is running. What #20 still owns is the part that needs the
+      built client to exist: `index.html` out of `wwwroot`, and the fallback for
+      client-side routes. Until then `/` redirects to the Vite dev server, in
+      Development only
 
 **Done when:** a transaction typed into the form survives a restart of both the
 app and the container.
@@ -109,7 +122,17 @@ halfway through a deployment.
 
 - [ ] Real configuration and secrets handling -- no connection string in git
 - [ ] Migrations applied as a deployment step, not on application startup
-- [ ] The URL works from a phone
+- [ ] The URL works from a phone. **Check `AbortSignal.any` on that phone
+      first**, raised in review of #28: `api/transactions.ts` composes the
+      request timeout with the caller's signal through it, and of everything the
+      client uses it has the shortest history in shipping browsers -- Safari
+      picked it up in 17.4, several minor versions after `AbortSignal.timeout`.
+      Vite lowers syntax and does not polyfill a missing global, so on a browser
+      without it the first `fetch` throws before any request is made, and the
+      screen blames the wrong thing. Ten seconds on the actual device decides
+      whether it matters; if it does, the fallback is to keep
+      `AbortSignal.timeout` for the timeout and abort from the caller's own
+      listener. Not worth writing blind before the device is known
 
 **Three ways to apply a migration at deploy time**, named now so the choice is
 not made by default later. `dotnet ef database update` from CI is the obvious
