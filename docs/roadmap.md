@@ -137,7 +137,18 @@ and a container in the loop.
       rather than about this repository, and is there to keep the test beside it
       honest
 
-      Two things found by running rather than reading. `Validator` tests
+      Found in the review of #31, and the one that would have shipped:
+      `PlausibleDateAttribute` built its failure messages with an interpolated
+      `{latest:yyyy-MM-dd}`, which formats with the ambient culture -- and for a
+      date that does not merely choose separators, it chooses the **calendar**.
+      With `CurrentCulture` set to `ar-SA` the same format string answered
+      "cannot be later than **1448-01-01**", a Hijri year, no exception and
+      nothing in a log, under a date input reading `2026-06-16`. Nothing sets a
+      culture in this application, so it was latent rather than live. Both
+      messages now format with `InvariantCulture`, and a `[Theory]` over `ar-SA`
+      and `de-DE` holds them there
+
+      Two more found by running rather than reading. `Validator` tests
       `[Required]` on a property first and returns at once if it fails, so the
       other rules on that property never run -- an empty description reports
       "required" and never "too short", which means the count of messages under a

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 using LandMoney.Web.Api;
 
 namespace LandMoney.Web.Tests.Api;
@@ -152,6 +153,46 @@ public class PlausibleDateAttributeTests
 
         Assert.Null(Rule().GetValidationResult(realToday.AddDays(-400), context));
         Assert.NotNull(Rule().GetValidationResult(realToday.AddDays(400), context));
+    }
+
+    // Found in review of #31, and the reason it is a [Theory] over two cultures
+    // rather than one assertion: the interpolated {latest:yyyy-MM-dd} formatted
+    // with the ambient culture, and for a date that does not merely choose
+    // separators -- it chooses the calendar. Under ar-SA the same format string
+    // produces a Hijri year, with no exception and nothing in a log, and the
+    // React form would print that sentence under a date input showing
+    // 2026-06-16.
+    //
+    // It cannot happen in production today: nothing sets a culture and there is
+    // no request localization. It is a latent trap, and the mirror image of the
+    // one CreateTransactionRequest already writes down for [Range], where
+    // ParseLimitsInInvariantCulture exists for the same reason on the parsing
+    // side -- one of them reads a limit, this one writes it back out.
+    //
+    // The culture is restored in a finally because xUnit hands test cases to
+    // pooled threads, and a leaked CurrentCulture would surface as some
+    // unrelated test failing for a reason that names nothing.
+    [Theory]
+    [InlineData("ar-SA")]   // a non-Gregorian calendar: the case that started this
+    [InlineData("de-DE")]   // separators only, and still worth holding still
+    public void The_message_names_the_date_the_same_way_in_every_culture(string culture)
+    {
+        var original = CultureInfo.CurrentCulture;
+
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo(culture);
+
+            var tooLate = Check(Today.AddDays(2));
+            var tooEarly = Check(new DateOnly(2021, 6, 14));
+
+            Assert.Equal("OccurredAt cannot be later than 2026-06-16.", tooLate?.ErrorMessage);
+            Assert.Equal("OccurredAt cannot be earlier than 2021-06-15.", tooEarly?.ErrorMessage);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
     }
 
     private static ValidationResult? Check(

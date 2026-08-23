@@ -34,6 +34,21 @@ builder.Services.AddProblemDetails();
 // Nothing about today's behaviour changes: the fallback is TimeProvider.System,
 // which is what is being registered. What changes is that swapping the clock is
 // now one line here rather than an edit to the attribute.
+//
+// Which is exactly why NO TEST PROTECTS THIS LINE, and deleting it leaves the
+// suite green -- measured in review of #31, 49 passed. That is a property of the
+// line, not a gap in the tests: every test builds its own ServiceCollection and
+// cannot see this container, and production cannot tell the difference either,
+// because the fallback is the same object. No observation anywhere distinguishes
+// this line from its absence.
+//
+// So it is kept alive by this comment and nothing else. If coverage ever points
+// at it and finds nothing, that is the expected reading, not a licence to remove
+// it: taking it out puts the service-locator branch back to being exercised by
+// tests alone. The way to make it load-bearing would be to drop the fallback in
+// PlausibleDateAttribute, and that costs more than it buys -- the fallback is
+// what keeps the attribute usable from a bare Validator.TryValidateObject, which
+// PlausibleDateAttributeTests covers on purpose.
 builder.Services.AddSingleton(TimeProvider.System);
 
 // GetConnectionString returns null when the key is missing or misspelled, and

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 
 namespace LandMoney.Web.Api;
 
@@ -92,17 +93,39 @@ public sealed class PlausibleDateAttribute : ValidationAttribute
         var latest = today.AddDays(MaxDaysAhead);
         var earliest = today.AddYears(-MaxYearsBehind);
 
+        // InvariantCulture on both messages, found in review of #31. An
+        // interpolated {latest:yyyy-MM-dd} formats with the ambient culture, and
+        // for a date that does not merely choose separators -- it chooses the
+        // calendar. Measured, not feared: with CurrentCulture set to ar-SA the
+        // same format string answered "cannot be later than 1448-01-01", a Hijri
+        // year, with no exception and nothing in a log. The form would have put
+        // that sentence under a date input reading 2026-06-16.
+        //
+        // Nothing sets a culture in this application, so it was a latent trap
+        // rather than a live bug. It is the mirror of the one
+        // CreateTransactionRequest already writes down on [Range]: there
+        // ParseLimitsInInvariantCulture stops a limit being *read* in the
+        // machine's culture, here this stops the same limit being *written back*
+        // in it.
+        //
+        // Written as an explicit ToString rather than
+        // string.Create(CultureInfo.InvariantCulture, $"..."), which does the
+        // same for the whole interpolation in one wrapper and is tidier. It lost
+        // because the decision then lives inside an overload most people have not
+        // met, and this one is meant to be impossible to read past.
         if (occurredAt > latest)
         {
             return Failure(
-                $"{validationContext.DisplayName} cannot be later than {latest:yyyy-MM-dd}.",
+                $"{validationContext.DisplayName} cannot be later than "
+                + $"{latest.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}.",
                 validationContext);
         }
 
         if (occurredAt < earliest)
         {
             return Failure(
-                $"{validationContext.DisplayName} cannot be earlier than {earliest:yyyy-MM-dd}.",
+                $"{validationContext.DisplayName} cannot be earlier than "
+                + $"{earliest.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}.",
                 validationContext);
         }
 

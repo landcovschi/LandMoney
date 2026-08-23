@@ -73,6 +73,18 @@ usings and imports, typos, boilerplate, running linters and tests.
 - Dates and times are stored in UTC, converted only for display. A field that
   a human types a day into is a `date` instead, with no zone at all -- see
   `Transaction.OccurredAt` below.
+- **A number or a date crossing a boundary is formatted and parsed with
+  `InvariantCulture`.** Not a style rule -- it has now bitten twice from opposite
+  directions. `[Range]` limits are strings parsed at runtime, so a machine set to
+  Romanian reads `"0.01"` as `1`, which is what
+  `ParseLimitsInInvariantCulture = true` is for; and `PlausibleDateAttribute`
+  wrote its bound back out through an interpolated `{date:yyyy-MM-dd}`, which
+  under `ar-SA` produced a **Hijri** year rather than a Gregorian one (#31). The
+  same format string, a different calendar, silently. Boundaries here means
+  anything a client, a database or a test will read: messages, limits, query
+  values. Text meant for a human to read in their own language is the exception,
+  and this application has none.
+
 - The .NET app and the Python service talk over HTTP with an explicit
   contract. Every network client gets a timeout -- without one an outage
   becomes a hang, and a hang costs far more to debug than an error.
