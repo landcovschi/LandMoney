@@ -13,10 +13,12 @@ on a different major version rather than warn and continue.
 
 ## Running it
 
-The API has to be up first, and it has to be started **on the `http` profile**:
+The API has to be up first. Either launch profile will do, from a terminal or
+from Visual Studio with the debugger attached -- both publish 5150, which is
+where the proxy looks.
 
 ```powershell
-dotnet run --project ..\LandMoney.Web --launch-profile http
+dotnet run --project ..\LandMoney.Web
 ```
 
 Then, from this folder:
@@ -29,38 +31,41 @@ npm run dev
 The client is on `http://localhost:5173`, and a `fetch("/api/transactions")`
 from it reaches the API through the proxy.
 
-### The profile is not optional
+### Why the profile stopped mattering
 
-The `https` profile publishes 7063 as well, and `UseHttpsRedirection` then
-answers port 5150 with a 307 to it. The dev proxy does not follow redirects: it
-hands the 307 to the browser, which makes a cross-origin request against a
-self-signed certificate. What you see is a CORS error naming neither the profile
-nor the redirect.
+It used to have to be `--launch-profile http`, and Visual Studio's run dropdown
+could not be told so: it prefers `https` for a project that has one, F5 broke the
+client, and what appeared on screen was a CORS error naming neither the profile
+nor the cause.
 
-`dotnet run` with no arguments is safe, because `http` is the first profile in
-`launchSettings.json`. Visual Studio's run dropdown is not -- it defaults to
-`https` for a project that has one.
+The cause was `UseHttpsRedirection` running in Development, where it answered
+port 5150 with a 307 to 7063 -- and this proxy does not follow redirects, it
+hands the 307 to the browser, which then makes the cross-origin request the proxy
+exists to prevent. `Program.cs` now gates that line to non-Development, beside
+`UseHsts`, which was already gated for the same reason. Both exist to keep real
+traffic off the clear, and development has no real traffic.
 
-### Running the exe directly is a third way to break this
+### Check the port, not the fact that it started
 
-`bin\Debug\net10.0\LandMoney.Web.exe`, started by hand or from Explorer, does
-not read `launchSettings.json` at all. That file belongs to the tooling --
-`dotnet run` and the IDE read it and pass what it says to the app; the app has
-never heard of it. With no profile there is no `applicationUrl`, so Kestrel
-falls back to its own default and listens on **5000**.
-
-Nothing is wrong with the API when this happens: it is up and answering, just
-not where the proxy is looking. There is not even a redirect to notice, and the
-screen says exactly what it sees, which is that 5150 refused the connection.
-
-**Check the startup line rather than the fact that it started.** It has to say:
+If the screen says the API is unreachable while the API is plainly running, it is
+almost always listening somewhere else. The startup line has to say:
 
 ```
 Now listening on: http://localhost:5150
 ```
 
-`5000` means the profile was not applied, and `7063` beside `5150` means the
-`https` profile was.
+**`5000` means `launchSettings.json` was never read.** That happens when
+`bin\Debug\net10.0\LandMoney.Web.exe` is started by hand or from Explorer:
+`launchSettings.json` belongs to the tooling -- `dotnet run` and the IDE read it
+and pass what it says to the app through environment variables -- and the app
+itself has never heard of the file. With no profile there is no `applicationUrl`,
+so Kestrel falls back to its own default. Nothing is wrong with the API when this
+happens; it is up and answering, just not where the proxy is looking, and there
+is no redirect to notice either.
+
+This is also why a Visual Studio session shows the bare exe in its command line
+and still listens on 5150 -- Visual Studio launches the exe and applies the
+profile itself.
 
 ## Scripts
 

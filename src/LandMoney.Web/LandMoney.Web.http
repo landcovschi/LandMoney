@@ -1,16 +1,19 @@
 # Requests for #3. Run the app first: dotnet run --project src/LandMoney.Web
 #
-# Use the https port. The pipeline calls UseHttpsRedirection, so a POST to
-# http://localhost:5150 is answered with a 307 -- and while a browser and this
-# file follow it with the body intact, plain curl does not follow a redirect at
-# all unless told to, and drops the body when it does unless it is given
-# --post307. The result reads as "the endpoint ignored my JSON".
+# The http port, which is now the simpler of the two. UseHttpsRedirection is
+# gated to non-Development as of 2026-08-23, so nothing here is answered with a
+# redirect and no certificate is involved -- the same change that freed the Vite
+# dev proxy from needing --launch-profile http.
 #
-# The certificate is the local development one. curl rejects it until
-# `dotnet dev-certs https --trust` has been run once on the machine; -k skips
-# the check for a throwaway request.
+# Both of those used to be traps and are worth keeping written down, because
+# they come back the moment anything runs against 7063 or a deployed instance.
+# The redirect: plain curl does not follow one unless told to, and drops the
+# body when it does unless given --post307, so a POST reads as "the endpoint
+# ignored my JSON". The certificate: the local development one, which curl
+# rejects until `dotnet dev-certs https --trust` has been run once on the
+# machine, and -k skips the check for a throwaway request.
 
-@host = https://localhost:7063
+@host = http://localhost:5150
 
 ### Create one. Expect 201 with the created transaction, including a server-assigned id.
 POST {{host}}/api/transactions

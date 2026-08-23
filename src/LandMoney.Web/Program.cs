@@ -34,9 +34,37 @@ if (!app.Environment.IsDevelopment())
     app.UseExceptionHandler("/Home/Error");
     // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
     app.UseHsts();
+
+    // Moved in here beside UseHsts, out of the pipeline it was in unconditionally.
+    // The two answer the same reasoning and only one of them was being asked it:
+    // both exist to stop real traffic travelling in the clear, and in development
+    // there is no real traffic -- both ports are on loopback, and the certificate
+    // is one this machine made for itself. UseHsts was already gated for exactly
+    // that reason. The redirect was not, and the inconsistency was the bug.
+    //
+    // What it was costing: under the https profile, port 5150 answered every
+    // request with a 307 to 7063. The Vite dev proxy does not follow redirects --
+    // it hands the 307 to the browser, which then makes the cross-origin request
+    // the proxy exists to prevent, against a self-signed certificate. What a
+    // person sees is a CORS error naming neither the profile nor the redirect.
+    // The workaround was to remember --launch-profile http every time, which
+    // Visual Studio's run dropdown cannot be told to do; F5 picked https and the
+    // client broke, for a reason nothing on the screen mentioned.
+    //
+    // This reverses half of what #4 settled -- the proxy still targets
+    // http://localhost:5150, but the profile is now free. What lost, again: the
+    // proxy pointing at https://localhost:7063 with secure: false, which works
+    // and moves knowledge of the development certificate into the client's
+    // config, and teaches a browser client to accept a certificate it did not
+    // verify. That is a setting to keep out of a file that ships.
+    //
+    // The price is that development no longer exercises the redirect at all, so
+    // a mistake in it would first appear in production. Small: behind Container
+    // Apps the ingress terminates TLS and http never reaches this process, which
+    // is the same reason this line does so little there.
+    app.UseHttpsRedirection();
 }
 
-app.UseHttpsRedirection();
 app.UseRouting();
 
 app.UseAuthorization();

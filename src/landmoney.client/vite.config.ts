@@ -26,12 +26,16 @@ export default defineConfig({
       // literally /api/transactions on both sides, so there is no path to
       // rewrite, and Kestrel on localhost does not inspect the Host header.
       //
-      // The target is the HTTP port deliberately, and it obliges the API to be
-      // started with --launch-profile http. Under the https profile,
-      // UseHttpsRedirection answers port 5150 with a 307 to
-      // https://localhost:7063 -- and this proxy does not follow redirects. It
-      // hands the 307 to the browser, which then makes exactly the cross-origin
+      // The target is the HTTP port deliberately. Both launch profiles publish
+      // 5150, so either one works and there is nothing to remember at start-up.
+      //
+      // That is true only because UseHttpsRedirection is gated to non-Development
+      // in Program.cs. It used to run unconditionally, and then the https profile
+      // answered 5150 with a 307 to 7063 -- which this proxy does not follow. It
+      // hands the 307 to the browser, which makes exactly the cross-origin
       // request the proxy exists to avoid, against a self-signed certificate.
+      // The workaround was --launch-profile http every time, and Visual Studio's
+      // run dropdown could not be told about it.
       '/api': 'http://localhost:5150',
     },
   },
