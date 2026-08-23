@@ -114,7 +114,17 @@ halfway through a deployment.
 
 - [ ] Real configuration and secrets handling -- no connection string in git
 - [ ] Migrations applied as a deployment step, not on application startup
-- [ ] The URL works from a phone
+- [ ] The URL works from a phone. **Check `AbortSignal.any` on that phone
+      first**, raised in review of #28: `api/transactions.ts` composes the
+      request timeout with the caller's signal through it, and of everything the
+      client uses it has the shortest history in shipping browsers -- Safari
+      picked it up in 17.4, several minor versions after `AbortSignal.timeout`.
+      Vite lowers syntax and does not polyfill a missing global, so on a browser
+      without it the first `fetch` throws before any request is made, and the
+      screen blames the wrong thing. Ten seconds on the actual device decides
+      whether it matters; if it does, the fallback is to keep
+      `AbortSignal.timeout` for the timeout and abort from the caller's own
+      listener. Not worth writing blind before the device is known
 
 **Three ways to apply a migration at deploy time**, named now so the choice is
 not made by default later. `dotnet ef database update` from CI is the obvious

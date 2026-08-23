@@ -83,6 +83,19 @@ function App() {
     // previous list while a newer one is on the way is the fix, and it needs a
     // fourth state; not worth it while the round trip is a few milliseconds
     // against a local Postgres.
+    //
+    // The sharper cost, seen in review of #28 and left in on purpose: these are
+    // two requests, and only the first one decides whether the transaction was
+    // saved. If the create succeeds and the list request then fails -- the API
+    // going down between the two, a timeout on a slow connection -- the form
+    // clears, correctly, and the list says "Could not reach the API". The row is
+    // in Postgres and the screen says the opposite.
+    //
+    // Rare, and every fix costs the fourth state this comment just argued
+    // against: keeping the previous rows and reporting the refresh as a refresh
+    // is the honest one. It is written down rather than fixed because the fix is
+    // the same fix as the paragraph above, and both become worth it together --
+    // not because nobody noticed.
     reload()
   }
 
