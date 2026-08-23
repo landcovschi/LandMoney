@@ -41,6 +41,27 @@ nor the redirect.
 `launchSettings.json`. Visual Studio's run dropdown is not -- it defaults to
 `https` for a project that has one.
 
+### Running the exe directly is a third way to break this
+
+`bin\Debug\net10.0\LandMoney.Web.exe`, started by hand or from Explorer, does
+not read `launchSettings.json` at all. That file belongs to the tooling --
+`dotnet run` and the IDE read it and pass what it says to the app; the app has
+never heard of it. With no profile there is no `applicationUrl`, so Kestrel
+falls back to its own default and listens on **5000**.
+
+Nothing is wrong with the API when this happens: it is up and answering, just
+not where the proxy is looking. There is not even a redirect to notice, and the
+screen says exactly what it sees, which is that 5150 refused the connection.
+
+**Check the startup line rather than the fact that it started.** It has to say:
+
+```
+Now listening on: http://localhost:5150
+```
+
+`5000` means the profile was not applied, and `7063` beside `5150` means the
+`https` profile was.
+
 ## Scripts
 
 | Command | What it does |
