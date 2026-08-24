@@ -188,10 +188,12 @@ and a container in the loop.
       `setup-node@v7`, `setup-dotnet@v6`. From memory all three would have
       been v5
 
-      Follows on: `CLAUDE.md` said there was deliberately no ruleset on `main`
-      because there was no CI to require. That reason has now expired, and the
-      check to require is named **`build`** -- the job, not `CI`, the
-      workflow. Repository settings, so it is the owner's action
+      Follows on, and **done the same day**: `CLAUDE.md` said there was
+      deliberately no ruleset on `main` because there was no CI to require.
+      The owner turned one on once #32 was merged, requiring **`build`** -- the
+      job, not `CI`, the workflow -- with an empty bypass list, so it applies
+      to the owner too. What that ruleset says, and the trap it creates for
+      `paths:` filters, is recorded in `CLAUDE.md`
 - [ ] Dockerfile for the web app, multi-stage, non-root user -- #23.
       **The node stage has to produce `wwwroot` before `dotnet publish` runs**,
       and nothing will say so if it does not: `wwwroot` is build output and no

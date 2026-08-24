@@ -395,12 +395,41 @@ easy to lose. All true as of 2026-08-11.
   on the server. Locally, `git fetch --prune` clears the stale references and
   `git branch -d` (lower case, refuses unmerged work) removes the branch
   itself.
-- **No ruleset on `main`, and the reason expired on 2026-08-24.** It used to be
-  that required status checks had nothing to require. #22 landed `CI`, and it
-  has been seen both green and red on a pull request, so the check is worth
-  requiring now. Turning it on is the owner's action in repository settings --
-  Claude does not change repository configuration -- and the status check to
-  name is **`build`**, the job, not `CI`, the workflow.
+- **There is a ruleset on `main` as of 2026-08-24**, named `main`, active. It
+  replaces the note that used to say there deliberately was not one, on the
+  grounds that required status checks had nothing to require; #22 landed the
+  workflow and it was seen both green and red on a pull request first.
+
+  What it says, and the parts of it that are not obvious from the form that
+  created it:
+
+  - **The required check is `build`** -- the job, not `CI`, the workflow. It is
+    also bound to `integration_id` 15368, which is the `github-actions` app, so
+    the name is not satisfiable by some other app reporting a check that happens
+    to be called `build`.
+  - **The bypass list is empty, so the rule applies to the owner too.** Worth
+    saying out loud because it is the opposite of the old Branch protection
+    rules, where an administrator bypassed everything until "Do not allow
+    bypassing" was ticked. Rulesets start closed.
+  - **Targets `~DEFAULT_BRANCH` rather than the literal string `main`**, so it
+    follows a rename instead of quietly protecting nothing.
+  - `strict_required_status_checks_policy` is off -- branches are not forced to
+    be up to date before merging, which on a one-author repository would only
+    mean re-running the check on every open pull request each time `main` moves.
+  - Restrict deletions and Block force pushes came ticked by default in the new
+    ruleset form and were kept. They line up with the permissions file, which
+    leaves force-push and history rewriting out on purpose.
+
+  **Not enabled: "Require a pull request before merging."** So "nobody commits
+  to `main` directly" is still a written rule rather than an enforced one. That
+  was a deliberate choice on the grounds that #22 did not ask for it.
+
+  **The trap to avoid for as long as this rule is on:** never add `paths:`
+  filters to the triggers in `ci.yml`. A pull request touching nothing in the
+  filter never starts the workflow, `build` therefore never reports, and a
+  required check that never reports blocks the merge for ever at "Expected --
+  Waiting for status to be reported". The same failure follows from a typo in
+  the check name. Both are fixable only by editing the ruleset.
 - **`dotnet` and `node` versions are pinned in files, not in the workflow.**
   `global.json` says 10.0.400 with `rollForward: latestFeature`;
   `src/landmoney.client/.nvmrc` says `24`. Both are read by the CI workflow
