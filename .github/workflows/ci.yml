@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One run per branch. A second push while the first is still building cancels
+# it: that answer was going to be superseded anyway, and a queued run nobody
+# reads is a mark against a commit that no longer exists.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The default token is read-write. Nothing here writes anything, and #24 will
+# have to ask for `packages: write` in so many words -- which is the point of
+# narrowing it while there is still nothing to narrow.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The version comes from the file the client already carries, so there is
+      # one place to change it rather than two that drift. The path is relative
+      # to the repository root: `working-directory` below applies to `run` steps
+      # and does not reach the inputs of an action.
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: src/landmoney.client/.nvmrc
+
+      # `ci` and not `install`: it installs exactly the lock file and fails when
+      # package.json disagrees with it, where `install` quietly rewrites the lock
+      # and makes the build depend on when it last ran.
+      #
+      # .npmrc sets engine-strict, so a Node major outside the `engines` range
+      # fails here rather than printing a warning and building anyway.
+      - name: Install client dependencies
+        working-directory: src/landmoney.client
+        run: npm ci
+
+      # Writes straight into src/LandMoney.Web/wwwroot -- see vite.config.ts.
+      # Nothing below reads it: `dotnet build` does not look at wwwroot. It is
+      # #23, where `dotnet publish` does, that makes this order load-bearing.
+      - name: Build client
+        working-directory: src/landmoney.client
+        run: npm run build
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      # Nothing in this workflow runs `dotnet ef`. What this step checks is that
+      # dotnet-ef, pinned to 10.0.10 with rollForward disabled, still restores on
+      # a machine that is not the one it was pinned on -- which is the whole of
+      # what slice 2 is for.
+      - name: Restore .NET tools
+        run: dotnet tool restore
+
+      # The solution and not the web project: `dotnet test --no-build` needs the
+      # test project built too, and a build that missed it fails down there with
+      # a message about the project not being built -- which reads like a broken
+      # test project rather than a missing argument up here.
+      - name: Restore
+        run: dotnet restore LandMoney.slnx
+
+      - name: Build
+        run: dotnet build LandMoney.slnx --no-restore -c Release
+
+      # -c Release has to match the build above. Without it `--no-build` looks in
+      # bin/Debug, finds nothing, and reports that same misleading message.
+      - name: Test
+        run: dotnet test LandMoney.slnx --no-build -c Release
