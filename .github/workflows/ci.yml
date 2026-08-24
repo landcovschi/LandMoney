@@ -25,9 +25,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# The default token is read-write. Nothing here writes anything, and #24 will
-# have to ask for `packages: write` in so many words -- which is the point of
-# narrowing it while there is still nothing to narrow.
+# The floor, not the whole story. This is what every job gets unless it says
+# otherwise, and `build` -- which compiles and tests and writes nothing anywhere
+# -- wants exactly this. `publish` needs more and asks for it in its own block,
+# which is the fourth trap #24 names: a `packages: write` written up here would
+# hand a token that can push images to the job that runs `npm ci` and
+# `dotnet test`, for no reason other than that it was convenient to type once.
 permissions:
   contents: read
 
@@ -110,3 +113,150 @@ jobs:
       # bin/Debug, finds nothing, and reports that same misleading message.
       - name: Test
         run: dotnet test LandMoney.slnx --no-build -c Release
+
+  # ---------------------------------------------------------------------------
+  # Publish the image to ghcr.io -- #24, and the end of slice 2.
+  #
+  # ghcr.io rather than Azure Container Registry: the same job, but ACR Basic is
+  # around 5 USD a month and GitHub's registry is free for a public repository.
+  # The money is the smaller half. The larger one is that this needs no
+  # credentials of its own -- see the login step -- and slice 3 has to hand
+  # whatever this uses to Azure.
+  # ---------------------------------------------------------------------------
+  publish:
+    # Only after the tests pass. `needs` is what makes this a second job rather
+    # than four more steps on `build`: a failed test must stop the push, and a
+    # step added to `build` would also run on every pull request.
+    needs: build
+
+    # `push` is narrowed to `[main]` at the top of the file, so this reads as
+    # "pushes to main" even though it does not say `main` anywhere -- and it
+    # keeps saying that if the branch is ever renamed.
+    #
+    # Why not pull requests, beyond not wanting the noise: `pull_request` builds
+    # `refs/pull/<n>/merge`, a merge commit that exists only inside the run. Its
+    # SHA tag would name a commit no clone can check out, which is the exact
+    # property the SHA tag exists to provide.
+    if: github.event_name == 'push'
+
+    runs-on: ubuntu-latest
+
+    # Longer than `build`'s 10. A cold cache here is npm ci, dotnet restore and
+    # two compilers inside a docker build, where `build` gets to use the
+    # runner's preinstalled toolchains.
+    timeout-minutes: 15
+
+    # Job level, and this is the fourth trap #24 names. Two things about it:
+    #
+    # A job-level `permissions` block *replaces* the workflow-level one rather
+    # than adding to it, so `contents: read` has to be restated or the checkout
+    # below loses its token. That is also what makes writing it here correct --
+    # `packages: write` at the top of the file would silently reach `build`.
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Required rather than decorative. `cache-to: type=gha` below is a buildx
+      # cache exporter, and the default `docker` driver has no exporters at all:
+      # without this step the build succeeds, the push succeeds, and the cache
+      # is never written -- a failure whose only symptom is that the next run is
+      # not any faster. This installs the `docker-container` driver that can.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # GITHUB_TOKEN, scoped by the `packages: write` above and dead when the
+      # run ends. No personal access token, nothing in repository secrets, and
+      # nothing for anyone to rotate.
+      #
+      # `github.actor` is who pushed, not who owns the package; the registry
+      # authorises on the token, and the username only has to be non-empty.
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # `github.repository` is `landcovschi/LandMoney`, and #24's second
+          # trap is that this is a valid repository name and an invalid image
+          # name -- image name components are lowercase only. It is safe here
+          # and nowhere else: this action promises to "Lowercase the image name"
+          # (its README), producing ghcr.io/landcovschi/landmoney. One line
+          # outside it the trap is live, measured rather than assumed:
+          #
+          #   $ docker build -t ghcr.io/landcovschi/LandMoney:local-24 .
+          #   ERROR: failed to build: invalid tag
+          #   "ghcr.io/landcovschi/LandMoney:local-24": repository name must be
+          #   lowercase
+          #
+          # So nothing in this job names the image except through the `meta`
+          # outputs below.
+          images: ghcr.io/${{ github.repository }}
+
+          # `format=long` is the full 40 characters -- `sha-<40>` -- where the
+          # default `format=short` is `sha-<7>`. The long form is the one that
+          # goes into `git show` without ambiguity and reads as an identity
+          # rather than an abbreviation.
+          #
+          # `latest` is for `docker run` by hand and is deliberately not what
+          # gets deployed: #24's third trap, and it is about reasoning rather
+          # than safety. `latest` cannot be rolled back to, because there is no
+          # older `latest` to roll back to -- slice 3 deploys the SHA tag, or
+          # the digest this job prints at the end.
+          #
+          # `{{is_default_branch}}` rather than leaning on the `if:` above,
+          # because the rule about which branch gets `latest` should be legible
+          # where the tag is written.
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          # The repository root, so .dockerignore applies -- which is the file
+          # that keeps the local wwwroot and appsettings.Development.json out of
+          # the image. Both are git-ignored, so neither is in a fresh checkout
+          # and neither can leak from a runner; the exclusions matter for a
+          # build on this machine and are inherited here for free.
+          context: .
+
+          # `labels` is not cosmetic and is the reason the package appears under
+          # the repository rather than orphaned at the account level:
+          # metadata-action derives org.opencontainers.image.source from
+          # `github.repository`, and ghcr.io reads that label to link the two.
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: true
+
+          # mode=max rather than the default min, and for this Dockerfile the
+          # difference is most of the point. `min` exports only the layers of
+          # the final stage -- which here is `COPY --from=build` and little
+          # else. The expensive layers, `npm ci` and `dotnet restore`, live in
+          # the two stages that get discarded, so `min` would cache nothing that
+          # costs anything.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The digest, not the tag, is the thing that cannot be moved: a tag is a
+      # name someone can repoint, and `@sha256:...` is the image itself. Written
+      # to the run summary so that verifying this -- pull it on a machine that
+      # has never logged in -- is a copy rather than a hunt through the log.
+      - name: Report what was published
+        run: |
+          {
+            echo '### Published to ghcr.io'
+            echo
+            echo '```'
+            echo '${{ steps.meta.outputs.tags }}'
+            echo 'digest: ${{ steps.push.outputs.digest }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

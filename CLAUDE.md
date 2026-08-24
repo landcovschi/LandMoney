@@ -413,6 +413,57 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
 - **Image registry: `ghcr.io`.** Azure Container Registry does the same job
   and costs around 5 USD a month for Basic; GitHub's is free for public
   repositories.
+
+  **Pushed by a second job in `ci.yml`, decided 2026-08-24** (#24).
+  `needs: build` plus `if: github.event_name == 'push'` -- which means "pushes
+  to main" only because the trigger is already narrowed to `[main]` at the top
+  of the file, and which keeps meaning that after a branch rename where the
+  literal string would not. Tags are `sha-<40 characters>` always and `latest`
+  on the default branch; **`latest` is for running the thing by hand and is
+  never what gets deployed**, because it cannot be rolled back to and a
+  deployment that cannot name the commit it is running cannot be reasoned about.
+  Slice 3 deploys the SHA tag or the digest.
+
+  **`permissions` belongs on the job.** A job-level block *replaces* the
+  workflow-level one rather than merging with it, so `contents: read` has to be
+  restated beside `packages: write` or `actions/checkout` loses its token. That
+  same replacing is the point: `packages: write` written at the workflow level
+  would hand a token that can push images to the job that runs `npm ci` and
+  `dotnet test`. The workflow-level default stays `contents: read`.
+
+  **`docker/setup-buildx-action` is required, and forgetting it is silent.**
+  `cache-to: type=gha` is a buildx cache exporter and the default `docker`
+  driver has no exporters at all, so the build succeeds, the push succeeds, and
+  the cache is never written -- the only symptom being that the next run is not
+  any faster. `mode=max` rather than the default `min` for the mirror-image
+  reason: `min` exports only the final stage's layers, and this Dockerfile's
+  expensive ones (`npm ci`, `dotnet restore`) live in the two stages that get
+  discarded.
+
+  **Image names are lower-case and `${{ github.repository }}` is not.** Measured:
+  `docker build -t ghcr.io/landcovschi/LandMoney:local-24 .` answers `ERROR:
+  failed to build: invalid tag "...": repository name must be lowercase`. It
+  survives as the `images:` input only because `metadata-action` sanitizes it --
+  its README promises to lowercase the image name -- so nothing in that job may
+  name the image except through the `meta` outputs. The trap is live again the
+  moment anyone writes a `docker` command by hand there.
+
+  **`labels:` is load-bearing, not cosmetic.** `metadata-action` derives
+  `org.opencontainers.image.source` from `github.repository`, and `ghcr.io`
+  reads that label to link the package to the repository. Without it the package
+  exists at the account level with nothing pointing at it.
+
+  **The package is private by default even though the repository is public**,
+  and it has to be made public once, by hand, in the package settings. That is
+  the owner's job, not Claude's, and skipping it means slice 3 needs a pull
+  secret it should not need.
+
+  **The action majors are worth checking every time.** `login-action@v4`,
+  `metadata-action@v6`, `build-push-action@v7`, `setup-buildx-action@v4` as of
+  2026-08-24 -- from memory they would have been v3, v5, v6 and v3, all a major
+  behind. #22 recorded the same lesson for `checkout`/`setup-node`/
+  `setup-dotnet`; this is the second time, so it is a rule rather than an
+  anecdote.
 - **Hosting: Azure Container Apps.** GitHub cannot host this -- Pages serves
   static files only, and this needs a live process plus a database. Container
   Apps was picked over App Service because a second container (the Python
@@ -539,6 +590,26 @@ easy to lose. All true as of 2026-08-11.
   required check that never reports blocks the merge for ever at "Expected --
   Waiting for status to be reported". The same failure follows from a typo in
   the check name. Both are fixable only by editing the ruleset.
+
+  **A job skipped by `if:` is not the same failure, and the difference was
+  measured on #42 rather than reasoned about.** #24 gave `ci.yml` a second job,
+  `publish`, gated on `if: github.event_name == 'push'`. The guess was that it
+  would report nothing on a pull request and deadlock the merge the way a
+  `paths:` filter does. It does not:
+
+      $ gh api repos/landcovschi/LandMoney/commits/<sha>/check-runs
+      {"conclusion":"skipped","name":"publish","status":"completed"}
+      {"conclusion":"success","name":"build","status":"completed"}
+
+  The workflow *did* start, so the job reports -- `completed` with conclusion
+  `skipped`, which GitHub counts as satisfying a required check. The deadlock
+  above needs the workflow never to start at all: a `paths:` filter, a
+  conflicting pull request, or a name that matches no job.
+
+  So **adding `publish` to the required checks would not block anything -- it
+  would be worse, a required check that passes on every pull request without
+  ever running.** `build` stays the only required check, for that reason rather
+  than the one first written here.
 
   **A third way into that same symptom, met in #23 and not caused by the
   ruleset at all: a conflicting pull request gets no run either.** The

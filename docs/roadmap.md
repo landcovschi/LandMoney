@@ -233,7 +233,61 @@ and a container in the loop.
       -- unknown MIME type), and the runtime image has no
       `libgssapi_krb5.so.2`, so Npgsql prints a loader error to stdout at the
       first connection. Harmless, unfilterable, and not written through `ILogger`
-- [ ] Image pushed to `ghcr.io` -- #24
+- [x] Image pushed to `ghcr.io` -- #24, 2026-08-24. A second job in
+      `ci.yml`, `needs: build` and `if: github.event_name == 'push'` -- which
+      reads as "pushes to main" because the trigger is already narrowed there,
+      and keeps reading that way if the branch is renamed. `setup-buildx` ->
+      `login` -> `metadata` -> `build-push`, tagged `sha-<40>` always and
+      `latest` on the default branch
+
+      **`permissions` is on the job, not the workflow**, which is the trap #24
+      names and the reason the workflow-level block stayed `contents: read`. A
+      job-level block *replaces* the workflow-level one rather than adding to
+      it, so `contents: read` is restated beside `packages: write` or the
+      checkout loses its token -- and that same replacing is what keeps a token
+      that can push images away from the job that runs `npm ci`
+
+      **The action majors were checked and not one of them was what memory
+      said.** `login-action@v4`, `metadata-action@v6`, `build-push-action@v7`,
+      `setup-buildx-action@v4`; from memory they would have been v3, v5, v6 and
+      v3. The same lesson #22 already recorded for `checkout`/`setup-node`/
+      `setup-dotnet`, so it is now twice
+
+      **`setup-buildx-action` is required rather than decorative**, and its
+      absence is silent: `cache-to: type=gha` is a buildx cache exporter and the
+      default `docker` driver has no exporters, so the build and the push both
+      succeed and the cache is simply never written. The only symptom is that
+      the next run is not faster. `mode=max` for the same reason in the other
+      direction -- the default `min` exports only the final stage's layers, and
+      this Dockerfile's expensive layers (`npm ci`, `dotnet restore`) are in the
+      two stages that get discarded
+
+      **The lower-case trap, measured:**
+      `docker build -t ghcr.io/landcovschi/LandMoney:local-24 .` answers
+      `ERROR: failed to build: invalid tag "...": repository name must be
+      lowercase`. `${{ github.repository }}` survives as the `images:` input
+      only because `metadata-action` sanitizes it -- its README promises to
+      lowercase the image name -- so nothing else in the job may name the image
+      except through the `meta` outputs
+
+      **Two things this cannot verify until it has run on `main`,** and they are
+      the whole of #24's "verified by": the package is **private by default even
+      though the repository is public** and has to be made public once, by hand,
+      in the package settings -- otherwise slice 3 needs a pull secret it should
+      not need; and `docker pull ghcr.io/landcovschi/landmoney@sha256:...` from a
+      machine that has never logged in. The digest is written to the run summary
+      so that check is a copy rather than a hunt through the log
+
+      What is verified now: the workflow parses, `docker build` from the
+      repository root still succeeds against the unchanged `Dockerfile` of #23,
+      and the lower-case failure above was reproduced rather than recalled
+
+      **One prediction was wrong and the pull request said so.** A job skipped
+      by `if:` was expected to report nothing and deadlock a required check the
+      way a `paths:` filter does. It reports `completed` / conclusion `skipped`,
+      which GitHub counts as satisfying the requirement -- the deadlock needs
+      the workflow never to *start*. Corrected in `CLAUDE.md` with the
+      `check-runs` output beside it
 
 Azure Container Registry was the first plan and lost to `ghcr.io`: same job,
 but ACR Basic costs around 5 USD a month while GitHub's registry is free for
