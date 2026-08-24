@@ -54,7 +54,7 @@ public sealed class DecimalScaleAttribute : ValidationAttribute
         // banker's rounding and Postgres rounds half away from zero, so the two
         // disagree on 12.345 (12.34 against 12.35) -- but both differ from the
         // original, which is the only thing being tested.
-        if (decimal.Round(amount, MaxScale) == amount)
+        if (decimal.Round(amount, MaxScale + 1) == amount)
         {
             return ValidationResult.Success;
         }
