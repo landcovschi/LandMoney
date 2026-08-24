@@ -1,5 +1,18 @@
 name: CI
 
+# `push` is narrowed to main on purpose, and the half worth knowing is what that
+# costs: a branch with no open pull request gets no CI at all. It is the right
+# trade here -- nobody commits to main and every change arrives through a pull
+# request, so the only unchecked work is unfinished work -- but the first
+# feedback now arrives when the pull request is opened, not when the branch is
+# pushed. Waiting for a green tick before opening one is waiting forever.
+#
+# Putting `push` on every branch back would not be deduplicated by the
+# concurrency block below. A push run and a pull_request run for the same commit
+# carry different `github.ref` values -- refs/heads/<branch> against
+# refs/pull/<n>/merge, which is what the checkout step actually resolves -- so
+# they land in different groups and neither cancels the other. Two runs per
+# commit is unavoidable with both triggers on, which is why one of them went.
 on:
   push:
     branches: [main]
@@ -22,6 +35,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # GitHub's default is six hours. Nothing here takes a minute, and the ways
+    # past it are ordinary rather than exotic: npm ci against a stalled
+    # registry, a hung test, a runner that loses its network. The minutes are
+    # free on a public repository, so the cost of the default is not money -- it
+    # is a required check sitting in progress for hours, with the pull request
+    # neither mergeable nor honestly abandonable.
+    timeout-minutes: 10
+
     steps:
       - uses: actions/checkout@v7
 
@@ -43,6 +64,18 @@ jobs:
       - name: Install client dependencies
         working-directory: src/landmoney.client
         run: npm ci
+
+      # `npm run build` is `tsc -b && vite build`: it type-checks and bundles,
+      # and has no opinion about lint rules. So without this step the one check
+      # the client has that a compiler does not perform is the one check CI does
+      # not perform either, and .oxlintrc.json has been enforced exactly once,
+      # by hand, in #4.
+      #
+      # Before the build because the cheaper check should fail first: oxlint is
+      # a single binary over twenty files and finishes in about a second.
+      - name: Lint client
+        working-directory: src/landmoney.client
+        run: npm run lint
 
       # Writes straight into src/LandMoney.Web/wwwroot -- see vite.config.ts.
       # Nothing below reads it: `dotnet build` does not look at wwwroot. It is

@@ -248,9 +248,14 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   free.
 
   **`.github/workflows/ci.yml` is one job, decided 2026-08-24** (#22): client
-  first (`setup-node` reading `.nvmrc`, `npm ci`, `npm run build`), then the
-  solution (`setup-dotnet` reading `global.json`, `dotnet tool restore`,
-  restore, build, test). Two parallel jobs lost on moving parts -- two
+  first (`setup-node` reading `.nvmrc`, `npm ci`, `npm run lint`,
+  `npm run build`), then the solution (`setup-dotnet` reading `global.json`,
+  `dotnet tool restore`, restore, build, test). `timeout-minutes: 10`, because
+  the default is six hours and an indefinite hang blocks a required check
+  rather than reporting anything. The lint step is there because
+  `npm run build` is `tsc -b && vite build`, which type-checks and bundles and
+  has no opinion about lint rules -- without it `.oxlintrc.json` would stay
+  enforced exactly once, by hand, in #4. Two parallel jobs lost on moving parts -- two
   checkouts, two toolchain setups, two marks in one checklist, and later an
   artifact hand-off of `wwwroot` that does not exist today. The single job is
   already written in the order #23 requires, where `dotnet publish` does read
@@ -260,6 +265,21 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   #22 -- push to every branch, plus pull request -- runs twice per commit on any
   branch with an open pull request. `concurrency` with `cancel-in-progress`
   drops a run a newer push has already superseded.
+
+  What that costs, and it is the half that is otherwise discovered the hard
+  way: **a branch with no open pull request gets no CI at all.** Correct here,
+  since nobody commits to `main` and every change arrives through a pull
+  request, so the only unchecked work is unfinished work -- but the first
+  feedback arrives when the pull request is opened rather than when the branch
+  is pushed, and waiting for a green tick before opening one waits forever.
+
+  Adding `push` on every branch back would **not** be deduplicated by
+  `concurrency`: a push run and a pull_request run for the same commit carry
+  different `github.ref` -- `refs/heads/<branch>` against `refs/pull/<n>/merge`,
+  which is the ref `actions/checkout` is seen resolving in the log. Different
+  groups, so neither cancels the other. Two runs per commit is unavoidable with
+  both triggers on, which is why one of them had to go rather than be
+  deduplicated.
 
   Three arguments that are load-bearing and invisible where they are used.
   **Build and test both take `LandMoney.slnx`, not the web `.csproj`**, or the
