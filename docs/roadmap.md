@@ -214,7 +214,11 @@ public repositories. One fewer paid service, one fewer set of credentials.
 **Skill:** the gap netshift never closed. This is the "CD" the owner asked for.
 
 - [ ] Azure Container Apps, deployed from GitHub Actions, pulling from
-      `ghcr.io`
+      `ghcr.io` -- by hand first in #35, automated in #38. The order is
+      deliberate: a deployment written straight into a workflow fails inside a
+      runner where nothing can be inspected. Before either, #34 decides where
+      Postgres lives once this is deployed, which is what the connection string,
+      the migration step and the monthly cost all hang off
 
 **Why not "all of it in GitHub".** GitHub covers two of the three layers: the
 pipeline (Actions) and the registry (`ghcr.io`). It does not cover the third.
@@ -224,7 +228,11 @@ is what Azure is here for. Worth knowing the split rather than discovering it
 halfway through a deployment.
 
 - [ ] Real configuration and secrets handling -- no connection string in git
+      -- #36
 - [ ] Migrations applied as a deployment step, not on application startup
+      -- #37, which also has to say out loud why `Database.Migrate()` on startup
+      stays out: with `--min-replicas 0` a cold start would run migrations, and
+      several replicas would run them at once
 - [ ] The URL works from a phone. **Check `AbortSignal.any` on that phone
       first**, raised in review of #28: `api/transactions.ts` composes the
       request timeout with the caller's signal through it, and of everything the
@@ -267,7 +275,9 @@ is run, and the difference should be understood rather than glossed over.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat
 3. [ ] A Python service (FastAPI) that categorises a transaction. Called by the
-       .NET app over HTTP, with a timeout and a fallback to the rules
+       .NET app over HTTP, with a timeout and a fallback to the rules -- #39,
+       which carries the rules from step 2 inside it so the baseline and the
+       service stay the same code and the score keeps meaning something
 4. [ ] An Anthropic adapter behind a port, plus a fake with canned responses so
        tests never hit the network and never cost money
 5. [ ] Run the evals. Did the model beat the baseline? Record the number
