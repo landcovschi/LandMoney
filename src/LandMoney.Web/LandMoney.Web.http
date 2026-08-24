@@ -85,6 +85,8 @@ Content-Type: application/json
 }
 
 ### A year typed wrong. Expect 400: more than one day past today in UTC.
+### The sentence begins "Date", not "OccurredAt" -- [Display] on the request, #29.
+### The key stays "occurredAt": it is built from the member name, not the label.
 POST {{host}}/api/transactions
 Content-Type: application/json
 
