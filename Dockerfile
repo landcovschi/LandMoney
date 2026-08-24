@@ -174,8 +174,6 @@ EXPOSE 8080
 # speaks plain HTTP; Container Apps terminates TLS in slice 3.
 USER $APP_UID
 
-# The .dll and not the apphost. Both are in the publish output; naming the dll
-# is the form that does not care whether UseAppHost is on.
 # No HEALTHCHECK, and the reason is that neither consumer of this image would
 # read one. Raised in review of #40.
 #
@@ -197,4 +195,8 @@ USER $APP_UID
 # install a client -- an apt layer this image otherwise does not need -- or to
 # let compose probe from outside the container instead of inside it. Not a
 # decision for #23; a discovery that need not be made twice.
+
+# The .dll, which is the form that does not care whether an apphost exists. It
+# no longer does -- -p:UseAppHost=false above -- and this line would not have
+# needed changing either way, which is the reason to write it like this.
 ENTRYPOINT ["dotnet", "LandMoney.Web.dll"]
