@@ -382,6 +382,34 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   stage silences it and puts apt into the image that ships; left alone
   deliberately, and written down so it is recognised rather than investigated.
 
+  **Three more things `ls /app` raises, settled in review of #40.** The native
+  apphost is gone -- `-p:UseAppHost=false`, because `ENTRYPOINT` names the dll
+  and nothing ever launched the ~70 KB binary beside it; the publish layer went
+  from 7.84 MB to 7.75 MB, which is not the point, `ls /app` being a shorter
+  question is. **`LandMoney.Web.pdb` stays on purpose**, and this is the one
+  worth writing down because it is what a later reader deletes on principle:
+  without it a startup failure is a bare frame, and with it the image answers
+  `at Program.<Main>$(String[] args) in /src/src/LandMoney.Web/Program.cs:line
+  59` -- on a service whose logs are the only debugger it gets in slice 3, that
+  is worth 27 KB. Note which path that frame carries: the build stage's, which
+  does not exist in the running image. The line number travels, the file does
+  not. And **`web.config` stays because there is no flag for it** -- the web SDK
+  emits it on every publish, it means nothing outside IIS, and suppressing it
+  takes an MSBuild property in the csproj, which would put a container's concern
+  into the application's project file.
+
+  **No `HEALTHCHECK`, and neither consumer would read one.** Container Apps
+  (#35) ignores a Dockerfile healthcheck outright and probes over HTTP from
+  outside, declared in the app spec. `docker compose` is the one that would read
+  it, and #39 is when it matters -- the categorizer arrives beside this service
+  and the app then wants the `depends_on: condition: service_healthy` treatment
+  postgres already has. The obvious `HEALTHCHECK CMD curl -f
+  http://localhost:8080/` will not work: measured, the runtime image has
+  **none of curl, wget, nc or ping**. The aspnet image is deliberately that
+  bare, so the choice when the day comes is an apt layer this image otherwise
+  does not need, or letting compose probe from outside the container instead of
+  inside it.
+
 - **Image registry: `ghcr.io`.** Azure Container Registry does the same job
   and costs around 5 USD a month for Basic; GitHub's is free for public
   repositories.

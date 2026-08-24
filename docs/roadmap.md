@@ -194,7 +194,7 @@ and a container in the loop.
       workflow. Repository settings, so it is the owner's action
 - [x] Dockerfile for the web app, multi-stage, non-root user -- #23,
       2026-08-24. `node:24-slim` -> `sdk:10.0` -> `aspnet:10.0`, **350 MB**, of
-      which 7.84 MB is this application and the rest is the base image. Runs as
+      which 7.75 MB is this application and the rest is the base image. Runs as
       uid 1654 (`whoami` answers `app`). Verified against the compose Postgres
       rather than reasoned about: `/` is 200 `text/html`, `/api/transactions` is
       200 with 3,185 bytes of real rows, `/assets/index-BnxjKvxq.js` is 200 at

@@ -112,9 +112,15 @@ COPY --from=client /src/src/LandMoney.Web/wwwroot src/LandMoney.Web/wwwroot
 # anyway: ci.yml says it on both build and test because those two have to agree,
 # and a reader comparing the two files should not have to know which commands
 # default to what.
+#
+# -p:UseAppHost=false drops LandMoney.Web, the ~70 KB native launcher the web
+# SDK emits beside the dll. The ENTRYPOINT below names the dll, so nothing ever
+# ran it; it was in the image by default rather than by decision, and `ls /app`
+# is a shorter question without it. Raised in review of #40.
 RUN dotnet publish src/LandMoney.Web/LandMoney.Web.csproj \
     --no-restore \
     -c Release \
+    -p:UseAppHost=false \
     -o /app/publish
 
 
@@ -126,6 +132,31 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 
 COPY --from=build /app/publish ./
+
+# What that is, because "the publish output and nothing else" is true and still
+# leaves two things a later reader will not expect, and one they may delete on
+# principle. Raised in review of #40.
+#
+# LandMoney.Web.pdb is kept deliberately. It is the reason a startup failure
+# prints a line number: running this image with no connection string answers
+#
+#   Unhandled exception. System.InvalidOperationException: ConnectionStrings:
+#   Default is not set. ...
+#      at Program.<Main>$(String[] args) in /src/src/LandMoney.Web/Program.cs:line 59
+#
+# without it, the same crash is a bare frame with no file and no line. On a
+# service whose logs are the only debugger it will get in slice 3, that trade is
+# worth a few kilobytes -- so this is written down, because "debug symbols in a
+# production image" is exactly the kind of thing that gets removed on sight.
+# Note what the path in that frame is: /src/src/LandMoney.Web/Program.cs is the
+# *build stage's* layout, which does not exist here. The line number travels;
+# the file does not.
+#
+# web.config is emitted by Microsoft.NET.Sdk.Web on every publish and means
+# nothing outside IIS. There is no flag for it -- suppressing it takes an
+# MSBuild property in the csproj, which would put a container's concern into the
+# application's project file. Left in place as inert, and named here so it is
+# not a surprise.
 
 # Documentation, not a rule -- EXPOSE publishes nothing and binds nothing. 8080
 # because that is what the aspnet image sets ASPNETCORE_HTTP_PORTS to, and it
@@ -145,4 +176,25 @@ USER $APP_UID
 
 # The .dll and not the apphost. Both are in the publish output; naming the dll
 # is the form that does not care whether UseAppHost is on.
+# No HEALTHCHECK, and the reason is that neither consumer of this image would
+# read one. Raised in review of #40.
+#
+# Azure Container Apps -- the destination, in #35 -- ignores a Dockerfile
+# HEALTHCHECK outright. It probes over HTTP from outside the container, declared
+# in the app spec, so readiness is written there and nothing in this file helps.
+#
+# docker compose is the consumer that would read one, and #39 is when it starts
+# to matter: the categorizer arrives beside this service, and the app then wants
+# the same `depends_on: condition: service_healthy` treatment postgres already
+# has. The obvious `HEALTHCHECK CMD curl -f http://localhost:8080/` will not work
+# when that day comes, and this is the half worth knowing in advance -- measured,
+# not assumed:
+#
+#   $ docker run --rm --entrypoint sh landmoney-web:dev -c 'command -v curl wget nc ping'
+#   none of curl/wget/nc/ping in the image
+#
+# The aspnet runtime image is deliberately that bare. So the options are to
+# install a client -- an apt layer this image otherwise does not need -- or to
+# let compose probe from outside the container instead of inside it. Not a
+# decision for #23; a discovery that need not be made twice.
 ENTRYPOINT ["dotnet", "LandMoney.Web.dll"]
