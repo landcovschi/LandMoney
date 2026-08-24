@@ -20,6 +20,16 @@ namespace LandMoney.Web.Api;
 // (ASP0029) and needs a suppression to compile at all. It would have cost one
 // NoWarn line and pinned the project to an API Microsoft reserves the right to
 // remove.
+//
+// Every property below carries [Display], and three of the four name themselves.
+// That repetition is the point. The sentence a client reads is part of this API's
+// contract and the C# property name is not, so leaving the three implicit would
+// make them right by coincidence: renaming Description to Note would quietly
+// rewrite a message shown under an input still labelled Description, and nothing
+// would report it. Naming all four also puts the messages and the form's labels
+// side by side as one list. What lost: [Display] on OccurredAt alone -- the
+// smaller diff, and it leaves a rule that applies to one property with no way to
+// tell whether the other three were considered or forgotten.
 public sealed record CreateTransactionRequest
 {
     /// <summary>How far ahead of today an entry may be dated. See the field comment.</summary>
@@ -59,6 +69,26 @@ public sealed record CreateTransactionRequest
     // absent, only default. The alternative is DateOnly? plus [Required], which
     // reports the error more prettily and makes every read site deal with a null
     // that cannot occur.
+    //
+    // The label above this input says Date, and until #29 the message under it
+    // said OccurredAt. ValidationContext.DisplayName prefers [Display] over the
+    // member name, so this one line fixes the message everywhere and
+    // PlausibleDateAttribute, DecimalScaleAttribute and ValidationFilter are all
+    // untouched.
+    //
+    // What it does not change, and the reason it is safe: the dictionary key.
+    // ValidationFilter builds that from ValidationResult.MemberNames through
+    // JsonNamingPolicy.CamelCase, so it stays "occurredAt" -- which is what the
+    // input's name attribute is, and what puts the sentence beside this field
+    // instead of in the form-level banner. A [Display] that reached the key would
+    // move every message to the top of the form in silence.
+    //
+    // Translating on the client was the alternative and is refused: the message
+    // would then exist twice, in two languages, and the server would keep sending
+    // the untranslated one to everything that is not this form -- so curl would
+    // report a sentence the UI never shows. What is wrong with a request is the
+    // server's to say.
+    [Display(Name = "Date")]
     [PlausibleDate(MaxDaysAhead, MaxYearsBehind)]
     public required DateOnly OccurredAt { get; init; }
 
@@ -73,9 +103,16 @@ public sealed record CreateTransactionRequest
     // parsed at runtime with the current culture, and a machine set to Romanian
     // or German reads "0.01" as 1. The bug is invisible on an en-US developer
     // machine and appears only where the container's locale differs.
+    //
+    // {0} rather than the word Amount typed into the sentence. RangeAttribute
+    // formats its message with the display name first and the two bounds after
+    // it, so this now follows [Display] the way the two custom attributes above
+    // already do -- and the message stops being correct only because the property
+    // and the label happen to agree.
+    [Display(Name = "Amount")]
     [Range(typeof(decimal), "0.01", "9999999999999999.99",
         ParseLimitsInInvariantCulture = true,
-        ErrorMessage = "Amount must be between {1} and {2}.")]
+        ErrorMessage = "{0} must be between {1} and {2}.")]
     // [Range] bounds the magnitude and says nothing about the precision, which is
     // the gap this closes: numeric(18,2) accepts a third decimal place and rounds
     // it away without complaint, so a 201 built from the in-memory entity reported
@@ -87,13 +124,20 @@ public sealed record CreateTransactionRequest
     // The regular expression carries the floor and the ceiling together, so "E",
     // "" and "EU1" are all refused. StringLength(3, MinimumLength = 3) would do
     // the length half; it would accept "1$x".
-    [RegularExpression("^[A-Za-z]{3}$", ErrorMessage = "Currency must be a three-letter ISO 4217 code.")]
+    [Display(Name = "Currency")]
+    [RegularExpression("^[A-Za-z]{3}$", ErrorMessage = "{0} must be a three-letter ISO 4217 code.")]
     public required string Currency { get; init; }
 
     /// <summary>What the money was spent on. This is the text the categorizer reads in slice 4.</summary>
     // [Required] rather than only StringLength(MinimumLength = 1) because
     // RequiredAttribute trims before it checks, so a description of three spaces
     // is refused. MinimumLength on its own counts them as content.
+    //
+    // Neither rule here spells its own message, so both take the framework's
+    // defaults -- and those are built from the display name too ("The Description
+    // field is required."). [Display] is therefore doing work on this property
+    // as well, not merely restating the name for symmetry.
+    [Display(Name = "Description")]
     [Required(AllowEmptyStrings = false)]
     [StringLength(500, MinimumLength = 1)]
     public required string Description { get; init; }
