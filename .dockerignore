@@ -1,0 +1,82 @@
+# What never reaches the Docker daemon.
+#
+# Without this file the build context is everything under the repository root:
+# measured here, 86 MB of node_modules, 90 MB of bin/, plus obj/ and .git, sent
+# over the socket on every single build. The visible cost is the wait. The
+# invisible one is worse -- the context is hashed to decide whether a COPY layer
+# can be reused, so a file that changes on every local build (anything in bin/)
+# invalidates layers that have nothing to do with it, and the cache never hits.
+#
+# A denylist, mirroring .gitignore, rather than the `*` + `!` allowlist form.
+# The allowlist is stricter -- a new folder is excluded until someone says
+# otherwise, where here it is included until someone remembers -- and it lost on
+# readability at this size. Revisit it when the Python service adds a third
+# source tree.
+
+# --- Secrets. The build context is not the final image, but it is a layer in
+# the SDK stage, and `docker build --target` can stop there ---
+#
+# Every one of these carries `**/`, and the reason is the difference between
+# this file and .gitignore that costs a leak to learn. A .gitignore pattern with
+# no slash in it matches at any depth; a .dockerignore pattern is matched against
+# the whole path with Go's filepath.Match, where `*` does not cross a `/`. So
+# `appsettings.Development.json` here means *the one in the repository root* and
+# nothing else -- and this application's copy lives in src/LandMoney.Web/.
+#
+# Found by running rather than by reading: the first image built from this file
+# had src/LandMoney.Web/appsettings.Development.json inside it, an untracked file
+# that git has been hiding since 2026-08-05. That one turned out to hold nothing
+# but log levels. The rule it broke is the one that matters, and it broke
+# silently, in the direction where the file that eventually holds a connection
+# string is the one nobody re-checks.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.key
+**/*.pfx
+**/appsettings.Development.json
+**/appsettings.Local.json
+**/secrets/
+
+# --- .NET build output ---
+# obj/ is the one with teeth: it holds project.assets.json, written by a restore
+# on *this* machine, with Windows paths and this machine's NuGet fallback
+# folders baked into it. Copied into a Linux SDK stage it is not merely useless,
+# it is actively wrong, and the error names a path that does not exist.
+**/bin/
+**/obj/
+**/*.user
+**/TestResults/
+artifacts/
+
+# --- Node ---
+# node_modules is reinstalled inside the node stage from package-lock.json, so
+# a copy of this machine's -- with win32 native bindings in it -- would be
+# overwritten at best and shadow the Linux ones at worst.
+**/node_modules/
+
+# --- The client's build output, and the reason this line exists ---
+# wwwroot is git-ignored, so it is invisible in a diff, and it is populated on
+# this machine right now. Without this line the SDK stage starts with the last
+# local `npm run build` already in place, and the node stage's COPY --from lands
+# on top of it -- COPY merges directories, it does not mirror them. Old hashed
+# assets are never deleted, so the image ships two bundles while index.html
+# names one.
+#
+# The worse half is what it hides. With a stale wwwroot in the context, an image
+# built with the node stage broken, skipped or reordered still serves a working
+# client -- the previous one -- and nothing anywhere reports its age. That is
+# exactly the failure docs/roadmap.md flags for #23, arriving through a door
+# nobody was watching.
+src/LandMoney.Web/wwwroot/
+
+# --- Repository and tooling state, of no use to a build ---
+.git/
+.gitignore
+.github/
+.vs/
+.vscode/
+.idea/
+.claude/
+docs/
+*.md
