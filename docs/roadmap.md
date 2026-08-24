@@ -192,15 +192,45 @@ and a container in the loop.
       because there was no CI to require. That reason has now expired, and the
       check to require is named **`build`** -- the job, not `CI`, the
       workflow. Repository settings, so it is the owner's action
-- [ ] Dockerfile for the web app, multi-stage, non-root user -- #23.
-      **The node stage has to produce `wwwroot` before `dotnet publish` runs**,
-      and nothing will say so if it does not: `wwwroot` is build output and no
-      longer exists in a clone, so the publish succeeds, the image builds, the
-      API answers, and only `/` is a 404. Raised in review of #30, where the
-      same failure through the other door is why `UseStaticFiles` was picked
-      over `MapStaticAssets`. Cheap insurance: after `docker build`, request `/`
-      and assert a 200 rather than trusting that the stages ran in the order
-      they are written in
+- [x] Dockerfile for the web app, multi-stage, non-root user -- #23,
+      2026-08-24. `node:24-slim` -> `sdk:10.0` -> `aspnet:10.0`, **350 MB**, of
+      which 7.84 MB is this application and the rest is the base image. Runs as
+      uid 1654 (`whoami` answers `app`). Verified against the compose Postgres
+      rather than reasoned about: `/` is 200 `text/html`, `/api/transactions` is
+      200 with 3,185 bytes of real rows, `/assets/index-BnxjKvxq.js` is 200 at
+      196,604 bytes, `/api/nope` is 404 `application/problem+json`, and an
+      invalid POST is 400 `application/problem+json` -- so the endpoint filter
+      and `AddProblemDetails` survive the trip into a container
+
+      **The insurance above was taken and it passed** -- `/` was requested, not
+      assumed. What it did not catch is the same failure entering from the
+      third door: `wwwroot` is git-ignored, so it is invisible in a diff *and*
+      present on this machine, and without a `.dockerignore` line it would have
+      been copied in from the local build. `COPY` merges directories rather
+      than mirroring them, so stale hashed assets would ship forever and an
+      image built with the node stage broken would still serve a working
+      client. That line is now in `.dockerignore` with the reason beside it
+
+      **Found by running: the first image contained
+      `src/LandMoney.Web/appsettings.Development.json`**, an untracked file git
+      has been hiding since 2026-08-05, because a `.dockerignore` pattern with
+      no slash matches the repository root only -- `filepath.Match`, where `*`
+      does not cross a `/` -- while the `.gitignore` line that looks identical
+      matches at any depth. That copy held nothing but log levels. Every secret
+      pattern carries `**/` now
+
+      **`UseHttpsRedirection` in the container was measured**, which #23 asked
+      for. Environment is Production, the branch runs, the middleware finds no
+      port and logs `Failed to determine the https port for redirect` once, then
+      passes the request through -- no loop, but by degradation rather than by
+      design. Slice 3 puts a TLS-terminating ingress in front of exactly this
+
+      Two things in the image nobody chose, written down so they are recognised
+      rather than investigated: `dotnet publish` emits `.br`/`.gz` beside every
+      asset even though `UseStaticFiles` will not serve them (`.js.br` is a 404
+      -- unknown MIME type), and the runtime image has no
+      `libgssapi_krb5.so.2`, so Npgsql prints a loader error to stdout at the
+      first connection. Harmless, unfilterable, and not written through `ILogger`
 - [ ] Image pushed to `ghcr.io` -- #24
 
 Azure Container Registry was the first plan and lost to `ghcr.io`: same job,

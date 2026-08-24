@@ -301,6 +301,87 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   beyond tidiness; the whole run is 22 seconds. For the day it is wanted:
   `setup-dotnet`'s `cache: true` requires a `packages.lock.json`, which this
   repository does not have, so it is not a flag to flip.
+- **`Dockerfile` at the repository root: three stages, non-root, decided
+  2026-08-24** (#23). `node:24-slim` builds the client, `sdk:10.0` publishes the
+  app, `aspnet:10.0` runs it as uid 1654. 350 MB, of which 7.84 MB is this
+  application -- the rest is the base image, so there is nothing here worth
+  optimising until the base is the thing being questioned.
+
+  **`node:24-slim` over `alpine`**, checked rather than hoped: this client has
+  three native dependencies (`@rolldown/binding-linux-x64`,
+  `@oxlint/binding-linux-x64`, `lightningcss-linux-x64`) and
+  `package-lock.json` carries the `-musl` variant of each, so alpine would work.
+  slim wins on sharing a libc with the SDK stage, and the ~80 MB it costs never
+  reaches the final image because the stage is discarded. **The `24` is written
+  twice** -- here and in `.nvmrc`, which is what `ci.yml` reads -- and there is
+  no clean fix: `FROM` cannot read a file, and an `ARG` declares the duplication
+  without removing it. What makes it tolerable is that `.npmrc` sets
+  `engine-strict` against `"node": ">=24.0.0 <25"`, so a wrong major fails at
+  `npm ci` naming the version rather than building something subtly different.
+
+  **The node stage's `WORKDIR` is not a free choice**, and this is #20's
+  written-down price being charged for the first time. `vite.config.ts` writes to
+  `../LandMoney.Web/wwwroot`, a path relative to the client folder, so the
+  client's config knows the repository's layout. `WORKDIR /src/src/landmoney.client`
+  reproduces that layout; a bare `/client` puts `wwwroot` at the image root,
+  which works by accident.
+
+  **`restore` and `publish` take the `.csproj`, not `LandMoney.slnx`** -- the
+  opposite of the call `ci.yml` makes one folder away, for the opposite reason.
+  There, `dotnet test --no-build` needs the test project built. Here it would be
+  restored, compiled and thrown away: the image is not where tests run.
+
+  **`global.json` and `NuGet.config` are copied before restore**, and both fail
+  quietly if forgotten. `sdk:10.0` resolves to **10.0.400** today -- read off the
+  registry's tag list, where 10.0.400 is the highest -- so the pin costs nothing
+  and there is nothing to roll; without the file the image would build on
+  whatever band the tag carries, a different compiler from this machine's with
+  nothing reporting it. Without `NuGet.config` restore falls back to the image's
+  default nuget.org, **which works**, and that is the problem: three environments
+  resolving from different places while all three stay green.
+
+  **`.dockerignore` patterns are not `.gitignore` patterns**, and the difference
+  cost a leak to find. A `.gitignore` pattern with no slash matches at any depth;
+  a `.dockerignore` pattern is matched against the whole path with Go's
+  `filepath.Match`, where `*` does not cross a `/`. So a bare
+  `appsettings.Development.json` means *the root one* -- and the first image
+  built here had `src/LandMoney.Web/appsettings.Development.json` inside it, an
+  untracked file git has been hiding since 2026-08-05. That copy held nothing but
+  log levels. Every secret pattern now carries `**/`, because the rule broke
+  silently and in the direction where the file that eventually holds a
+  connection string is the one nobody re-checks. The same file must exclude
+  `src/LandMoney.Web/wwwroot`, which is git-ignored and therefore invisible in a
+  diff: without it the SDK stage starts with the last local build, the node
+  stage's `COPY --from` lands on top -- `COPY` merges directories, it does not
+  mirror them -- and stale hashed assets ship forever, while an image built with
+  the node stage broken still serves a working client and says nothing.
+
+  **What `UseHttpsRedirection` does inside the container, measured** because #23
+  asked and slice 3 is about to depend on it. `ASPNETCORE_ENVIRONMENT` is unset,
+  so the environment is Production and the `!IsDevelopment()` branch runs. The
+  middleware then finds no port to redirect to and logs, once, `warn:
+  Microsoft.AspNetCore.HttpsPolicy.HttpsRedirectionMiddleware[3] Failed to
+  determine the https port for redirect.` -- and passes the request through.
+  `GET /api/transactions` is a 200 with no `Location` header. So there is no
+  redirect loop, **by degradation rather than by design**: the same no-op the
+  http launch profile used to rely on. The day someone sets `ASPNETCORE_HTTPS_PORTS`
+  or adds `ForwardedHeaders` middleware, the answer changes and nothing in the
+  Dockerfile will mention it.
+
+  **Two things in the image nobody chose.** `dotnet publish` writes `.br` and
+  `.gz` beside every asset regardless of which middleware will serve them, so
+  `wwwroot` carries six files where three are read; `UseStaticFiles` will not
+  serve them -- `/assets/index-BnxjKvxq.js.br` is a 404, since the extension has
+  no known MIME type -- so they are dead weight rather than a surface, and about
+  60 KB of it. And the runtime image lacks `libgssapi_krb5.so.2`, so Npgsql
+  prints `Cannot load library libgssapi_krb5.so.2` to stdout at the first
+  connection. It is harmless -- password authentication does not use GSSAPI and
+  the queries run -- but it is written by the loader rather than through
+  `ILogger`, so it carries no level and cannot be filtered, and in an aggregator
+  it reads as a failed start. `apt-get install libgssapi-krb5-2` in the final
+  stage silences it and puts apt into the image that ships; left alone
+  deliberately, and written down so it is recognised rather than investigated.
+
 - **Image registry: `ghcr.io`.** Azure Container Registry does the same job
   and costs around 5 USD a month for Basic; GitHub's is free for public
   repositories.
