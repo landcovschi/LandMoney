@@ -246,6 +246,41 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
 
 - **Build and deploy: GitHub Actions.** Public repository, so the minutes are
   free.
+
+  **`.github/workflows/ci.yml` is one job, decided 2026-08-24** (#22): client
+  first (`setup-node` reading `.nvmrc`, `npm ci`, `npm run build`), then the
+  solution (`setup-dotnet` reading `global.json`, `dotnet tool restore`,
+  restore, build, test). Two parallel jobs lost on moving parts -- two
+  checkouts, two toolchain setups, two marks in one checklist, and later an
+  artifact hand-off of `wwwroot` that does not exist today. The single job is
+  already written in the order #23 requires, where `dotnet publish` does read
+  `wwwroot` and nothing reports it if the client has not run first.
+
+  **Triggers are `push` to `main` plus `pull_request`.** The literal reading of
+  #22 -- push to every branch, plus pull request -- runs twice per commit on any
+  branch with an open pull request. `concurrency` with `cancel-in-progress`
+  drops a run a newer push has already superseded.
+
+  Three arguments that are load-bearing and invisible where they are used.
+  **Build and test both take `LandMoney.slnx`, not the web `.csproj`**, or the
+  test project is never built. **Both say `-c Release`, and have to agree**, or
+  `--no-build` looks in `bin/Debug`. Either mistake fails in the *test* step
+  with a message about the project not being built, which reads like a broken
+  test project rather than a wrong argument one line above. And
+  **`working-directory` applies to `run` steps only** -- it does not reach an
+  action's inputs, which is why `node-version-file` is a path from the
+  repository root while `npm ci` runs from the client folder.
+
+  **`dotnet tool restore` is kept although nothing here runs `dotnet ef`.** It
+  checks that the pinned tool restores on a machine that is not this one, which
+  is what slice 2 is for -- and it earned that on the first run, being the only
+  step to report that `dotnet-ef` 10.0.10 is now behind the runner's 10.0.11
+  runtime.
+
+  **Caching `~/.nuget/packages` and `~/.npm` stays out** until there is a reason
+  beyond tidiness; the whole run is 22 seconds. For the day it is wanted:
+  `setup-dotnet`'s `cache: true` requires a `packages.lock.json`, which this
+  repository does not have, so it is not a flag to flip.
 - **Image registry: `ghcr.io`.** Azure Container Registry does the same job
   and costs around 5 USD a month for Basic; GitHub's is free for public
   repositories.
@@ -340,9 +375,27 @@ easy to lose. All true as of 2026-08-11.
   on the server. Locally, `git fetch --prune` clears the stale references and
   `git branch -d` (lower case, refuses unmerged work) removes the branch
   itself.
-- **No ruleset on `main` yet, deliberately.** Required status checks are worth
-  having, but there is no CI workflow to require until slice 2. An empty
-  requirement would only block merging without verifying anything.
+- **No ruleset on `main`, and the reason expired on 2026-08-24.** It used to be
+  that required status checks had nothing to require. #22 landed `CI`, and it
+  has been seen both green and red on a pull request, so the check is worth
+  requiring now. Turning it on is the owner's action in repository settings --
+  Claude does not change repository configuration -- and the status check to
+  name is **`build`**, the job, not `CI`, the workflow.
+- **`dotnet` and `node` versions are pinned in files, not in the workflow.**
+  `global.json` says 10.0.400 with `rollForward: latestFeature`;
+  `src/landmoney.client/.nvmrc` says `24`. Both are read by the CI workflow
+  rather than restated in it, which is the point: a version typed into
+  `ci.yml` drifts from the one installed here and nothing reports it. The
+  looseness is deliberate and matched -- `.nvmrc` names a major, `global.json`
+  names a feature band and accepts anything above it inside .NET 10. What lost:
+  `latestPatch`, the default when the key is absent, refuses 10.0.5xx and turns
+  a routine Visual Studio update into a build error that reads like a broken
+  repository; `disable` makes every SDK update a file edit.
+
+  Measured in the first green run rather than assumed: **`setup-dotnet` installs
+  the exact version named in `global.json` and does not apply `rollForward`.**
+  The runner is therefore pinned to 10.0.400 outright, and `rollForward` is a
+  rule for this machine and for the Dockerfile in #23.
 - **`dotnet-ef` is pinned in `.config/dotnet-tools.json`.** A fresh clone needs
   `dotnet tool restore` before any `dotnet ef` command.
 - **Postgres is published on 5433**, not the default. Inspect the schema

@@ -157,7 +157,41 @@ and a container in the loop.
       `Microsoft.EntityFrameworkCore.Design` is what raises that version and
       `PrivateAssets="all"` correctly stops it flowing: 66 MSB3277 warnings, and
       a `FileLoadException` waiting for the first test that touches EF
-- [ ] GitHub Actions: build, test, on every push -- #22
+- [x] GitHub Actions: build, test, on every push -- #22, 2026-08-24.
+      `.github/workflows/ci.yml`, one job on `ubuntu-latest`, 22 seconds:
+      client, then solution. Triggers are `push` to `main` plus
+      `pull_request`, not push to every branch -- the literal reading runs
+      twice per commit on a branch with an open pull request
+
+      **`global.json` is new**, and it is the second half of the argument
+      `.nvmrc` already won: one file that both this machine and the runner
+      read, rather than a version typed into `ci.yml` that drifts from the
+      installed one with nothing reporting it. `rollForward: latestFeature`,
+      loose inside the major the way `.nvmrc` says `24` and not `24.19.0`
+
+      **Checked by breaking it**, which is what #22 asked for and the same
+      discipline as #21's mutation sweep. An off-by-one in
+      `DecimalScaleAttribute` -- `MaxScale + 1`, a plausible loosening rather
+      than an inverted comparison -- turned the check red: `Build` green,
+      `Test` failing 9 of 51, exit code 1. Reverted in the next commit, so the
+      evidence stays in the history instead of in a chat log
+
+      Two things the first run measured rather than assumed. **`setup-dotnet`
+      installs the exact version from `global.json` and does not apply
+      `rollForward`**, so the runner is pinned outright and `rollForward` is a
+      rule for this machine and for #23. And **`dotnet tool restore`, the step
+      that compiles nothing**, was the only one to report anything worth
+      knowing: `dotnet-ef` is pinned to 10.0.10 while the runner's runtime is
+      already 10.0.11
+
+      The action majors are worth not guessing: `checkout@v7`,
+      `setup-node@v7`, `setup-dotnet@v6`. From memory all three would have
+      been v5
+
+      Follows on: `CLAUDE.md` said there was deliberately no ruleset on `main`
+      because there was no CI to require. That reason has now expired, and the
+      check to require is named **`build`** -- the job, not `CI`, the
+      workflow. Repository settings, so it is the owner's action
 - [ ] Dockerfile for the web app, multi-stage, non-root user -- #23.
       **The node stage has to produce `wwwroot` before `dotnet publish` runs**,
       and nothing will say so if it does not: `wwwroot` is build output and no
