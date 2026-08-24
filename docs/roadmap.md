@@ -188,10 +188,12 @@ and a container in the loop.
       `setup-node@v7`, `setup-dotnet@v6`. From memory all three would have
       been v5
 
-      Follows on: `CLAUDE.md` said there was deliberately no ruleset on `main`
-      because there was no CI to require. That reason has now expired, and the
-      check to require is named **`build`** -- the job, not `CI`, the
-      workflow. Repository settings, so it is the owner's action
+      Follows on, and **done the same day**: `CLAUDE.md` said there was
+      deliberately no ruleset on `main` because there was no CI to require.
+      The owner turned one on once #32 was merged, requiring **`build`** -- the
+      job, not `CI`, the workflow -- with an empty bypass list, so it applies
+      to the owner too. What that ruleset says, and the trap it creates for
+      `paths:` filters, is recorded in `CLAUDE.md`
 - [x] Dockerfile for the web app, multi-stage, non-root user -- #23,
       2026-08-24. `node:24-slim` -> `sdk:10.0` -> `aspnet:10.0`, **350 MB**, of
       which 7.75 MB is this application and the rest is the base image. Runs as
@@ -244,7 +246,11 @@ public repositories. One fewer paid service, one fewer set of credentials.
 **Skill:** the gap netshift never closed. This is the "CD" the owner asked for.
 
 - [ ] Azure Container Apps, deployed from GitHub Actions, pulling from
-      `ghcr.io`
+      `ghcr.io` -- by hand first in #35, automated in #38. The order is
+      deliberate: a deployment written straight into a workflow fails inside a
+      runner where nothing can be inspected. Before either, #34 decides where
+      Postgres lives once this is deployed, which is what the connection string,
+      the migration step and the monthly cost all hang off
 
 **Why not "all of it in GitHub".** GitHub covers two of the three layers: the
 pipeline (Actions) and the registry (`ghcr.io`). It does not cover the third.
@@ -254,7 +260,11 @@ is what Azure is here for. Worth knowing the split rather than discovering it
 halfway through a deployment.
 
 - [ ] Real configuration and secrets handling -- no connection string in git
+      -- #36
 - [ ] Migrations applied as a deployment step, not on application startup
+      -- #37, which also has to say out loud why `Database.Migrate()` on startup
+      stays out: with `--min-replicas 0` a cold start would run migrations, and
+      several replicas would run them at once
 - [ ] The URL works from a phone. **Check `AbortSignal.any` on that phone
       first**, raised in review of #28: `api/transactions.ts` composes the
       request timeout with the caller's signal through it, and of everything the
@@ -297,7 +307,9 @@ is run, and the difference should be understood rather than glossed over.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat
 3. [ ] A Python service (FastAPI) that categorises a transaction. Called by the
-       .NET app over HTTP, with a timeout and a fallback to the rules
+       .NET app over HTTP, with a timeout and a fallback to the rules -- #39,
+       which carries the rules from step 2 inside it so the baseline and the
+       service stay the same code and the score keeps meaning something
 4. [ ] An Anthropic adapter behind a port, plus a fake with canned responses so
        tests never hit the network and never cost money
 5. [ ] Run the evals. Did the model beat the baseline? Record the number
