@@ -53,6 +53,15 @@ usings and imports, typos, boilerplate, running linters and tests.
 - **No LLM call before evals exist.** Hand-labelled transactions and a
   rules-based baseline come first. Without them "it got better" is a feeling,
   not a fact. This is the single rule carried over from netshift unchanged.
+
+  **`docs/evals.md` is where that lives**, written 2026-08-24 in #25: the
+  eleven closed categories and the boundary rules that make labelling
+  repeatable, the metric (macro-averaged recall) and the five things it does
+  not capture, and why the rules baseline abstains rather than guessing. It is
+  the third place decisions are written down, after this file and the roadmap,
+  and it is the one to read before touching anything in `evals/`. The code is
+  stdlib-only Python with no `uv` project -- that arrives with the categorizer
+  in #39, not before it.
 - Never touch `.env`, never print its contents, never put a key or a
   connection string into an example command.
 

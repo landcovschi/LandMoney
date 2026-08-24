@@ -357,9 +357,64 @@ is run, and the difference should be understood rather than glossed over.
        the only one that cannot be caught up later: data does not accumulate
        retroactively. Starting it now also forces the app to be used weekly,
        which is the habit netshift never formed
+
+       **Everything except the labels landed 2026-08-24** in #25: the eleven
+       closed categories with their boundary rules, the metric, the rules
+       baseline, the scorer and 26 tests, in `evals/` with the decisions in
+       `docs/evals.md`. `evals/transactions.csv` is a header and no rows, and
+       that is the half nobody else can do -- 30-50 rows from real spending,
+       labelled by hand. The database held 16 development rows (`Coffee`,
+       `Trailing`, `Test from the review of #21`) with **zero** categories, so
+       there was nothing to convert and inventing rows would have produced a
+       number about invented spending
+
+       **The metric is macro-averaged recall**, not accuracy, and the reason is
+       asserted rather than argued: `test_score.py` builds 20 rows where 40% are
+       `groceries`, answers `groceries` to all of them, and pins accuracy at 40%
+       against a macro recall of 1/11. What it does not capture is written down
+       beside it -- every wrong answer costs the same, abstention is not
+       distinguished from confident error, and at ~4 rows per category anything
+       under about 3 points is noise. That last number is the one to remember
+       the first time a prompt change "improves" the score
+
+       **`travel` and `education` were considered and folded in**, on an
+       argument that comes from the metric rather than from taste: macro recall
+       weights a two-row category exactly as much as a fifteen-row one, so a
+       category too small to measure does not become harmless, it becomes a coin
+       flip the average takes seriously. Three rows is the floor, five the
+       target, and the scorer names any category under it
 2. [ ] **A rules baseline.** String matching on the description. Score it.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat
+
+       **The rules exist and are unscored** -- `evals/rules.py`, 109 ordered
+       substrings, #25. Written **before a single row was labelled**, which is
+       the strongest available answer to the trap the issue names: rules tuned
+       against the rows they are scored on have been taught the answers. The
+       first number this produces is the baseline, and editing a rule after
+       seeing which rows it missed has to be said out loud beside the result
+
+       Seven ordering collisions are real rather than illustrative -- `gas
+       station` before `gas`, `notebook` before `book`, `headphones` before
+       `phone`, `taxi` before `tax`, `car rental` before `rent`, `coffee beans`
+       before `coffee`, `bus ticket` before `ticket` -- and a test holds them
+       there, because sorting the list alphabetically is the easiest way to move
+       the baseline's score without meaning to. Bare `bus` is not a rule at all:
+       it matches "business", and no ordering fixes that
+
+       **No match predicts `unknown`, which is not in the vocabulary and is
+       therefore always a miss.** Falling back to the most common category lost
+       because it makes the baseline a fact about the label distribution rather
+       than about the rules; falling back to `other` lost because it scores
+       `other` rows right for the wrong reason. That decision survived a
+       mutation sweep only after a test was added for it -- pointing
+       `NO_PREDICTION` at `other` was the one mutation of six that the first 25
+       tests did not catch
+
+       **Known before the first run:** the substrings are English, because
+       everything in this repository is. Descriptions typed in Russian or
+       Romanian score close to zero, and that is a finding to record rather than
+       patch around -- it is the strongest argument the model half will get
 3. [ ] A Python service (FastAPI) that categorises a transaction. Called by the
        .NET app over HTTP, with a timeout and a fallback to the rules -- #39,
        which carries the rules from step 2 inside it so the baseline and the
