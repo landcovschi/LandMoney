@@ -282,6 +282,13 @@ and a container in the loop.
       repository root still succeeds against the unchanged `Dockerfile` of #23,
       and the lower-case failure above was reproduced rather than recalled
 
+      **One prediction was wrong and the pull request said so.** A job skipped
+      by `if:` was expected to report nothing and deadlock a required check the
+      way a `paths:` filter does. It reports `completed` / conclusion `skipped`,
+      which GitHub counts as satisfying the requirement -- the deadlock needs
+      the workflow never to *start*. Corrected in `CLAUDE.md` with the
+      `check-runs` output beside it
+
 Azure Container Registry was the first plan and lost to `ghcr.io`: same job,
 but ACR Basic costs around 5 USD a month while GitHub's registry is free for
 public repositories. One fewer paid service, one fewer set of credentials.

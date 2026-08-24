@@ -591,12 +591,25 @@ easy to lose. All true as of 2026-08-11.
   Waiting for status to be reported". The same failure follows from a typo in
   the check name. Both are fixable only by editing the ruleset.
 
-  **`publish` must never be added to the required checks**, for the same
-  reason wearing a different hat. #24 gave `ci.yml` a second job that is gated
-  on `if: github.event_name == 'push'`, so on a pull request it is skipped and
-  reports nothing at all -- requiring it would block every merge for ever at
-  the same "Expected -- Waiting for status to be reported". `build` stays the
-  only required check.
+  **A job skipped by `if:` is not the same failure, and the difference was
+  measured on #42 rather than reasoned about.** #24 gave `ci.yml` a second job,
+  `publish`, gated on `if: github.event_name == 'push'`. The guess was that it
+  would report nothing on a pull request and deadlock the merge the way a
+  `paths:` filter does. It does not:
+
+      $ gh api repos/landcovschi/LandMoney/commits/<sha>/check-runs
+      {"conclusion":"skipped","name":"publish","status":"completed"}
+      {"conclusion":"success","name":"build","status":"completed"}
+
+  The workflow *did* start, so the job reports -- `completed` with conclusion
+  `skipped`, which GitHub counts as satisfying a required check. The deadlock
+  above needs the workflow never to start at all: a `paths:` filter, a
+  conflicting pull request, or a name that matches no job.
+
+  So **adding `publish` to the required checks would not block anything -- it
+  would be worse, a required check that passes on every pull request without
+  ever running.** `build` stays the only required check, for that reason rather
+  than the one first written here.
 
   **A third way into that same symptom, met in #23 and not caused by the
   ruleset at all: a conflicting pull request gets no run either.** The
