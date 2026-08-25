@@ -72,10 +72,14 @@ az containerapp show -g rg-landmoney -n landmoney --query "properties.template.c
 
 ```json
 [
-  { "name": "ConnectionStrings__Default", "secretRef": "pgconn" },
+  { "name": "ConnectionStrings__Default", "secretRef": "pgconn", "value": "" },
   { "name": "ASPNETCORE_ENVIRONMENT", "value": "Production" }
 ]
 ```
+
+The empty `value` beside the `secretRef` is the point: the field is there and
+holds nothing, because what fills it is resolved when the container starts and
+never comes back out.
 
 `ASPNETCORE_ENVIRONMENT` is set explicitly although Production is already the
 default with nothing set. It is what gates `UseExceptionHandler`, `UseHsts`,

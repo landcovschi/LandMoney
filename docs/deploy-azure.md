@@ -572,15 +572,37 @@ az containerapp show -g rg-landmoney -n landmoney --query "properties.template.c
 
 ```
 [
-  { "name": "ConnectionStrings__Default", "secretRef": "pgconn" },
+  { "name": "ConnectionStrings__Default", "secretRef": "pgconn", "value": "" },
   { "name": "ASPNETCORE_ENVIRONMENT", "value": "Production" }
 ]
 ```
 
-That output is also #36's acceptance test: `secretRef` and no `value`. A secret
-referenced this way is never returned by `show`, by the portal, or in a
+That output is also #36's acceptance test, and the **empty** `value` beside the
+`secretRef` is the whole of it: the field exists and holds nothing, because what
+fills it is resolved when the container starts and never travels back out. A
+secret referenced this way is not returned by `show`, by the portal, or in a
 revision's template -- `az containerapp secret list` without `--show-values`
-answers with names only.
+answers with names only. (Before this command was run, `show` omitted the
+`value` key entirely rather than printing it empty. Same meaning, different
+shape, and worth recognising rather than reading as a change.)
+
+**What the update actually did, read back rather than assumed:**
+
+```
+az containerapp revision list -g rg-landmoney -n landmoney --all -o table
+
+Name                Active    Created
+landmoney--r7hjn68  False     2026-08-25T16:53:33+00:00
+landmoney--0000001  True      2026-08-25T20:33:14+00:00
+```
+
+Both worth noticing. **`revision list` without `--all` shows only active
+revisions**, so the one that was just replaced looks deleted rather than
+deactivated -- and it is not deleted; it is retained, and it is what a rollback
+targets. And the new revision is named `0000001` where `create` produced the
+random `r7hjn68`: an update with no `--revision-suffix` numbers them
+sequentially, so revision names in this app do not share one shape and cannot be
+sorted to find the newest. `createdTime` can.
 
 ### Changing a secret needs a new revision
 
