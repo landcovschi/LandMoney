@@ -328,6 +328,54 @@ public repositories. One fewer paid service, one fewer set of credentials.
       removes the half of this slice worth learning. **Supabase** pauses a free
       project after a week with no requests, which for weekly use fails as "the
       site is down"
+- [x] **The first deployment, by hand** -- #35, 2026-08-25. It is live:
+      `https://landmoney.redstone-8c11320c.polandcentral.azurecontainerapps.io`
+      serves the client at `/`, JSON at `/api/transactions`, and a transaction
+      entered through the form survives `az containerapp revision restart`. One
+      Container App on the SHA-tagged `ghcr.io` image with `--min-replicas 0`,
+      one Flexible Server B1ms, one resource group. **Every command is in
+      `docs/deploy-azure.md`**, which is the deliverable -- #38 transcribes it
+
+      **`ghcr.io` is anonymously pullable**, which #24 could not verify until it
+      had run on `main`: an unauthenticated registry token lists the tags, so the
+      container app needs no pull secret and #24's last open item is closed
+
+      **The region is `polandcentral`, and that was forced.** A new subscription
+      is `OfferRestricted` for Postgres in West Europe *and* Germany West Central
+      -- `list-skus` reports it, `create` finds out four minutes in. West Europe
+      was chosen on breadth of service availability and lost to being
+      unavailable, which is not an argument that can be had
+
+      **Four `az` flags have moved from what every tutorial still shows**, each
+      failing as an argument error that reads like a broken command:
+      `--high-availability` is now `--zonal-resiliency`, `--database-name` is
+      elastic-clusters-only, `az provider register` takes **one** `--namespace`
+      and silently drops the rest, and `az login` itself crashes on a fresh
+      account inside its interactive picker (`core.login_experience_v2=off`)
+
+      **`--public-access None` disables public networking**, rather than meaning
+      "public, with no rules yet". The failure surfaces two commands later as
+      `Firewall rule operations are not supported for a server without public
+      access enabled` -- a message about firewalls, for a cause elsewhere.
+      Recoverable with `update --public-access Enabled`; no server recreated
+
+      **Both of #23's predictions were confirmed on the first start**, word for
+      word: `Failed to determine the https port for redirect` and `Cannot load
+      library libgssapi_krb5.so.2`. Recognised rather than investigated, which
+      is what writing them down was for. `Hosting environment: Production` with
+      nothing set, also as measured
+
+      **Cold start from zero: not yet recorded.** The app had not scaled to
+      zero within six minutes of the last request, and a number taken off a
+      running replica would be a warm start with a cold start's label. What is
+      measured: **9.7 s** for the first request to a new revision, **0.2 s**
+      warm. The blank is deliberate and named in `docs/deploy-azure.md`
+
+      **Taken early from #36 on purpose:** the connection string went in as a
+      Container Apps secret referenced by `secretref:`, not as a plain
+      environment variable. Doing it the other way round would leave the password
+      readable in `az containerapp show` until #36 got to it. The rest of #36 is
+      untouched -- `ASPNETCORE_ENVIRONMENT`, `ForwardedHeaders`, the README note
 - [ ] Azure Container Apps, deployed from GitHub Actions, pulling from
       `ghcr.io` -- by hand first in #35, automated in #38. The order is
       deliberate: a deployment written straight into a workflow fails inside a
