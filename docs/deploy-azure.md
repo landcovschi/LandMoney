@@ -686,10 +686,12 @@ that matter are in the workflow with the reasoning beside them.
 ### Getting it
 
 The `build` job uploads it as an artifact called `efbundle`. Take it from the
-run that built the commit being deployed:
+run that built the commit being deployed, into a folder outside the repository
+-- 128 MB of runtime has no business in a working tree, and `.gitignore` and
+`.dockerignore` name it only as a second line of defence:
 
-```
-gh run download --repo landcovschi/LandMoney -n efbundle -D .
+```powershell
+$run = "$env:TEMP\efbundle"; New-Item -ItemType Directory -Force $run | Out-Null; gh run download <run-id> --repo landcovschi/LandMoney -n efbundle -D $run
 ```
 
 **It will not run on this machine, and that is deliberate.** It is a linux-x64
@@ -697,8 +699,8 @@ ELF binary; Windows answers with a format error rather than anything helpful.
 Run it in the smallest image that can host it -- the same base the application's
 own runtime image is built on, minus ASP.NET:
 
-```
-docker run --rm -v "${PWD}:/w" -w /w -e ConnectionStrings__Default="$pgConn" mcr.microsoft.com/dotnet/runtime-deps:10.0 sh -c "chmod +x ./efbundle && ./efbundle"
+```powershell
+docker run --rm -v "${run}:/w" -w /w -e "ConnectionStrings__Default=$pgConn" mcr.microsoft.com/dotnet/runtime-deps:10.0 sh -c "chmod +x ./efbundle && ./efbundle"
 ```
 
 Two things in that line are load-bearing:
@@ -709,9 +711,23 @@ Two things in that line are load-bearing:
 - **`runtime-deps`, not `runtime` or `aspnet`.** `--self-contained` bundles the
   .NET runtime but not glibc, ICU and OpenSSL, which is what that image is.
 
-From Git Bash the volume argument needs `MSYS_NO_PATHCONV=1` in front of the
-whole command, or the shell rewrites `/w` into a Windows path and docker
-answers `the working directory 'W:/' is invalid`.
+**Two things that are NOT load-bearing, written down because they were guessed
+here first and then measured.** The first draft of this section claimed the
+`-e` pair had to be quoted as a whole -- `-e "NAME=$pgConn"` rather than
+`-e NAME="$pgConn"` -- on the reasoning that a connection string is
+semicolon-separated and `;` ends a statement in PowerShell. It does not: the
+semicolons arrive inside an expanded string, PowerShell does not re-parse them,
+and both spellings deliver the value intact, a value containing a space
+included. The same draft said the download folder must have no space in its
+path; a bind mount from `$env:TEMP\bundle space test` works, quoted the way it
+is above. Both were plausible, neither was true, and the cost of checking was
+two `docker run`s against `printenv`.
+
+**These are PowerShell**, which is the part that *does* matter -- the same
+lesson #53 recorded for `curl.exe`. From Git Bash the `docker` line needs
+`MSYS_NO_PATHCONV=1` in front of it, or the shell rewrites `/w` into a Windows
+path and docker answers `the working directory 'W:/' is invalid`. That one was
+met rather than guessed.
 
 **`Cannot load library libgssapi_krb5.so.2` appears here too**, for the same
 reason it appears in the application's logs and with the same non-consequence:
@@ -747,9 +763,35 @@ Applying migration '20260825204735_TransactionListIndex'.
 Done.
 ```
 
+### Done, and what it answered
+
+Run against `psql-landmoney-pl` on 2026-08-26, from the artifact of the pull
+request's own CI run rather than from a bundle built by hand:
+
+```
+Applying migration '20260825204735_TransactionListIndex'.
+CREATE INDEX ix_transactions_occurred_at_created_at ON transactions (occurred_at, created_at);
+INSERT INTO "__EFMigrationsHistory" (migration_id, product_version)
+VALUES ('20260825204735_TransactionListIndex', '10.0.10');
+Done.
+```
+
+Three things that were reasoning until this ran, and are now measurements. The
+linux-x64 artifact **does** run out of a GitHub zip in `runtime-deps` -- so
+`--self-contained` covers what it claims to and `chmod +x` covers the rest.
+`ConnectionStrings__Default` read out of the Container Apps secret **does**
+reach it, so there is still exactly one place holding that password. And the
+migration reached the deployed database with **no image deployed and no
+revision created**, which is the whole shape of #37: the schema and the
+application move on separate tracks.
+
+Note the `10.0.10` in that INSERT -- the pinned `dotnet-ef`, recorded in the
+history table by the bundle that applied it. It is the version of the tool, not
+of the database.
+
 ### Running it twice
 
-The second run of the same bundle, unchanged:
+The second run of the same bundle, unchanged, against the same database:
 
 ```
 No migrations were applied. The database is already up to date.

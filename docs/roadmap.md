@@ -453,15 +453,16 @@ halfway through a deployment.
       not: **Container Apps' ingress does send `X-Forwarded-Proto`**, which until
       the deployment was reasoning rather than measurement. #38 is what stops the
       image update being a hand step
-- [ ] Migrations applied as a deployment step, not on application startup
-      -- #37, which also has to say out loud why `Database.Migrate()` on startup
-      stays out: with `--min-replicas 0` a cold start would run migrations, and
-      several replicas would run them at once
-
-      **The mechanism is decided and built; the box stays open until it has run
-      against Azure once.** `dotnet ef migrations bundle --self-contained
+- [x] Migrations applied as a deployment step, not on application startup
+      -- #37, 2026-08-26. `dotnet ef migrations bundle --self-contained
       -r linux-x64`, built by `ci.yml` in the `build` job and uploaded as an
-      artifact, run per step 13 of `docs/deploy-azure.md`. `script --idempotent`
+      artifact, run per step 13 of `docs/deploy-azure.md`. Verified against the
+      deployed database rather than locally: the artifact from the pull
+      request's own CI run applied `TransactionListIndex` to
+      `psql-landmoney-pl`, and a second run of the same file answered `No
+      migrations were applied`. **No image was deployed and no revision
+      created** -- which is the shape of the whole issue: the schema and the
+      application move on separate tracks. `script --idempotent`
       lost on who executes the SQL -- `psql` is another dependency and another
       place the connection string arrives; `database update` from the runner lost
       on needing the SDK, the pinned tool and a checkout in a job that only
@@ -479,10 +480,10 @@ halfway through a deployment.
       a run of them is not, and because `__EFMigrationsHistory` stays accurate a
       corrected bundle re-run resumes at the migration that failed
 
-      **What is left for the owner:** run it against the deployed database, which
-      needs `az containerapp secret show` for the connection string. Claude does
-      not read that secret, so the last step of #37's own acceptance test is a
-      hand step -- and #38 is what removes it
+      **Still two hand steps, and #38 is what joins them:** downloading the
+      artifact and running it, then pointing the container app at the new image.
+      Claude does not read the connection string, so the run itself stays the
+      owner's until a workflow with an OIDC login does it
 - [ ] The URL works from a phone. **Check `AbortSignal.any` on that phone
       first**, raised in review of #28: `api/transactions.ts` composes the
       request timeout with the caller's signal through it, and of everything the
