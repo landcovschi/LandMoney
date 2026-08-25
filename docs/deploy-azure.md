@@ -307,9 +307,14 @@ vector    false
 
 ## Step 8 -- the schema, by hand, once
 
-**This step is the throwaway that #37 exists to replace.** `dotnet ef database
-update` from a developer machine is the first of the three mechanisms the
-roadmap lists and the one it expects to lose: it needs the SDK, the tools, and a
+**This step is the throwaway that #37 exists to replace, and #37 has now
+replaced it -- step 13 is what to run.** It is kept here rather than deleted
+because the run below is what created the schema this database still carries,
+and because the two `dotnet ef` outputs it teaches how to read apply to the
+bundle unchanged.
+
+`dotnet ef database update` from a developer machine is the first of the three
+mechanisms the roadmap lists and the one it expects to lose: it needs the SDK, the tools, and a
 firewall rule for whoever runs it. It is here only because #35's acceptance test
 needs `/api/transactions` to answer with something.
 
@@ -634,6 +639,168 @@ curl -sSI https://<app>.polandcentral.azurecontainerapps.io/ | grep -i strict-tr
 The SHA is the merge commit on `main`, and `ci.yml` writes the digest to the run
 summary. **This is the step #38 exists to delete**, and doing it by hand once is
 the point.
+
+## Step 13 -- the schema, as a deployment step
+
+**This is #37, and it replaces step 8.** Step 8 ran `dotnet ef database update`
+from this machine to give #35 something to test against; it needs the SDK, the
+tools and the source, which is three things a deployment should not need.
+
+What runs instead is `efbundle` -- a single executable built by `ci.yml` from
+the commit being deployed, holding the migrations, EF Core, the Npgsql provider
+and the .NET runtime. `dotnet ef migrations bundle` produces it; the two flags
+that matter are in the workflow with the reasoning beside them.
+
+### Getting it
+
+The `build` job uploads it as an artifact called `efbundle`. Take it from the
+run that built the commit being deployed:
+
+```
+gh run download --repo landcovschi/LandMoney -n efbundle -D .
+```
+
+**It will not run on this machine, and that is deliberate.** It is a linux-x64
+ELF binary; Windows answers with a format error rather than anything helpful.
+Run it in the smallest image that can host it -- the same base the application's
+own runtime image is built on, minus ASP.NET:
+
+```
+docker run --rm -v "${PWD}:/w" -w /w -e ConnectionStrings__Default="$pgConn" mcr.microsoft.com/dotnet/runtime-deps:10.0 sh -c "chmod +x ./efbundle && ./efbundle"
+```
+
+Two things in that line are load-bearing:
+
+- **`chmod +x`.** A GitHub artifact is a zip, and a zip does not carry the
+  executable bit. Without it the answer is `Permission denied` on a file that is
+  plainly sitting there.
+- **`runtime-deps`, not `runtime` or `aspnet`.** `--self-contained` bundles the
+  .NET runtime but not glibc, ICU and OpenSSL, which is what that image is.
+
+From Git Bash the volume argument needs `MSYS_NO_PATHCONV=1` in front of the
+whole command, or the shell rewrites `/w` into a Windows path and docker
+answers `the working directory 'W:/' is invalid`.
+
+**`Cannot load library libgssapi_krb5.so.2` appears here too**, for the same
+reason it appears in the application's logs and with the same non-consequence:
+Npgsql probes for GSSAPI, password authentication does not use it, and the
+queries run. It is written by the loader rather than through `ILogger`, so it
+carries no level and cannot be filtered.
+
+### The connection string, from the one place that already holds it
+
+#37 names the trap: the bundle needs the connection string, and that is the
+secret from #36 arriving in a second place. Two places holding one secret is how
+they drift. So it is not typed and not stored anywhere new -- it is read back
+out of the Container Apps secret that the running app already uses:
+
+```
+$pgConn = az containerapp secret show -g rg-landmoney -n landmoney --secret-name pgconn --query value -o tsv
+```
+
+That is the only thing in this file that reads a secret back, and it is why
+`secret show` exists at all. It also means rotating the password stays a single
+act: `az containerapp secret set`, and the next deployment reads the new value.
+
+**By environment variable, never by `--connection`.** The bundle accepts
+`--connection <CONNECTION>` and it is what its own `--help` lists first, but an
+argument is visible in the process list and in any log that echoes the command.
+Measured rather than assumed -- the bundle runs the application's own
+configuration pipeline, so `ConnectionStrings__Default` reaches it exactly the
+way it reaches the app:
+
+```
+LOCK TABLE "__EFMigrationsHistory" IN ACCESS EXCLUSIVE MODE
+Applying migration '20260825204735_TransactionListIndex'.
+Done.
+```
+
+### Running it twice
+
+The second run of the same bundle, unchanged:
+
+```
+No migrations were applied. The database is already up to date.
+Done.
+```
+
+That is #37's acceptance test, and it is a property of `__EFMigrationsHistory`
+rather than of the bundle: EF reads which migrations are recorded and applies
+the difference.
+
+### What happens when it fails halfway
+
+Decided in advance, because after the fact there is no time to have the
+conversation -- and measured on a throwaway database with two extra migrations,
+the second of which contained deliberate nonsense.
+
+**A migration is atomic; a run of migrations is not.** The broken migration
+created a table before its bad statement, and that table does not exist
+afterwards -- Postgres has transactional DDL and Npgsql wraps each migration in
+its own transaction. The migration before it is applied and recorded:
+
+```
+migration_id
+-------------------------------------
+ 20260818192031_InitialCreate
+ 20260825204735_TransactionListIndex
+ 20260825210000_ScratchGood
+(3 rows)
+```
+
+So the schema is left between two states, and `__EFMigrationsHistory` says
+accurately which one.
+
+**The answer is therefore fix forward, not restore from backup.** Because the
+history is accurate, re-running a corrected bundle resumes at exactly the
+migration that failed:
+
+```
+Applying migration '20260825210001_ScratchBroken'.
+Done.
+```
+
+Restoring from backup stays available -- Flexible Server takes them and #34
+counted them in the bill -- and it is the answer for a migration that
+*succeeded* and destroyed data, which is a different accident. For a migration
+that threw, the backup is the slower route to the same place.
+
+The one shape this reasoning does not cover is a migration Postgres cannot run
+inside a transaction, `CREATE INDEX CONCURRENTLY` being the one that will come
+up first. There is none here, and the day there is, it fails halfway with no
+rollback and this section needs rewriting.
+
+### The order against the app deployment
+
+**Migrate first, then deploy the revision.** For the interval between the two,
+the old revision runs against the new schema.
+
+That is safe today because every migration so far only adds: `InitialCreate`
+built the table, `TransactionListIndex` adds an index, and code that has never
+heard of an index is unaffected by one existing. It stops being safe for a
+rename or a drop, where the old revision would query a column that is gone --
+and no ordering fixes that. Expand-and-contract does, in three deployments
+instead of one, and nothing here needs it yet.
+
+The other order -- deploy first, then migrate -- would put the new revision
+against the old schema, which for an added column is a query naming a column
+that does not exist. Strictly worse for the changes this project makes.
+
+```
+az containerapp update -g rg-landmoney -n landmoney --image ghcr.io/landcovschi/landmoney:sha-<40 characters>
+```
+
+**Both of these are hand steps today, and #38 is what joins them.** There the
+bundle is downloaded from the same run that built the image, so the two cannot
+disagree about which commit is being deployed -- which is the argument for
+building it in `build` rather than in a job of its own.
+
+**One thing #38 has to measure rather than assume:** whether a GitHub-hosted
+runner can reach the database at all. The firewall is the 0.0.0.0 "all Azure
+services" rule from step 5 plus this machine's address, and whether a runner's
+outbound address falls inside the first is not something this file can answer.
+If it does not, the shape is a temporary firewall rule created and removed by
+the deploy job, which the OIDC login #38 already needs makes possible.
 
 ## Tearing it all down
 

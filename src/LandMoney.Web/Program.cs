@@ -71,6 +71,41 @@ builder.Services.AddDbContext<AppDbContext>(options => options
     .UseNpgsql(connectionString)
     .UseSnakeCaseNamingConvention());
 
+// What is deliberately NOT here: db.Database.Migrate(). It is the one line
+// every tutorial puts under this one, so its absence is the surprising thing
+// and needs the comment -- #37.
+//
+// Three reasons, and none of them is that it does not work:
+//
+// 1. --min-replicas 0. This app scales to zero and the first request after an
+//    idle window pays 23.3 seconds of cold start already (measured, #35). A
+//    migration on that path adds a schema change to the wake-up of a container
+//    nobody is watching, triggered by whoever happened to open the URL.
+//
+// 2. Several replicas start at once when it scales up, and each would run
+//    this. EF Core does take an ACCESS EXCLUSIVE lock on __EFMigrationsHistory,
+//    so they serialise rather than corrupt each other -- verified in the bundle
+//    output, which logs "Acquiring an exclusive lock for migration
+//    application". What they do not do is start quickly: every replica after
+//    the first waits for the first one's DDL before it can serve anything.
+//
+// 3. The failure shape is the worst of the three. A migration that throws in
+//    here throws before app.Run(), so the container exits, Container Apps
+//    restarts it, and it exits again. What that looks like from outside is an
+//    application that will not start -- and the deployment that caused it
+//    reported success. As a deployment step the same failure is a red step with
+//    the SQL error in it, and the previous revision still serving.
+//
+// The schema arrives instead as `efbundle`, built by ci.yml from this commit
+// and run against the database before the new revision is deployed. Step 13 of
+// docs/deploy-azure.md is the whole of it.
+//
+// Note the consequence, since it is the cost rather than a benefit: the
+// application will now happily start against a database whose schema is older
+// than its model, and fail at the first query instead of at startup. Nothing
+// checks this, deliberately -- a version check here would be the same startup
+// coupling in a smaller coat.
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.

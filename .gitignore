@@ -41,6 +41,15 @@ dist/
 # and it answers 404 and says so.
 src/LandMoney.Web/wwwroot/
 
+# --- The migration bundle -- #37 ---
+#
+# Build output, and it is 128 MB of it. It is produced by ci.yml from every
+# commit and downloaded as an artifact when deploying, so a copy sitting here is
+# a working file rather than a thing to keep -- and one committed by accident
+# would be a binary in the history for ever.
+efbundle
+efbundle.exe
+
 # --- Tooling and OS ---
 .idea/
 .vscode/

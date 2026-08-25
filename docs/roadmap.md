@@ -454,6 +454,32 @@ halfway through a deployment.
       -- #37, which also has to say out loud why `Database.Migrate()` on startup
       stays out: with `--min-replicas 0` a cold start would run migrations, and
       several replicas would run them at once
+
+      **The mechanism is decided and built; the box stays open until it has run
+      against Azure once.** `dotnet ef migrations bundle --self-contained
+      -r linux-x64`, built by `ci.yml` in the `build` job and uploaded as an
+      artifact, run per step 13 of `docs/deploy-azure.md`. `script --idempotent`
+      lost on who executes the SQL -- `psql` is another dependency and another
+      place the connection string arrives; `database update` from the runner lost
+      on needing the SDK, the pinned tool and a checkout in a job that only
+      deploys
+
+      **The startup answer, sharpened by measuring it.** Concurrency was never
+      the sharp end: EF takes `LOCK TABLE "__EFMigrationsHistory" IN ACCESS
+      EXCLUSIVE MODE`, so parallel replicas serialise. What decides it is the
+      failure shape -- a migration that throws before `app.Run()` is a container
+      that exits and restarts for ever, which reads as an application that will
+      not start, from a deployment that reported success
+
+      **Fix forward, not restore from backup**, measured on a throwaway database
+      rather than argued: a migration is atomic (Postgres has transactional DDL),
+      a run of them is not, and because `__EFMigrationsHistory` stays accurate a
+      corrected bundle re-run resumes at the migration that failed
+
+      **What is left for the owner:** run it against the deployed database, which
+      needs `az containerapp secret show` for the connection string. Claude does
+      not read that secret, so the last step of #37's own acceptance test is a
+      hand step -- and #38 is what removes it
 - [ ] The URL works from a phone. **Check `AbortSignal.any` on that phone
       first**, raised in review of #28: `api/transactions.ts` composes the
       request timeout with the caller's signal through it, and of everything the
@@ -467,7 +493,10 @@ halfway through a deployment.
       listener. Not worth writing blind before the device is known
 
 **Three ways to apply a migration at deploy time**, named now so the choice is
-not made by default later. `dotnet ef database update` from CI is the obvious
+not made by default later. **Settled 2026-08-25 in #37: the bundle won**, for
+the reason the paragraph guessed -- it needs least where it lands. The full
+record, including the two traps neither this paragraph nor #37 predicted, is in
+`CLAUDE.md`. `dotnet ef database update` from CI is the obvious
 one and the worst fit: it needs the SDK, the tools and network reach from the
 runner to the database. `dotnet ef migrations script --idempotent` produces SQL
 that can be read before it runs, which is what a DBA would ask for.
