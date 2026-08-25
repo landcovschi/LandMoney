@@ -545,12 +545,27 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   `false` after setting it -- so slice 5 needs no restart window for `vector`.
   It is already set.
 
-  **Cold start from zero is the one number #35 asked for and did not get.**
-  The app had not scaled to zero within six minutes of the last request, and a
-  figure taken off a running replica would be a warm start wearing a cold
-  start's label. Measured instead: **9.7 s** for the first request to a newly
-  created revision, **0.2 s** warm. `docs/deploy-azure.md` says how to take the
-  real one and why the blank is there.
+  **Cold start from zero: 23.3 s, against 0.23 s warm**, measured 2026-08-25
+  one minute after `replica list` first reported zero. That is the price of
+  `--min-replicas 0` and it is larger than it sounds. **Scale-in took about
+  fourteen minutes**, although the scale block says `cooldownPeriod: 300` --
+  the cooldown is a floor, not a schedule, so anything measuring this has to
+  wait for `replica list` to report zero rather than trust the clock.
+
+  **The client's timeout is shorter than the cold start**, which is the part
+  worth carrying forward. `src/landmoney.client/src/api/transactions.ts` sets
+  `REQUEST_TIMEOUT_MS = 10_000`, and its comment -- "generous for a Postgres on
+  the same machine" -- records exactly the assumption that stopped being true
+  the day this deployed. Opening the URL cold is *fine*: the document request
+  pays the 23 s, a browser imposes no timeout of its own on a page load, and the
+  first `fetch` then meets a warm container. The failing case is a **tab left
+  open** past the idle window, where the next `fetch` gives up at 10 s and a
+  retry works because the first attempt started the container. Deliberately not
+  fixed in #35. Before anyone raises the constant: that makes a genuine hang
+  take longer to report, which is the failure the timeout exists to catch. The
+  alternatives are a longer timeout on a session's first request only, a warm-up
+  request at page load, or `--min-replicas 1`, which surrenders the reason
+  Container Apps beat App Service.
 - **Database: Postgres. A container locally, Azure Database for PostgreSQL
   Flexible Server once deployed -- decided 2026-08-25** (#34). This replaces the
   sentence that stood here before, "Azure Database for PostgreSQL is not free;

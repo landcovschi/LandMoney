@@ -365,11 +365,25 @@ public repositories. One fewer paid service, one fewer set of credentials.
       is what writing them down was for. `Hosting environment: Production` with
       nothing set, also as measured
 
-      **Cold start from zero: not yet recorded.** The app had not scaled to
-      zero within six minutes of the last request, and a number taken off a
-      running replica would be a warm start with a cold start's label. What is
-      measured: **9.7 s** for the first request to a new revision, **0.2 s**
-      warm. The blank is deliberate and named in `docs/deploy-azure.md`
+      **Cold start from zero: 23.3 s, against 0.23 s warm** -- a factor of a
+      hundred, and the honest price of `--min-replicas 0`. Scale-in itself took
+      about **fourteen** minutes, not the `cooldownPeriod: 300` the scale block
+      declares, so the cooldown is a floor rather than a schedule
+
+      **That number collides with the client.** `transactions.ts` sets
+      `REQUEST_TIMEOUT_MS = 10_000`, with a comment calling ten seconds
+      "generous for a Postgres on the same machine" -- true when written, and
+      not true here. Opening the URL cold is fine, because the *document*
+      request absorbs the 23 s and a browser has no timeout of its own on a page
+      load; by the time the client's first `fetch` runs, the container is warm.
+      What breaks is a **tab left open**: after ~14 idle minutes the next
+      `fetch` from an already-loaded page meets a cold container, gives up at
+      10 s and shows the timeout message, and a retry succeeds because the first
+      attempt started the container. Not fixed in #35 -- it is adjacent, and the
+      obvious fix (raise the constant) makes a real hang take longer to report,
+      which is what the timeout is for. It lands on this slice's own bar,
+      **"the URL works from a phone"**, where the first interaction after a
+      pause is exactly this case
 
       **Taken early from #36 on purpose:** the connection string went in as a
       Container Apps secret referenced by `secretref:`, not as a plain
