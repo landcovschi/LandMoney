@@ -1,5 +1,6 @@
 ﻿using LandMoney.Web.Api;            // MapTransactionEndpoints
 using LandMoney.Web.Data;          // AppDbContext
+using Microsoft.AspNetCore.HttpOverrides; // ForwardedHeaders
 using Microsoft.EntityFrameworkCore; // UseNpgsql
 
 var builder = WebApplication.CreateBuilder(args);
@@ -75,6 +76,86 @@ var app = builder.Build();
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
 {
+    // First in this branch, because both lines below ask the request which
+    // scheme it arrived on, and inside a container the honest answer is http:
+    // Container Apps terminates TLS at its ingress and speaks plain HTTP to
+    // port 8080. So both were doing nothing, and only one of them said so --
+    // UseHttpsRedirection logs "Failed to determine the https port for
+    // redirect" at every start (#23 predicted it, #35 saw it), while
+    // HstsMiddleware returns early on !Request.IsHttps and writes nothing at
+    // all. Measured on the deployed app before this line existed: the https
+    // response carried no Strict-Transport-Security header. A security header
+    // that is silently absent is worse than one deliberately left out.
+    //
+    // XForwardedProto and nothing else. XForwardedFor is what every example
+    // pairs it with, and it stays out on purpose: it would set RemoteIpAddress
+    // from a header, nothing here logs or rate-limits by address, and a
+    // spoofable client IP is a liability the day something does.
+    //
+    // Clearing the two lists is required rather than tidy, and forgetting it
+    // is silent. The defaults trust exactly one proxy -- the loopback address
+    // -- and the ingress is a different pod on the environment's network, so
+    // with the defaults left in place the header is read, judged untrusted and
+    // dropped: the site behaves identically and nothing is logged. It cannot be
+    // done in the object initializer above, either, because both properties are
+    // get-only lists and `KnownIPNetworks = { }` adds nothing rather than
+    // removing anything.
+    //
+    // That claim was checked by removing these two lines and rebuilding, the
+    // way #21 checked the test suite, and the check has a trap of its own worth
+    // more than the result. Against `localhost` the mutation changes nothing --
+    // the request comes from the one address the defaults already trust, so
+    // HSTS appears either way. It has to be sent to this machine's LAN address
+    // instead, at which point the mutated build drops the header and the real
+    // one keeps it. Four requests, and only one of the four distinguishes the
+    // two builds:
+    //
+    //   cleared,  from 172.28.x.x, X-Forwarded-Proto: https  ->  HSTS present
+    //   cleared,  from 172.28.x.x, no header                 ->  HSTS absent
+    //   defaults, from 172.28.x.x, X-Forwarded-Proto: https  ->  HSTS ABSENT
+    //   defaults, from localhost,  X-Forwarded-Proto: https  ->  HSTS present
+    //
+    // The last row is the one to remember: a proxy-trust bug cannot be
+    // reproduced from the machine running the process.
+    //
+    // It is `KnownIPNetworks`, not the `KnownNetworks` every example still
+    // shows -- that one is `[Obsolete]` here and the build says so
+    // (ASPDEPR005), because it is typed on
+    // Microsoft.AspNetCore.HttpOverrides.IPNetwork and the framework has moved
+    // to System.Net.IPNetwork. This is the compiler catching what #22 and #24
+    // had to catch by hand for GitHub Action majors, which is the cheap version
+    // of that lesson.
+    //
+    // What clearing them costs: this process now believes any X-Forwarded-Proto
+    // it is handed. Port 8080 is reachable only from inside the environment --
+    // that part is structural, the ingress being the only route in -- so a
+    // spoofer has to be past the ingress already, at which point the scheme
+    // this process believes in is not the interesting problem. The usual second
+    // reassurance is that the proxy overwrites a client-supplied header rather
+    // than appending to it, which is Envoy's documented behaviour and is NOT
+    // something measured here: nothing in this application echoes a request
+    // header back, so there was nothing to read it from. Believed, not checked.
+    //
+    // What this does NOT fix: the hop from the ingress to here is still plain
+    // HTTP. Nothing in this file can change that; it is what "TLS terminated at
+    // the edge" means everywhere.
+    //
+    // What lost, #36: deleting UseHsts and UseHttpsRedirection outright and
+    // recording that TLS enforcement lives at the ingress -- which is true, the
+    // ingress answers http with a 301 of its own, measured, and that response
+    // carries no `server: Kestrel` header, which is how it is known to come
+    // from Envoy rather than from this process. It lost on making the
+    // application depend on a property of one host: behind the nginx container
+    // CLAUDE.md already expects, or under plain docker compose, both would be
+    // gone again with nothing reporting it.
+    var forwardedHeadersOptions = new ForwardedHeadersOptions
+    {
+        ForwardedHeaders = ForwardedHeaders.XForwardedProto,
+    };
+    forwardedHeadersOptions.KnownIPNetworks.Clear();
+    forwardedHeadersOptions.KnownProxies.Clear();
+    app.UseForwardedHeaders(forwardedHeadersOptions);
+
     // No path argument any more. UseExceptionHandler("/Home/Error") re-executed
     // the pipeline against a Razor action that no longer exists, which would
     // have turned every unhandled exception into a 404 about the error page --
@@ -84,6 +165,13 @@ if (!app.Environment.IsDevelopment())
     app.UseExceptionHandler();
 
     // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
+    //
+    // This line did nothing at all until UseForwardedHeaders was added above
+    // it, and that is the whole reason the line above exists. The default is
+    // also `includeSubDomains` off and `preload` off, which is the right shape
+    // here: the FQDN is a label under a suffix Azure shares between tenants,
+    // and neither of those flags is something to hand to a domain this
+    // application does not own.
     app.UseHsts();
 
     // Moved in here beside UseHsts, out of the pipeline it was in unconditionally.
@@ -113,6 +201,15 @@ if (!app.Environment.IsDevelopment())
     // a mistake in it would first appear in production. Small: behind Container
     // Apps the ingress terminates TLS and http never reaches this process, which
     // is the same reason this line does so little there.
+    //
+    // #36 settled what "so little" means, and it changed underneath this
+    // comment. It used to be nothing-by-degradation: the middleware could not
+    // find an https port and passed the request through, warning once. With
+    // UseForwardedHeaders above, Request.IsHttps is true for anything arriving
+    // through the ingress, so the middleware has nothing to redirect and the
+    // warning is gone -- nothing-by-design, which is a different thing to read
+    // in a log. It stays because the day this runs behind something that does
+    // forward plain http, it is the line that catches it.
     app.UseHttpsRedirection();
 }
 

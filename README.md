@@ -43,6 +43,51 @@ that skips it gets a 404 at `/`, because there is genuinely nothing to serve.
 For working on the client itself, run the Vite dev server beside the API and use
 its port instead; `src/landmoney.client/README.md` has the details.
 
+## Where the configuration lives
+
+There is no connection string in this repository and there is not meant to be
+one. The same key is filled from a different place depending on where the
+application is running, and the application never asks which:
+
+| Running                     | `ConnectionStrings:Default` comes from                     |
+| --------------------------- | ---------------------------------------------------------- |
+| On this machine             | User-secrets (`dotnet user-secrets set`)                    |
+| In the deployed container   | A **Container Apps secret**, referenced by an env var       |
+
+`Program.cs` reads `GetConnectionString("Default")` and throws at startup naming
+the user-secrets command if it is missing. That message is right on a developer
+machine and misleading everywhere else -- if it ever appears in the deployed
+logs, the cause is the environment variable, not a user secret.
+
+**The deployed value is set as a secret and referenced, never pasted.** The
+environment variable is `ConnectionStrings__Default` -- **two** underscores,
+which the environment variable provider maps to `ConnectionStrings:Default`; one
+underscore makes a key nobody reads. Its value is `secretref:pgconn`, so the
+connection string is not returned by `az containerapp show`, by the portal, or
+in the revision template:
+
+```powershell
+az containerapp show -g rg-landmoney -n landmoney --query "properties.template.containers[0].env" -o json
+```
+
+```json
+[
+  { "name": "ConnectionStrings__Default", "secretRef": "pgconn" },
+  { "name": "ASPNETCORE_ENVIRONMENT", "value": "Production" }
+]
+```
+
+`ASPNETCORE_ENVIRONMENT` is set explicitly although Production is already the
+default with nothing set. It is what gates `UseExceptionHandler`, `UseHsts`,
+`UseHttpsRedirection` and `UseForwardedHeaders` in `Program.cs`, and a value
+that important should be readable rather than assumed.
+
+**Every command that produced the deployed configuration is in
+`docs/deploy-azure.md`**, step 12, including the trap that a changed secret does
+not reach a running revision. This section exists because configuration is
+invisible in a diff: nothing in a pull request would ever show it, so it has to
+be written down somewhere a person will look.
+
 ## Looking into the database
 
 The schema and the rows are easiest to inspect from a desktop client. DBeaver

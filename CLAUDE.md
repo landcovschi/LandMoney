@@ -377,6 +377,11 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   or adds `ForwardedHeaders` middleware, the answer changes and nothing in the
   Dockerfile will mention it.
 
+  **That day was 2026-08-25** (#36). `ForwardedHeaders` is now in `Program.cs`,
+  so `Request.IsHttps` is true behind the ingress, the warning above is gone,
+  and the no-op is by design. Still nothing in the Dockerfile mentions it,
+  exactly as predicted -- the record is in the Container Apps bullet below.
+
   **Two things in the image nobody chose.** `dotnet publish` writes `.br` and
   `.gz` beside every asset regardless of which middleware will serve them, so
   `wwwroot` carries six files where three are read; `UseStaticFiles` will not
@@ -566,6 +571,81 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   alternatives are a longer timeout on a session's first request only, a warm-up
   request at page load, or `--min-replicas 1`, which surrenders the reason
   Container Apps beat App Service.
+  **Configuration reaches the deployed app by three roads and the code knows of
+  none of them, settled 2026-08-25** (#36). `appsettings.json` holds log levels
+  and is public; user-secrets holds the local connection string and is a
+  development-machine feature that does not exist in a container; a **Container
+  Apps secret** holds the deployed one, referenced as
+  `ConnectionStrings__Default=secretref:pgconn` rather than pasted into an
+  environment variable. `Program.cs` asks `GetConnectionString("Default")` and
+  branches on nothing. The full picture, including how to rotate the secret, is
+  step 12 of `docs/deploy-azure.md`; `README.md` carries the short version,
+  because configuration is the one part of a deployment that never appears in a
+  diff.
+
+  **`ASPNETCORE_ENVIRONMENT=Production` is set although it changes nothing.**
+  Measured in #35 before setting it: the container already logged `Hosting
+  environment: Production`, since that is the framework default when the
+  variable is absent and the `aspnet` image does not set it. The reason to
+  write it down anyway is what hangs off it -- `UseExceptionHandler`,
+  `UseHsts`, `UseHttpsRedirection` and `UseForwardedHeaders` are all gated on
+  `!IsDevelopment()`, so a typo in that variable turns four things off at once
+  and says nothing. **`--set-env-vars` adds, `--replace-env-vars` removes
+  everything else**; one word apart in the same help text, and the wrong one
+  deletes the connection string.
+
+  **`UseForwardedHeaders`, `XForwardedProto` only, decided 2026-08-25** (#36),
+  and the reason is not the redirect the issue asked about. TLS ends at the
+  ingress, so inside the container `Request.IsHttps` is false, and
+  `HstsMiddleware` returns early on exactly that -- **the deployed app was
+  sending no `Strict-Transport-Security` header at all**, measured with `curl
+  -I` before any of this. `UseHttpsRedirection` at least announced its
+  uselessness once per start; HSTS was silent, which is the worse of the two.
+  With the scheme forwarded, HSTS emits and the redirect becomes a no-op *by
+  design* rather than by degradation -- a different thing to read in a log --
+  and the line stays for the day something does forward plain http.
+
+  **`XForwardedFor` deliberately stays out.** It is what every example pairs
+  with `XForwardedProto`, and taking it would set `RemoteIpAddress` from a
+  header on a middleware whose trust list must be cleared. Nothing here logs or
+  rate-limits by address, so it buys nothing today and is a spoofable client IP
+  the day something does.
+
+  **Clearing `KnownIPNetworks` and `KnownProxies` is required, and a local test
+  cannot show it.** The defaults trust one proxy -- loopback -- and the ingress
+  is another pod, so leaving them turns the header into a silent no-op. Checked
+  by mutation the way #21 checked the suite, and the trap is the check itself:
+  from `localhost` the mutated build behaves identically, because the request
+  comes from the one address the defaults trust. It has to be sent to the
+  machine's LAN address, and only then does the mutated build drop the header.
+  **A proxy-trust bug cannot be reproduced from the machine running the
+  process.** Two smaller ones found the same afternoon: `KnownNetworks` is
+  `[Obsolete]` in favour of `KnownIPNetworks` (ASPDEPR005, the compiler doing
+  by itself what #22 and #24 had to do by hand for action majors), and
+  `HstsOptions.ExcludedHosts` contains `localhost`, `127.0.0.1` and `[::1]` by
+  default -- so the first attempt at this measurement showed no header for a
+  reason that had nothing to do with the change.
+
+  What lost: deleting `UseHsts` and `UseHttpsRedirection` outright and recording
+  that TLS enforcement lives at the ingress. That is true -- the ingress answers
+  http with its own 301, measured, and that response carries no `server:
+  Kestrel`, which is how it is known not to come from Kestrel. It lost on making
+  the application depend on a property of one host: behind the nginx container
+  expected later, or under plain `docker compose`, both protections would be
+  gone with nothing reporting it.
+
+  **The database's FQDN is `<server>.postgres.database.azure.com` in the
+  runbook**, scrubbed in #36. The app's FQDN stays written out everywhere -- it
+  is a public website. The database's is password authentication reachable from
+  every Azure tenant through the 0.0.0.0 rule, in a public repository that also
+  names the admin user, and there is no reason to publish two of the three
+  things an attempt needs. It is a speed bump and not a control: the names table
+  still carries the server name and the pattern is obvious. What it is worth is
+  that grepping the repository for the deployed host name answering nothing
+  stays a check that means something -- run with the name typed on the command
+  line, never written into a file, or the documentation of the check becomes the
+  only thing the check finds. Which is what happened on the first run of it.
+
 - **Database: Postgres. A container locally, Azure Database for PostgreSQL
   Flexible Server once deployed -- decided 2026-08-25** (#34). This replaces the
   sentence that stood here before, "Azure Database for PostgreSQL is not free;
