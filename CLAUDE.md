@@ -477,6 +477,80 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   static files only, and this needs a live process plus a database. Container
   Apps was picked over App Service because a second container (the Python
   categorizer) is coming, and it scales to zero when idle.
+
+  **It is deployed, by hand, since 2026-08-25** (#35), and every command is in
+  **`docs/deploy-azure.md`** -- the fourth place decisions are written down,
+  after this file, the roadmap and `docs/evals.md`, and the one to read before
+  touching anything in Azure. What exists: resource group `rg-landmoney` in
+  **`polandcentral`**, holding `psql-landmoney-pl`, the environment
+  `cae-landmoney`, the app `landmoney`, and a Log Analytics workspace nobody
+  asked for that `env create` makes on its own. The URL is
+  `https://landmoney.redstone-8c11320c.polandcentral.azurecontainerapps.io`; the
+  random middle label is assigned per environment and cannot be chosen.
+
+  **The region is not the one that was picked.** West Europe was chosen and is
+  `OfferRestricted` for Postgres on a new subscription -- so is Germany West
+  Central. `az postgres flexible-server list-skus -l <region>` reports it in a
+  `reason` field before `create` spends four minutes failing. Poland Central,
+  North Europe, Sweden Central, France Central, Italy North, Norway East,
+  Switzerland North, UK South and Spain Central were open on the day. That is a
+  property of the subscription and the date rather than a fact about Azure, so
+  it is re-checked rather than trusted -- and it has to be true for **Container
+  Apps in the same region**, which is a separate query against
+  `Microsoft.App`'s `managedEnvironments` locations.
+
+  **`az` has moved under the documentation, four times in one session**, and
+  each one fails as an argument error that reads like a broken command rather
+  than a stale flag. `--high-availability` is now `--zonal-resiliency`;
+  `--database-name` on `flexible-server create` is elastic-clusters-only, so the
+  database is its own `db create`; `az provider register` takes **one**
+  `--namespace` and silently drops the rest of them; and `az login` itself
+  crashes on a fresh account inside its interactive tenant picker
+  (`AttributeError: 'NoneType' object has no attribute 'get'`), fixed by
+  `az config set core.login_experience_v2=off`. The rule this earns is the same
+  one #22 and #24 already earned for GitHub Action majors: **read the CLI's own
+  `--help` rather than a blog post**, and prefer a read-only probe to a create
+  that fails slowly.
+
+  **`--public-access None` disables public networking**, and does not mean
+  "public, with no firewall rules yet". The next command then fails with
+  `Firewall rule operations are not supported for a server without public access
+  enabled` -- a message about firewalls, for a cause four commands earlier.
+  `update --public-access Enabled` recovers it without recreating the server,
+  because nothing had been locked into a VNet. Its dangerous neighbour is `All`,
+  which opens the server to the whole internet, and omitting the flag is not
+  neutral either: the default writes a rule for whatever IP the machine has.
+
+  **The firewall is the 0.0.0.0 "all Azure services" rule**, which is the
+  compromise #34 named and #35 had to take: a Consumption-profile Container App
+  has no stable outbound IP, so there is no address to pin. It admits every
+  Azure tenant's resources, guarded by the password and enforced TLS. VNet
+  integration was the alternative and lost on a cost easy to overlook -- with
+  private access this machine cannot reach the database at all, so the migration
+  would need a jumpbox. **That is the answer to reopen alongside Neon when the
+  free year ends**, since both questions are "is this still the right shape".
+
+  **`SSL Mode=Require` needs no `Trust Server Certificate=true`,** measured from
+  both this machine and inside the container. Npgsql 8 changed `Require` from
+  "encrypt without checking" to "encrypt and validate", so it was a real
+  question; Azure's chain to DigiCert Global Root G2 is trusted by Windows and
+  by the Debian runtime image alike. Nothing in the connection string tells a
+  client to skip verification, and that is the property to protect if it is ever
+  edited. One spelling note that is not cosmetic: the secret uses `SslMode` and
+  `CommandTimeout` without spaces, because Npgsql normalises keywords by
+  stripping them and a space-free value survives PowerShell handing it to a
+  `.cmd` shim.
+
+  **`azure.extensions` is a dynamic parameter** -- `isConfigPendingRestart` is
+  `false` after setting it -- so slice 5 needs no restart window for `vector`.
+  It is already set.
+
+  **Cold start from zero is the one number #35 asked for and did not get.**
+  The app had not scaled to zero within six minutes of the last request, and a
+  figure taken off a running replica would be a warm start wearing a cold
+  start's label. Measured instead: **9.7 s** for the first request to a newly
+  created revision, **0.2 s** warm. `docs/deploy-azure.md` says how to take the
+  real one and why the blank is there.
 - **Database: Postgres. A container locally, Azure Database for PostgreSQL
   Flexible Server once deployed -- decided 2026-08-25** (#34). This replaces the
   sentence that stood here before, "Azure Database for PostgreSQL is not free;
