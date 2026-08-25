@@ -92,6 +92,26 @@ not reach a running revision. This section exists because configuration is
 invisible in a diff: nothing in a pull request would ever show it, so it has to
 be written down somewhere a person will look.
 
+## How the schema gets there
+
+The application does **not** migrate itself at startup: there is no
+`Database.Migrate()` anywhere, and `Program.cs` explains why beside the
+`AddDbContext` call. A migration that throws in there would leave a container
+that exits and restarts for ever -- an application that will not start, from a
+deployment that reported success.
+
+Instead `ci.yml` builds `efbundle`, a single self-contained linux-x64 executable
+holding the migrations, and uploads it as an artifact of every run. Deploying is
+then: run the bundle against the database, then point the container app at the
+new image. That order, and only that order, is safe while migrations only add.
+
+Locally nothing changes -- `dotnet ef database update` is still the answer on a
+developer machine, and the local Postgres is a container.
+
+**Step 13 of `docs/deploy-azure.md` has every command**, including where the
+connection string comes from (the same Container Apps secret the app uses, read
+back rather than copied) and what to do when a migration fails halfway.
+
 ## Looking into the database
 
 The schema and the rows are easiest to inspect from a desktop client. DBeaver

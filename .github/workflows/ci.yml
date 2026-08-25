@@ -114,6 +114,86 @@ jobs:
       - name: Test
         run: dotnet test LandMoney.slnx --no-build -c Release
 
+      # -----------------------------------------------------------------------
+      # The migration bundle -- #37.
+      #
+      # This is how the schema reaches the deployed database: a single
+      # executable produced from this commit, which is run against Azure as a
+      # deployment step. Nothing calls Database.Migrate() at startup, and
+      # Program.cs says why beside the DbContext registration.
+      #
+      # It is built in `build` rather than in a job of its own so that every
+      # pull request proves the bundle still builds. That is not free -- it is
+      # the slowest step here, about 20 seconds -- and it is worth it because
+      # the ways this breaks are all invisible until someone deploys: a
+      # migration that does not compile, a provider that cannot be resolved at
+      # design time, an SDK that no longer produces a linux-x64 apphost.
+      # -----------------------------------------------------------------------
+      - name: Build the migration bundle
+        env:
+          # Both of these are the same trap wearing two hats, and it is the one
+          # #37 did not predict: `dotnet ef` starts the application's host to
+          # find the DbContext, so Program.cs runs -- including the line that
+          # throws when ConnectionStrings:Default is missing. Nothing connects
+          # here; the string only has to exist and parse.
+          #
+          # It does not fail on a developer machine, which is why it has to be
+          # said out loud. `dotnet ef` applies the first profile in
+          # launchSettings.json, that profile sets ASPNETCORE_ENVIRONMENT to
+          # Development, and Development is what loads user-secrets. A runner
+          # has no user-secrets, so the same command that works locally answers:
+          #
+          #   Error: ConnectionStrings:Default is not set.
+          #   Unable to create a 'DbContext' of type 'AppDbContext'.
+          #
+          # Production is set explicitly rather than left to that profile, so
+          # this step reads the same configuration a deployed process would.
+          ASPNETCORE_ENVIRONMENT: Production
+          ConnectionStrings__Default: "Host=build-time-only;Database=none;Username=none;Password=none"
+
+        # `-r linux-x64 --self-contained` is what makes the file runnable where
+        # it is run rather than where it was built. Without the runtime
+        # identifier this produces a Windows executable on Windows and a
+        # format error wherever it lands; without --self-contained it needs a
+        # .NET runtime installed beside it, which is a dependency the deploy
+        # step should not have to arrange. The price is measured: 33 MB
+        # framework-dependent against 128 MB self-contained.
+        #
+        # No --no-build. The build above compiled the solution for this
+        # machine's own runtime; this needs a linux-x64 publish of a generated
+        # project that references the app, so there is nothing here for
+        # --no-build to reuse.
+        run: >
+          dotnet ef migrations bundle
+          --project src/LandMoney.Web
+          --configuration Release
+          --self-contained
+          -r linux-x64
+          -o efbundle
+          --force
+
+      # v7, checked rather than remembered -- from memory this would have been
+      # v4, which is the third time that lesson has been paid for after #22 and
+      # #24.
+      #
+      # One artifact per run, with no SHA in the name: the run already names the
+      # commit, and #38 downloads it from its own run rather than searching for
+      # it by name. Seven days because this is a build check and a deployment
+      # input, not an archive -- a bundle worth running again is a bundle whose
+      # commit can be built again.
+      #
+      # The trap on the other end: an artifact is a zip, and a zip does not
+      # carry the executable bit. Whatever downloads this has to `chmod +x`
+      # before running it, or the failure is `Permission denied` on a file that
+      # is plainly there.
+      - name: Upload the migration bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: efbundle
+          path: efbundle
+          retention-days: 7
+          if-no-files-found: error
+
   # ---------------------------------------------------------------------------
   # Publish the image to ghcr.io -- #24, and the end of slice 2.
   #

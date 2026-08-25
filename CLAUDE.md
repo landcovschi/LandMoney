@@ -747,6 +747,84 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   called. Nothing to do until slice 5; worth setting when the server is created,
   since it is a parameter change and a restart rather than a data migration.
 
+  **The schema reaches the deployed database as `efbundle`, decided 2026-08-25**
+  (#37). `dotnet ef migrations bundle --self-contained -r linux-x64` produces one
+  executable holding the migrations, EF Core, Npgsql and the runtime; `ci.yml`
+  builds it in the `build` job from every commit and uploads it as an artifact,
+  and step 13 of `docs/deploy-azure.md` is how it is run. 128 MB, against 33 MB
+  without `--self-contained`.
+
+  **What lost.** `dotnet ef database update` from the runner -- the obvious one,
+  and it needs the SDK, the pinned tool and the source checked out in a job whose
+  only business is deploying. `dotnet ef migrations script --idempotent` -- SQL
+  that can be read before it runs, which is genuinely what a reviewer would want,
+  and it loses on who executes it: `psql` is another dependency to install and
+  another place the connection string has to arrive. Neither is wrong; the bundle
+  is the one that needs least where it lands.
+
+  **`Database.Migrate()` on startup stays out**, and `Program.cs` carries the
+  reason beside the `AddDbContext` call because the absent line is the surprising
+  one. Three reasons, and the third is the one that decides it: with
+  `--min-replicas 0` a cold start would run migrations on a path that already
+  costs 23.3 s; several replicas start together and each would run them; and a
+  migration that throws in there throws before `app.Run()`, so the container
+  exits, restarts, exits -- **an application that will not start, from a
+  deployment that reported success**. As a deployment step the same failure is a
+  red step with the SQL error in it and the previous revision still serving. What
+  it costs: the app will now start against a schema older than its model and fail
+  at the first query. Nothing checks that, deliberately -- a version check at
+  startup is the same coupling in a smaller coat. Worth knowing that concurrency
+  was never the sharp end: EF Core takes `LOCK TABLE "__EFMigrationsHistory" IN
+  ACCESS EXCLUSIVE MODE`, seen in the bundle's own output, so parallel starts
+  serialise rather than collide -- they just all wait.
+
+  **Building the bundle needs a connection string, and #37 did not predict it.**
+  `dotnet ef` starts the application's host to find the `DbContext`, so
+  `Program.cs` runs and throws on a missing `ConnectionStrings:Default`. It never
+  connects -- `Host=build-time-only` is enough. It does not fail on a developer
+  machine because `dotnet ef` applies the first profile in `launchSettings.json`,
+  that profile sets `ASPNETCORE_ENVIRONMENT=Development`, and Development is what
+  loads user-secrets; a runner has none, so the command that works locally
+  answers `Unable to create a 'DbContext' of type 'AppDbContext'`.
+
+  **The connection string reaches the bundle by environment, never by
+  `--connection`.** The argument exists and is the first thing the bundle's
+  `--help` lists; it also puts the password in the process list. Measured
+  instead: the bundle runs the application's own configuration pipeline, so
+  `ConnectionStrings__Default` reaches it the same way it reaches the app. Which
+  answers #37's "two places holding one secret" trap properly -- there is still
+  one place, the Container Apps secret from #36, read back with
+  `az containerapp secret show` at deploy time rather than copied into GitHub.
+
+  **A migration is atomic; a run of migrations is not** -- measured on a
+  throwaway database with a deliberately broken migration, not reasoned about.
+  Postgres has transactional DDL and Npgsql wraps each migration in its own
+  transaction, so the failing one leaves nothing behind, while the ones before it
+  are applied and recorded. **So the answer is fix forward, not restore from
+  backup:** because `__EFMigrationsHistory` is accurate, a corrected bundle
+  re-run resumes at exactly the migration that failed. Restore-from-backup is
+  what a migration that *succeeded* and destroyed data needs, which is a
+  different accident. The shape this does not cover is DDL Postgres cannot run in
+  a transaction -- `CREATE INDEX CONCURRENTLY` first -- and there is none yet.
+
+  **Migrate first, then deploy the revision.** So the old revision briefly runs
+  against the new schema, which is safe while every migration only adds -- code
+  that has never heard of an index is unaffected by one existing. The other order
+  puts the *new* revision against the *old* schema, which for an added column is
+  a query naming a column that is not there: strictly worse for the changes this
+  project makes. Neither order saves a rename; that needs expand-and-contract,
+  and nothing here does yet.
+
+  **`ix_transactions_occurred_at_created_at`, and it is not `IsDescending()`.**
+  The list query sorts `OccurredAt DESC, CreatedAt DESC`, so copying the LINQ
+  would have written a descending index. A btree is walked backwards just as
+  cheaply and a descending index only pays when the directions are mixed;
+  measured with `SET enable_seqscan = off`, the plan is `Index Scan Backward
+  using ix_transactions_occurred_at_created_at` with no sort step. The index is
+  justified by the shape of the one query this application makes, not by the row
+  count -- at a few thousand personal transactions Postgres will read the table
+  and sort it, and be right to.
+
   **The schema is `snake_case`, decided 2026-08-18** (#13), applied by the
   `EFCore.NamingConventions` package -- one call to
   `UseSnakeCaseNamingConvention()` beside `UseNpgsql`. PascalCase is the EF

@@ -80,3 +80,16 @@ src/LandMoney.Web/wwwroot/
 .claude/
 docs/
 *.md
+
+# --- The migration bundle -- #37 ---
+#
+# `efbundle` is built at the repository root, by ci.yml and by anyone following
+# step 13 of docs/deploy-azure.md, and it is 128 MB of self-contained linux-x64
+# runtime. It belongs to the deployment, not to the image: the image runs the
+# app, and the whole reason the bundle exists is that the app does not migrate
+# itself. Without this line a `docker build` on a machine that has just
+# downloaded one copies it into the build context and then into the SDK stage,
+# where it is invisible, weighs more than everything else in this repository put
+# together, and ships.
+efbundle
+efbundle.exe
