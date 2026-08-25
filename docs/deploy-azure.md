@@ -434,57 +434,53 @@ az containerapp logs show -g rg-landmoney -n landmoney --type console --tail 40
 
 ## The cold start, measured
 
-Not yet recorded -- the app had not scaled to zero by the time this was
-written, and a number measured against a running replica would be a warm
-start wearing a cold start's label. The measurement is a request to
-`/api/transactions` after `az containerapp replica list` reports zero:
+**23.3 seconds**, measured 2026-08-25 on a request to `/api/transactions` taken
+one minute after `replica list` first reported zero. The warm request that
+followed it took **0.23 s** -- a factor of a hundred.
+
+```
+20:11:05  replicas='1'
+20:11:37  replicas='0'
+COLD START: 23.3s  status 200
+WARM:       0.23s  status 200
+```
+
+**Scale-in took about fourteen minutes, not the configured five.** The scale
+block reads `cooldownPeriod: 300, pollingInterval: 30, rules: null`, and the
+replica stayed `Running` for roughly fourteen minutes after the last request
+before disappearing. So the cooldown is a floor rather than a schedule, and
+anything that measures a cold start has to wait for `replica list` to actually
+report zero rather than trusting the clock:
 
 ```
 az containerapp replica list -g rg-landmoney -n landmoney --revision <revision> --query "length(@)" -o tsv
 ```
 
-For reference, the numbers that *are* measured: the very first request to a
-freshly created revision took **9.7 s**, and a warm request **0.2 s**.
-Scale-in took longer than the nominal five-minute cooldown -- still one
-replica six minutes after the last request.
+### What 23 seconds costs, and where
 
-## What this costs, and the date to remember
+**Opening the URL cold is fine.** The *document* request pays the 23 seconds,
+and a browser has no timeout of its own on a page load, so the page simply takes
+a while. By the time the client's JavaScript runs its first `fetch`, the
+container is warm and the API answers in fractions of a second.
 
-Three different things get called free and only one of them is a year.
+**A tab left open is the case that breaks.** `src/landmoney.client/src/api/transactions.ts`
+sets `REQUEST_TIMEOUT_MS = 10_000`, with a comment saying ten seconds is
+"generous for a Postgres on the same machine". That was true when it was
+written and is not true here: after ~14 idle minutes the app scales to zero, and
+the next `fetch` from an already-loaded page meets a cold container, gives up at
+10 s, and shows the timeout message. A retry then succeeds, because the first
+attempt started the container.
 
-**The Free Trial: 30 days, $200 credit, spending limit on.** While that limit is
-on, exceeding the allowances *disables resources* rather than charging the card
--- which is the real protection, and worth confirming rather than assuming.
+This is **not fixed here** -- it is adjacent to #35 and belongs to whoever picks
+it up. Worth knowing before choosing: raising the constant makes a real hang
+take longer to report, which is the exact failure the timeout exists to prevent.
+The alternatives are a longer timeout only on the first request of a session, a
+warm-up request fired when the page loads, or `--min-replicas 1`, which gives up
+the reason Container Apps was chosen over App Service in the first place.
 
-**At 30 days the subscription is disabled unless it is upgraded to
-Pay-As-You-Go.** Upgrading is also what **removes the spending limit**, so that
-is the moment the card becomes live. The subscription was created **2026-08-25**,
-which puts that decision around **2026-09-24**.
-
-**Twelve months of free services, to 2026-08-25 + 1 year**, and it covers
-specific quantities of specific services rather than everything running: B1ms for
-750 hours a month (more hours than a month has, so continuous), 32 GB storage,
-32 GB backup. That is exactly the shape #34 specified, and the reason
-`--storage-size 32` and `--storage-auto-grow Disabled` are not arbitrary.
-Afterwards, roughly **15-20 USD a month**.
-
-**Container Apps is a different allowance again** -- a permanent monthly grant
-rather than a twelve-month one, and with `--min-replicas 0` this app sits far
-inside it.
-
-**The Log Analytics workspace is the one to watch.** It is created by
-`env create` without being asked for, its ingestion is covered by neither of the
-above, and it is therefore the likeliest source of a surprise line on a bill.
-
-Set a budget with an alert. **Not from the CLI**: `az consumption budget create`
-in this version has no notification parameters at all, so it would create a
-budget that never tells anyone anything -- worse than none, because it looks
-like protection. Portal, **Cost Management + Billing -> Budgets -> Add**, with
-thresholds and an email address.
-
-These numbers are off Azure's published terms on 2026-08-25 and Azure changes
-them. Cost Management -> Free services shows the live consumption against each
-allowance, and is the authority over this section.
+It also lands directly on the roadmap's own bar for this slice, **"the URL works
+from a phone"** -- on a phone the first interaction after a pause is exactly this
+case.
 
 ## Tearing it all down
 
