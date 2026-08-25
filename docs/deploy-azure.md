@@ -635,6 +635,38 @@ The SHA is the merge commit on `main`, and `ci.yml` writes the digest to the run
 summary. **This is the step #38 exists to delete**, and doing it by hand once is
 the point.
 
+**Done, and what it answered.** Revision `landmoney--0000002` on
+`sha-25720b96132412609096b4844c6ef33c255f2a6f`:
+
+```
+HTTP/1.1 200 OK
+server: Kestrel
+cache-control: no-cache
+strict-transport-security: max-age=2592000
+```
+
+Two claims that were reasoning until this request, and are now measurements.
+**The ingress does send `X-Forwarded-Proto`** -- nothing in this application
+echoes a request header, so there was no way to see it from the inside, and the
+HSTS header appearing is the only proof available that the scheme arrived.
+And the startup log no longer carries `Failed to determine the https port for
+redirect`, which has been printed at every start since #23 predicted it: the
+redirect is now a no-op because there is nothing to redirect, rather than
+because it cannot find a port.
+
+Two traps in checking this, both met. The tag has to be the **merge commit**,
+and a `$(git rev-parse HEAD)` evaluated on the feature branch names a commit no
+image was ever built for -- `ci.yml` publishes on pushes to `main` only, so the
+tag simply does not exist. And these `curl | grep` lines are shell, not
+PowerShell: `grep` is not a cmdlet, and the PowerShell spelling is
+
+```powershell
+curl.exe -sSI https://<app>.polandcentral.azurecontainerapps.io/ | Select-String strict-transport
+```
+
+with `curl.exe` written out, because in Windows PowerShell 5.1 a bare `curl` is
+an alias for `Invoke-WebRequest`, which takes none of these arguments.
+
 ## Tearing it all down
 
 One command, and it is the reason everything went into one resource group:
