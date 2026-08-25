@@ -30,6 +30,28 @@ inspected.
 | Environment     | `cae-landmoney`     |                                                         |
 | Container app   | `landmoney`         | First label of the URL                                  |
 
+**Why the database's full host name is `<server>` below and not spelled out**,
+decided in #36. The container app's FQDN is written out everywhere in this
+repository and should be -- it is a public website, and its whole job is to be
+reachable. The database's FQDN is the opposite: password authentication, opened
+to every Azure tenant by the 0.0.0.0 rule in step 5, and this repository is
+public. Publishing `host + username` hands out two of the three things needed
+to try the third.
+
+Read as a security control that is theatre, and it is not one: the table above
+still names the server, the suffix is the same for every Flexible Server on
+earth, and anyone who wants the string can assemble it in five seconds. What it
+is worth is that the string does not exist here ready to be pasted into a
+scanner, and that grepping the repository for the deployed host name answering
+nothing stays a check that means something the day a real connection string is
+nearly committed. The controls remain the password and enforced TLS, exactly as
+before.
+
+That check has to be run with the host name typed on the command line rather
+than written into a file, or the file that documents it becomes the thing it
+finds -- which is how this paragraph was first written, and what the check
+itself reported.
+
 ## Step 0 -- the CLI, and one bug in it
 
 ```
@@ -295,7 +317,7 @@ The password comes from the variable, so the line typed contains only its name
 and the shell history records only that:
 
 ```
-$env:ConnectionStrings__Default = "Host=psql-landmoney-pl.postgres.database.azure.com;Port=5432;Database=landmoney;Username=landmoney;Password=$pgPlain;SSL Mode=Require;Timeout=15;Command Timeout=30"
+$env:ConnectionStrings__Default = "Host=<server>.postgres.database.azure.com;Port=5432;Database=landmoney;Username=landmoney;Password=$pgPlain;SSL Mode=Require;Timeout=15;Command Timeout=30"
 dotnet tool restore
 dotnet ef database update --project src/LandMoney.Web
 ```
@@ -342,7 +364,7 @@ ingestion is not covered by the twelve-month Postgres allowance.
 ## Step 10 -- the container app
 
 ```
-$pgConn = "Host=psql-landmoney-pl.postgres.database.azure.com;Port=5432;Database=landmoney;Username=landmoney;Password=$pgPlain;SslMode=Require;Timeout=15;CommandTimeout=30"
+$pgConn = "Host=<server>.postgres.database.azure.com;Port=5432;Database=landmoney;Username=landmoney;Password=$pgPlain;SslMode=Require;Timeout=15;CommandTimeout=30"
 ```
 
 **Note the spelling change from step 8**: `SslMode` and `CommandTimeout` rather
@@ -481,6 +503,137 @@ the reason Container Apps was chosen over App Service in the first place.
 It also lands directly on the roadmap's own bar for this slice, **"the URL works
 from a phone"** -- on a phone the first interaction after a pause is exactly this
 case.
+
+## Step 12 -- configuration, and where it lives
+
+**This is #36**, and half of it was already done in step 10 because doing it the
+other way round would have left the password readable. What follows is the whole
+picture in one place, since configuration is the part of a deployment that is
+invisible in a diff.
+
+There are exactly three places a setting can live, and each is chosen for a
+reason:
+
+| Where                            | What is in it                              | Why there                                                                        |
+| -------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------- |
+| `appsettings.json`, in git       | Log levels, and nothing else               | It is public. Anything here is published                                          |
+| User-secrets, on this machine    | The **local** connection string            | A development-machine feature. It does not exist in a container                    |
+| A Container Apps **secret**      | The **deployed** connection string         | The only one of the three that is neither in git nor tied to one developer's disk |
+
+The application cannot tell the difference. `builder.Configuration` reads
+environment variables in every environment, and `ConnectionStrings__Default`
+becomes the key `ConnectionStrings:Default` -- which is what
+`GetConnectionString("Default")` asks for, and what user-secrets fills locally.
+One line in `Program.cs`, three sources, no branch on environment anywhere.
+
+**`ConnectionStrings__Default`, with two underscores.** The environment variable
+provider maps `__` to `:` because a colon is not legal in a variable name on
+every platform. A single underscore is not an error -- it produces the key
+`ConnectionStrings_Default`, which nothing reads, so the application fails at
+startup with the user-secrets message from `Program.cs` and sends whoever reads
+it to the wrong machine entirely.
+
+### The environment name, set rather than defaulted
+
+```
+az containerapp update -g rg-landmoney -n landmoney --set-env-vars ASPNETCORE_ENVIRONMENT=Production
+```
+
+**This changes no behaviour at all, and is worth running anyway.** Measured in
+#35 before it was set: the container already logged `Hosting environment:
+Production`, because the ASP.NET Core default when the variable is absent *is*
+Production, and the `aspnet` base image does not set it. So this is not a fix.
+What it buys is that the value is now a declared fact instead of a default --
+and what hangs off it is not cosmetic. `Program.cs` gates `UseExceptionHandler`,
+`UseHsts`, `UseHttpsRedirection` and now `UseForwardedHeaders` on
+`!app.Environment.IsDevelopment()`. A one-word typo in that variable, set by
+anything later, silently turns all four off. Written down, it is a line in
+`az containerapp show`; defaulted, it is nowhere.
+
+**`--set-env-vars` adds and updates; `--replace-env-vars` removes everything
+else.** They are one word apart in the same help text, and the wrong one here
+deletes `ConnectionStrings__Default` and leaves an app that starts, throws at
+`Program.cs`, and reports a missing user secret. The CLI's own wording, which is
+the thing to read rather than a blog post:
+
+```
+--set-env-vars      : Add or update environment variable(s) in container.
+                      Existing environment variables are not modified.
+--replace-env-vars  : Replace environment variable(s) in container. Other
+                      existing environment variables are removed.
+```
+
+So the check after running it is not "did it succeed" but "is the other one
+still there":
+
+```
+az containerapp show -g rg-landmoney -n landmoney --query "properties.template.containers[0].env" -o json
+```
+
+```
+[
+  { "name": "ConnectionStrings__Default", "secretRef": "pgconn", "value": "" },
+  { "name": "ASPNETCORE_ENVIRONMENT", "value": "Production" }
+]
+```
+
+That output is also #36's acceptance test, and the **empty** `value` beside the
+`secretRef` is the whole of it: the field exists and holds nothing, because what
+fills it is resolved when the container starts and never travels back out. A
+secret referenced this way is not returned by `show`, by the portal, or in a
+revision's template -- `az containerapp secret list` without `--show-values`
+answers with names only. (Before this command was run, `show` omitted the
+`value` key entirely rather than printing it empty. Same meaning, different
+shape, and worth recognising rather than reading as a change.)
+
+**What the update actually did, read back rather than assumed:**
+
+```
+az containerapp revision list -g rg-landmoney -n landmoney --all -o table
+
+Name                Active    Created
+landmoney--r7hjn68  False     2026-08-25T16:53:33+00:00
+landmoney--0000001  True      2026-08-25T20:33:14+00:00
+```
+
+Both worth noticing. **`revision list` without `--all` shows only active
+revisions**, so the one that was just replaced looks deleted rather than
+deactivated -- and it is not deleted; it is retained, and it is what a rollback
+targets. And the new revision is named `0000001` where `create` produced the
+random `r7hjn68`: an update with no `--revision-suffix` numbers them
+sequentially, so revision names in this app do not share one shape and cannot be
+sorted to find the newest. `createdTime` can.
+
+### Changing a secret needs a new revision
+
+Container Apps revisions are immutable. `az containerapp secret set` updates the
+app's secret store, and **the running revision keeps serving the old value**, so
+a configuration change that appears to have done nothing is almost always this:
+
+```
+az containerapp secret set -g rg-landmoney -n landmoney --secrets "pgconn=$pgConn"
+az containerapp revision restart -g rg-landmoney -n landmoney --revision <name>
+```
+
+`az containerapp update` of any kind creates a new revision on its own, which is
+why the environment-variable command above needs no restart. Setting only a
+secret does not.
+
+### The one thing here that needs a new image
+
+`UseForwardedHeaders` is a code change, so it reaches Azure only when an image
+containing it does. Nothing above deploys it. Until then the deployed app is the
+previous image and its `Strict-Transport-Security` header stays absent -- which
+is the verification, so it is also the tell:
+
+```
+az containerapp update -g rg-landmoney -n landmoney --image ghcr.io/landcovschi/landmoney:sha-<40 characters>
+curl -sSI https://<app>.polandcentral.azurecontainerapps.io/ | grep -i strict-transport
+```
+
+The SHA is the merge commit on `main`, and `ci.yml` writes the digest to the run
+summary. **This is the step #38 exists to delete**, and doing it by hand once is
+the point.
 
 ## Tearing it all down
 

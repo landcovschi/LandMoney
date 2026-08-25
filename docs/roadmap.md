@@ -409,8 +409,47 @@ process and a database beside it. Something has to run the container, and that
 is what Azure is here for. Worth knowing the split rather than discovering it
 halfway through a deployment.
 
-- [ ] Real configuration and secrets handling -- no connection string in git
-      -- #36
+- [x] Real configuration and secrets handling -- no connection string in git
+      -- #36, 2026-08-25. Three places a setting can live and the code knows of
+      none of them: `appsettings.json` for log levels, user-secrets locally, a
+      **Container Apps secret** deployed, reached as
+      `ConnectionStrings__Default=secretref:pgconn`. `az containerapp show`
+      returns `secretRef` and no value, and `git grep` finds no password
+      anywhere. Step 12 of `docs/deploy-azure.md` has every command; `README.md`
+      has the short version, because configuration never appears in a diff
+
+      **`ASPNETCORE_ENVIRONMENT=Production` set although it changes nothing** --
+      #35 measured the container already logging `Hosting environment:
+      Production`, that being the default when the variable is absent. It is
+      written down because four middlewares are gated on `!IsDevelopment()` and
+      a typo in that variable would turn all four off silently
+
+      **The redirect question turned out to be the wrong question.** Behind the
+      ingress `Request.IsHttps` is false, `HstsMiddleware` returns early on
+      exactly that, and so **the deployed app was sending no
+      `Strict-Transport-Security` header at all** -- measured with `curl -I`,
+      not reasoned about. `UseHttpsRedirection` announced its own uselessness
+      once per start; HSTS was silent, which is worse. `UseForwardedHeaders`
+      with `XForwardedProto` and nothing else fixes both: HSTS emits, and the
+      redirect becomes a no-op by design rather than by degradation.
+      `XForwardedFor` stays out -- it buys nothing here and is a spoofable
+      client IP later
+
+      **The trust lists have to be cleared, and a local test cannot prove it.**
+      Checked by mutation, #21's discipline: from `localhost` the mutated build
+      is indistinguishable, because loopback is the one proxy the defaults
+      trust. Sent to the machine's LAN address instead, the mutation dies. A
+      proxy-trust bug cannot be reproduced from the machine running the process.
+      Two smaller ones met on the way: `KnownNetworks` is `[Obsolete]` in favour
+      of `KnownIPNetworks` (the compiler catching what #22 and #24 caught by
+      hand), and `HstsOptions.ExcludedHosts` holds `localhost` by default, which
+      made the first measurement read as a failure that was not one
+
+      **Not yet true in Azure**, and this is the honest gap: `UseForwardedHeaders`
+      is a code change, so it arrives only with a new image. The environment
+      variable is a one-line `az containerapp update`; the HSTS header appearing
+      on the deployed URL is what closes it, and #38 is what stops this being
+      a hand step at all
 - [ ] Migrations applied as a deployment step, not on application startup
       -- #37, which also has to say out loud why `Database.Migrate()` on startup
       stays out: with `--min-replicas 0` a cold start would run migrations, and
