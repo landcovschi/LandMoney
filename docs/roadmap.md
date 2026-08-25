@@ -383,7 +383,20 @@ is run, and the difference should be understood rather than glossed over.
        category too small to measure does not become harmless, it becomes a coin
        flip the average takes seriously. Three rows is the floor, five the
        target, and the scorer names any category under it
-2. [ ] **A rules baseline.** String matching on the description. Score it.
+
+       **A set landed 2026-08-25 and it is not real spending**, which is why
+       this box is still empty. 45 labelled rows and 8 held out, written and
+       labelled by Claude on the owner's explicit instruction, the day after
+       #44 had refused to invent them. It unblocks everything downstream --
+       there is a number, the scorer runs end to end, slice 4 has something to
+       be scored against -- and it does not satisfy the line above it, because
+       the label distribution was chosen rather than observed, the terse rows
+       are one person's idea of how somebody else writes tersely, and every
+       description is English. `docs/evals.md` section 5 has the four
+       consequences. **This ticks the day real rows replace them**, which is an
+       edit to two CSV files and a re-run: nothing in `evals/` knows where a row
+       came from
+2. [x] **A rules baseline.** String matching on the description. Score it.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat
 
@@ -415,6 +428,20 @@ is run, and the difference should be understood rather than glossed over.
        everything in this repository is. Descriptions typed in Russian or
        Romanian score close to zero, and that is a finding to record rather than
        patch around -- it is the strongest argument the model half will get
+
+       **Scored 2026-08-25: macro recall 60.8%, accuracy 62.2% on 45 rows.**
+       That is the number to beat, and it is measured against the synthetic set
+       above rather than against real spending. No rule was edited after seeing
+       a miss. What the misses say is about the baseline rather than the data:
+       **16 of 17 are abstentions, not confusions** -- `Blood tests`,
+       `Oil change`, `Winter boots`, `Dry cleaning` match nothing at all, so
+       substring matching fails here by not covering rather than by being wrong.
+       The one confident error is `Parking fine` -> `transport`, `parking`
+       sitting above `fine`, which is an ordering collision of exactly the kind
+       described above and is left alone. And **`other` scores 0% and cannot
+       score anything else**: there is no substring meaning "fits nothing", so
+       any abstaining substring baseline has a hard ceiling of 90.9% across
+       eleven categories, which is 9.1 of the 39.2 points missing here
 3. [ ] A Python service (FastAPI) that categorises a transaction. Called by the
        .NET app over HTTP, with a timeout and a fallback to the rules -- #39,
        which carries the rules from step 2 inside it so the baseline and the

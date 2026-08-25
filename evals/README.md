@@ -33,13 +33,27 @@ no package yet.
 
 ## The state of this today
 
-`transactions.csv` holds a header and no rows, so `score.py` exits 1 and says
-so. **That is the honest state, not a bug.** The half of #25 that is left is the
-half nobody else can do: 30-50 transactions from real spending, labelled by
-hand. Everything around it -- the vocabulary, the metric, the baseline, the
-scorer and its tests -- is here and checked.
+`transactions.csv` holds **45 labelled rows and none of them are real spending**,
+and `holdout.csv` holds 8 more with the category column empty. #25 asks for
+transactions out of the owner's own history; PR #44 left the files empty rather
+than invent them, and on 2026-08-25 the owner asked for them to be written
+instead. The baseline scores **60.8% macro recall** against them.
+
+Read that number with `docs/evals.md` section 5 open, which is where the four
+things it does not mean are written down. The short version: the label
+distribution was chosen rather than observed, the descriptions are English, and
+the labels were produced by the same kind of thing slice 4 is going to score
+against them. Replacing these rows with real ones is a change to two CSV files
+and nothing else -- the loader, the metric and the rules do not know where a row
+came from.
+
+Everything around the data -- the vocabulary, the metric, the baseline, the
+scorer and its 26 tests -- was written on 2026-08-24, before any of it.
 
 ## How to label
+
+The rows that are there were written against these instructions and break the
+first of them. When they are replaced with real ones, this is the list to follow.
 
 1. **Take the descriptions from real spending**, as they are really typed. The
    terse ones and the ambiguous ones are the valuable rows; a set of only the
