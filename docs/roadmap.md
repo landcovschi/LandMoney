@@ -445,11 +445,14 @@ halfway through a deployment.
       hand), and `HstsOptions.ExcludedHosts` holds `localhost` by default, which
       made the first measurement read as a failure that was not one
 
-      **Not yet true in Azure**, and this is the honest gap: `UseForwardedHeaders`
-      is a code change, so it arrives only with a new image. The environment
-      variable is a one-line `az containerapp update`; the HSTS header appearing
-      on the deployed URL is what closes it, and #38 is what stops this being
-      a hand step at all
+      **Verified in Azure the same day**, on revision `landmoney--0000002`
+      running `sha-25720b9`: `strict-transport-security: max-age=2592000` on the
+      deployed URL, and `Failed to determine the https port for redirect` gone
+      from the startup log after appearing at every start since #23 predicted
+      it. That header arriving also settles the one thing the code comment could
+      not: **Container Apps' ingress does send `X-Forwarded-Proto`**, which until
+      the deployment was reasoning rather than measurement. #38 is what stops the
+      image update being a hand step
 - [ ] Migrations applied as a deployment step, not on application startup
       -- #37, which also has to say out loud why `Database.Migrate()` on startup
       stays out: with `--min-replicas 0` a cold start would run migrations, and

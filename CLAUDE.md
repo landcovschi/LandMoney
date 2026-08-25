@@ -605,6 +605,13 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   design* rather than by degradation -- a different thing to read in a log --
   and the line stays for the day something does forward plain http.
 
+  **Confirmed deployed on revision `landmoney--0000002`:** the header is
+  `max-age=2592000`, and the redirect warning is gone from the startup log after
+  appearing at every start since #23 predicted it. That is also the only proof
+  obtainable that **the ingress sends `X-Forwarded-Proto`** -- nothing in this
+  application echoes a request header, so the emitted HSTS header is the
+  measurement rather than a symptom of one.
+
   **`XForwardedFor` deliberately stays out.** It is what every example pairs
   with `XForwardedProto`, and taking it would set `RemoteIpAddress` from a
   header on a middleware whose trust list must be cleared. Nothing here logs or

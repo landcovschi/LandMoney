@@ -153,6 +153,13 @@ if (!app.Environment.IsDevelopment())
     // The last row is the one to remember: a proxy-trust bug cannot be
     // reproduced from the machine running the process.
     //
+    // Confirmed on the deployed app once an image carrying this shipped:
+    // `strict-transport-security: max-age=2592000` on revision 0000002, where
+    // the revision before it sent no such header. That is also the only
+    // available proof that the ingress sends X-Forwarded-Proto at all -- nothing
+    // here echoes a request header back, so the emitted HSTS header is the
+    // measurement.
+    //
     // It is `KnownIPNetworks`, not the `KnownNetworks` every example still
     // shows -- that one is `[Obsolete]` here and the build says so
     // (ASPDEPR005), because it is typed on
