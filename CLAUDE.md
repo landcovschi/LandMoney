@@ -477,9 +477,99 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   static files only, and this needs a live process plus a database. Container
   Apps was picked over App Service because a second container (the Python
   categorizer) is coming, and it scales to zero when idle.
-- **Database: Postgres.** Azure Database for PostgreSQL is not free; while
-  learning, Postgres runs as a container next to the app. That is not how
-  production is run and the difference is to be understood, not glossed over.
+- **Database: Postgres. A container locally, Azure Database for PostgreSQL
+  Flexible Server once deployed -- decided 2026-08-25** (#34). This replaces the
+  sentence that stood here before, "Azure Database for PostgreSQL is not free;
+  while learning, Postgres runs as a container next to the app", which was
+  written when there was nowhere to deploy to. It described a preference rather
+  than an arrangement, and slice 3 needs an arrangement: the connection string,
+  the migration step of #37 and the monthly bill all hang off it.
+
+  `docker-compose.yml` is untouched and stays the development database. What
+  changes is that **"it works locally" and "it works deployed" stop being the
+  same sentence** -- two Postgres instances, two versions to keep equal, two
+  sets of credentials, and only one of them has a firewall in front of it.
+
+  **The shape:** Burstable `Standard_B1ms` (1 vCore, 2 GiB), 32 GB storage,
+  high availability disabled, PostgreSQL 17 to match the local
+  `pgvector/pgvector:pg17` of `docker-compose.yml`.
+  **Free for twelve months**, because the Azure free account includes 750 hours
+  a month of B1ms plus 32 GB storage and 32 GB backup, and 750 hours is more
+  than a month has -- so it is a database running continuously, not a quota to
+  ration. Eligibility is "never had an Azure subscription": the subscription
+  does not exist yet and gets created in #35, so **the clock starts there and
+  there is exactly one of these to spend**.
+
+  **What it costs when the twelve months end**, which is the part to have
+  written down before it arrives rather than after: roughly **15-20 USD a
+  month**, being about 12 for B1ms compute and 4-5 for 32 GB of storage,
+  region-dependent. That figure is off published pricing pages on 2026-08-25 and
+  not off the calculator with a region selected, so treat it as the order of
+  magnitude and not the bill. The lever if it matters:
+  `az postgres flexible-server stop` halts **compute** billing while storage
+  keeps billing -- and the server **starts itself again after 7 days**, so it is
+  a recurring manual act or an automation runbook, not a setting.
+
+  **The database does not scale to zero, and that asymmetry is deliberate.**
+  Scale-to-zero is why Container Apps was chosen for the *app*; B1ms is always
+  on and always billed. #34 phrased this as "`min-replicas` for the database
+  cannot be 0", and a managed server satisfies it by construction -- there is no
+  replica count to set wrong. Worth keeping the distinction the phrasing hides:
+  the failure it warns about is a *container replica* being descheduled, which
+  drops connections and, without a volume, the data. A serverless Postgres that
+  suspends its compute and wakes on the next connection is a different thing and
+  is not what that rule forbids.
+
+  **Three things that lost.**
+
+  *Postgres as a second container app*, which reads as the cheap continuation of
+  the compose file. The route that would have made it viable is gone: the
+  Container Apps **dev-service add-on was retired on 2025-09-30**, and
+  Microsoft's own guidance is to move to a managed service. What is left is a
+  Container Apps volume, which is Azure Files and therefore SMB -- Postgres's
+  durability assumptions about `fsync` and file locking are not what that
+  protocol offers -- or no volume at all, where the data lives on the replica's
+  disk and is gone at the next revision. That second one is the worst failure
+  shape available here: slice 1's acceptance test, "a transaction survives a
+  restart", stays **true locally and false deployed**, with nothing reporting
+  the difference.
+
+  *Neon's free plan.* 0.5 GB of storage, 100 CU-hours a month, compute suspends
+  after five minutes of inactivity and **cannot be told not to** on the free
+  plan, waking in roughly 300-500 ms. Genuinely free with no twelve-month
+  fuse, genuinely used in the industry, and comfortably inside every limit for
+  one person entering transactions weekly. It lost on what this slice is *for*
+  rather than on anything technical: moving the database out of Azure removes
+  exactly the half of it worth learning -- a firewall rule or a delegated
+  subnet, enforced SSL, managed backups, and a bill that arrives. It is also the
+  cost of a second vendor, a second dashboard and a connection leaving Azure for
+  the public internet. **This is the answer to reopen when the free year ends**
+  and the honest question is whether a spending tracker one person uses weekly
+  is worth 15-20 USD a month.
+
+  *Supabase's free plan.* 500 MB, and it **pauses the whole project after a week
+  with no API requests**, resumed by hand. For an application used weekly that
+  is a coin flip, and it fails as "the site is down" rather than as "the first
+  query is slow", which is the worse of the two.
+
+  **The networking trap #35 walks into, named now.** A Container App on the
+  Consumption workload profile has **no stable outbound IP**, so a Flexible
+  Server firewall rule pinned to an address does not hold. The two honest routes
+  are "Allow public access from any Azure service within Azure" -- a 0.0.0.0
+  rule, which admits every Azure tenant's resources and not merely this
+  subscription -- or VNet integration with a delegated subnet and private
+  access, which is more to set up and is what a production system would do. A
+  static egress IP needs a NAT gateway, which needs a workload-profiles
+  environment rather than a Consumption-only one, so it is not a checkbox.
+
+  **`pgvector` is available and is not spelled that way.** `docker-compose.yml`
+  runs `pgvector/pgvector:pg17` on purpose, so slice 5 does not force recreating
+  the volume. Flexible Server has the extension on every compute tier including
+  Burstable, but it must be allowlisted in the `azure.extensions` server
+  parameter, and **the name to put there is `vector`** -- `pgvector` is what the
+  community calls it, `vector` is what the binary and `CREATE EXTENSION` are
+  called. Nothing to do until slice 5; worth setting when the server is created,
+  since it is a parameter change and a restart rather than a data migration.
 
   **The schema is `snake_case`, decided 2026-08-18** (#13), applied by the
   `EFCore.NamingConventions` package -- one call to

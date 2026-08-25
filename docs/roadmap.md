@@ -299,12 +299,46 @@ public repositories. One fewer paid service, one fewer set of credentials.
 
 **Skill:** the gap netshift never closed. This is the "CD" the owner asked for.
 
+- [x] **Where Postgres lives once this is deployed** -- #34, 2026-08-25.
+      A decision, no code: **Azure Database for PostgreSQL Flexible Server**,
+      Burstable `Standard_B1ms`, 32 GB storage, no high availability,
+      PostgreSQL 17 to match the local `pgvector/pgvector:pg17`. Free for twelve
+      months on the free account (750 h/month of B1ms plus 32 GB storage and
+      32 GB backup -- more hours than a month has, so it runs continuously),
+      then roughly 15-20 USD a month. The subscription does not exist yet, so
+      **the twelve months start in #35**, not now.
+
+      **The deployed arrangement, which is the thing to hold in mind from
+      here on:** one Container App pulling from `ghcr.io`, scaling to zero,
+      talking over TLS to a managed Postgres that does *not* scale to zero.
+      `docker-compose.yml` stays exactly as it is and is now the *development*
+      database only -- "it works locally" and "it works deployed" have stopped
+      being the same sentence, and everything from #35 onward is about the
+      second one
+
+      The alternatives and their real costs are written into `CLAUDE.md` the
+      way #13 and #17 are. In short: **Postgres as a second container app** lost
+      hardest -- the Container Apps dev-service add-on was retired 2025-09-30,
+      an Azure Files volume is SMB and Postgres's `fsync`/locking assumptions
+      are not what SMB offers, and no volume at all makes slice 1's "a
+      transaction survives a restart" *true locally and false deployed*.
+      **Neon's free plan** is the one to reopen when the free year ends, and it
+      lost on purpose rather than on merit: it is free forever and inside every
+      limit for weekly single-user use, and moving the database out of Azure
+      removes the half of this slice worth learning. **Supabase** pauses a free
+      project after a week with no requests, which for weekly use fails as "the
+      site is down"
 - [ ] Azure Container Apps, deployed from GitHub Actions, pulling from
       `ghcr.io` -- by hand first in #35, automated in #38. The order is
       deliberate: a deployment written straight into a workflow fails inside a
-      runner where nothing can be inspected. Before either, #34 decides where
-      Postgres lives once this is deployed, which is what the connection string,
-      the migration step and the monthly cost all hang off
+      runner where nothing can be inspected. Two things #34 leaves on the mat
+      for #35: a Container App on the Consumption workload profile has **no
+      stable outbound IP**, so a Flexible Server firewall rule pinned to an
+      address will not hold -- the choice is a 0.0.0.0 "any Azure service" rule,
+      which admits every Azure tenant and not just this subscription, or VNet
+      integration with a delegated subnet; and `pgvector` is allowlisted in the
+      `azure.extensions` parameter under the name **`vector`**, worth doing when
+      the server is created rather than as a restart in slice 5
 
 **Why not "all of it in GitHub".** GitHub covers two of the three layers: the
 pipeline (Actions) and the registry (`ghcr.io`). It does not cover the third.
@@ -340,9 +374,14 @@ that can be read before it runs, which is what a DBA would ask for.
 no SDK where it runs -- the container-shaped answer, and the one expected to
 win here.
 
-**On cost:** Azure Database for PostgreSQL is not free. The cheap route while
-learning is Postgres as a container next to the app. That is not how production
-is run, and the difference should be understood rather than glossed over.
+**On cost, settled in #34 and no longer an open question.** Azure Database for
+PostgreSQL is not free, but it is free *here* for twelve months, and the cheap
+route this paragraph used to recommend -- Postgres as a container next to the
+app -- turned out not to be a route at all once Container Apps storage was
+looked at rather than assumed. The number to remember is what happens after the
+twelve months: 15-20 USD a month, with `az postgres flexible-server stop` as the
+only lever, halting compute billing but not storage, and starting the server
+again by itself after 7 days.
 
 **Done when:** a push to `main` reaches the running site with no manual step.
 
