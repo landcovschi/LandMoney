@@ -1,1 +1,46 @@
 occurred_at,amount,currency,description,category
+2026-06-26,4500.00,MDL,"Rent, July",housing
+2026-06-27,389.50,MDL,"Linella, weekly shop",groceries
+2026-06-28,120.00,MDL,Shaorma,eating-out
+2026-06-29,45.00,MDL,"Parking, city centre",transport
+2026-06-30,9.99,EUR,Netflix,subscriptions
+2026-07-01,650.00,MDL,Pharmacy,health
+2026-07-02,1180.00,MDL,"Fuel, full tank",transport
+2026-07-03,74.00,MDL,Latte and a croissant,eating-out
+2026-07-04,230.00,MDL,"Bakery, bread and buns",groceries
+2026-07-05,899.00,MDL,Headphones,shopping
+2026-07-06,400.00,MDL,Internet,housing
+2026-07-07,180.00,MDL,Cinema tickets,leisure
+2026-07-08,55.00,MDL,Bank card maintenance,fees
+2026-07-09,320.00,MDL,"Market, vegetables",groceries
+2026-07-10,250.00,MDL,Haircut,other
+2026-07-11,2400.00,MDL,"Dentist, filling",health
+2026-07-12,199.00,EUR,Flight to Bucharest,leisure
+2026-07-13,150.00,MDL,"Taxi home, late",transport
+2026-07-14,89.00,MDL,"Coffee beans, 1kg",groceries
+2026-07-15,143.00,EUR,"Hotel, two nights",leisure
+2026-07-16,300.00,MDL,Mobile plan top-up,subscriptions
+2026-07-18,780.00,MDL,Electricity bill,housing
+2026-07-19,95.00,MDL,Beers after work,eating-out
+2026-07-20,1500.00,MDL,Birthday present for mum,gifts
+2026-07-21,60.00,MDL,Dry cleaning,other
+2026-07-22,430.00,MDL,Dishwasher tablets and soap,groceries
+2026-07-23,2900.00,MDL,"Car insurance, annual",transport
+2026-07-24,250.00,MDL,Pizza delivery,eating-out
+2026-07-25,500.00,MDL,"Gym, monthly",subscriptions
+2026-07-27,120.00,MDL,"Novel, paperback",leisure
+2026-07-28,800.00,MDL,Parking fine,fees
+2026-07-30,1750.00,MDL,Winter boots,shopping
+2026-08-01,4500.00,MDL,"Rent, August",housing
+2026-08-02,340.00,MDL,Blood tests,health
+2026-08-03,29.99,USD,"Cloud storage, yearly",subscriptions
+2026-08-04,210.00,MDL,Flowers,gifts
+2026-08-05,640.00,MDL,Lunch with Ana,eating-out
+2026-08-06,1100.00,MDL,Oil change,transport
+2026-08-08,35.00,EUR,Transfer fee,fees
+2026-08-10,2600.00,MDL,New glasses,health
+2026-08-12,470.00,MDL,Desk lamp,shopping
+2026-08-14,300.00,MDL,"Donation, animal shelter",gifts
+2026-08-16,520.00,MDL,"T-shirts, two",shopping
+2026-08-18,180.00,MDL,Board game,leisure
+2026-08-20,140.00,MDL,"Post, parcel to Chisinau",other

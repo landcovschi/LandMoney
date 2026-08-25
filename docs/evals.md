@@ -7,6 +7,14 @@ labelled, and no model has been called at all.
 This is the rule carried over from netshift unchanged: no LLM call before evals
 exist. Without a number, "it got better" is a feeling.
 
+**One thing about this set changes how to read every number below, added
+2026-08-25.** `evals/transactions.csv` does not hold real spending. #25 asked
+for 30-50 transactions out of the owner's own history, and PR #44 left the file
+empty on the argument that only the owner can produce them; on 2026-08-25 the
+owner asked Claude to write and label the rows instead. What that costs is
+section 5, and it is not small. Everything else in this file was written before
+any of it and is unchanged.
+
 The code lives in `evals/`. This file holds the two decisions that are worth
 more than the code and would otherwise be re-argued from scratch: **what the
 categories are**, and **what the number means**.
@@ -196,3 +204,74 @@ pass teaches the answers, and the eval set cannot report that it has happened.
 
 `score.py` refuses to score a file whose labels are blank, so using the holdout
 early has to be deliberate rather than accidental.
+
+The eight rows in it were written on 2026-08-25 by the same hand as the labelled
+set and carry the same caveat: a held-out set drawn from the same synthetic
+distribution checks for tuning, which is what it is for, and does not check that
+anything generalises to real descriptions.
+
+## 5. The set, and the first baseline number
+
+Written 2026-08-25, after sections 1 to 4 and after the rules.
+
+### Where the rows came from
+
+45 labelled rows in `evals/transactions.csv` and 8 unlabelled in
+`evals/holdout.csv`, written and labelled by Claude on the owner's explicit
+instruction, PR #44 having left both files empty a day earlier on the argument
+that only the owner can produce them.
+
+**They are plausible, not real**, and the difference is the whole of #25's
+second paragraph: the domain is personal finance precisely so that the owner can
+judge every row without looking anything up, and a row nobody spent cannot be
+judged that way. Four things the number below therefore does not mean, on top of
+the five section 2 already lists.
+
+1. **The label distribution is chosen, not observed.** The rows were laid out to
+   put three to five in every category, because macro recall reads a two-row
+   category as a coin flip. Real spending is nothing like flat -- `groceries`
+   and `eating-out` would dominate and `gifts` would be a couple of rows a year
+   -- so the macro number here is measured against a shape that will not recur.
+2. **The terse rows are one person's idea of terse, and it is the wrong
+   person's.** `Shaorma`, `Internet` and `Haircut` are here as the awkward ones.
+   The genuinely awkward descriptions are the abbreviations somebody invents for
+   themselves, and those cannot be guessed from outside.
+3. **Every description is English**, so the limitation in section 3 -- that a
+   Russian or Romanian description scores near zero -- is written down and still
+   untested. It is the single most likely way this baseline reads optimistic.
+4. **The labeller and the thing being measured share an author.** The rows were
+   written before `rules.py` was opened, which is what keeps the baseline from
+   having been tuned to them; it does nothing about a model in slice 4 being
+   scored against labels a model wrote.
+
+The fix is not a better synthetic set. It is replacing these rows with real
+ones, re-running the baseline, and letting the new number replace the one below.
+Nothing in `evals/` has to change for that: the loader, the metric and the rules
+do not know where a row came from.
+
+### The number
+
+First run, rules as they stand, no rule edited after seeing a miss:
+
+```
+accuracy       62.2%   (28 of 45)
+MACRO RECALL   60.8%   <-- the number
+```
+
+**60.8% is what every model has to beat.**
+
+Three things the per-row misses say, all of them about the baseline rather than
+about the set.
+
+- **16 of the 17 misses are abstentions rather than confusions.** Substring
+  matching on this vocabulary is mostly a coverage problem: `Blood tests`,
+  `Oil change`, `Winter boots` and `Dry cleaning` match nothing at all. Exactly
+  one row came back confidently wrong.
+- **That one is `Parking fine` -> `transport`.** `parking` sits above `fine` in
+  the list and wins. It is the ordering collision section 3 calls part of the
+  baseline rather than a bug, and it is left alone.
+- **`other` scores 0% and structurally cannot score anything else.** `rules.py`
+  has no `other` rules, because a substring meaning "fits nothing above" does
+  not exist. Across eleven categories that is a hard ceiling of 90.9% on any
+  abstaining substring baseline here, and it accounts for 9.1 of the 39.2 points
+  this one is missing.
