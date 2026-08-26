@@ -1081,6 +1081,23 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   checked by hand against the running compose stack, which is #39's acceptance
   test.
 
+  **Checked by breaking it, the way #21 checked its suite.** Five mutations, one
+  at a time, reverted from a commit rather than from memory -- which is the trap
+  #21 recorded and the reason the commit came first. All five were caught.
+  Removing the length guard and dropping the `when` clause each killed exactly one
+  test. Serving the `unknown` sentinel instead of null killed one. Retyping the
+  vocabulary by hand killed three.
+
+  The fifth is the one worth keeping, because it is the mistake somebody would
+  actually make: `predict_by_rules(request.description.replace("-", " "))` -- a
+  small, well-meaning normalisation applied in the *service* and not in the
+  scorer. It looks like an improvement, it changes what the deployed thing
+  answers, and it leaves the 60.8% describing code that is no longer running.
+  `test_the_endpoint_answers_exactly_what_the_rules_do` is what caught it, and
+  preventing that drift is the reason the move happened at all. It computes its
+  expectation by calling `predict`, so it knows nothing about which rule wins and
+  cannot itself drift.
+
   **Nothing builds or tests `src/categorizer/` in CI**, so `build` can be green
   over a broken service. Left alone deliberately -- #39 did not ask, and slice 5
   already carries "Evals run in CI on every PR", which is the natural home for
