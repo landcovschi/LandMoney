@@ -3,7 +3,7 @@
 Two consumers, one `predict`:
 
   * `evals/score.py` imports `rules` directly and scores it against the labelled
-    set, which is where the 60.8% macro recall of #25 comes from.
+    set, which is where the baseline macro recall comes from.
   * `main.py` puts the same function behind `POST /categorize`, which is what
     the .NET application calls.
 

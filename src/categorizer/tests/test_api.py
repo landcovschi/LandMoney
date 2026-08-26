@@ -3,7 +3,7 @@
 In the spirit of #21's mutation sweep: a test that cannot fail is decoration.
 The load-bearing one here is `test_the_endpoint_answers_exactly_what_the_rules_do`,
 which is the whole justification for moving `rules.py` out of `evals/` -- if the
-endpoint can disagree with the scored function, the 60.8% is a number about
+endpoint can disagree with the scored function, the baseline is a number about
 something that is not deployed.
 
 `TestClient` runs the ASGI app in-process with no socket and no uvicorn, the way
