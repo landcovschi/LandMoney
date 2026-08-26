@@ -60,31 +60,52 @@ export function TransactionList({ state, onRetry }: TransactionListProps) {
   }
 
   return (
-    <table className="transactions">
+    // Every role here is the one the element already has, so none of it does
+    // anything at a width where the table is drawn as a table. They are
+    // written down because below 640px App.css redraws each row as a card with
+    // display: grid, and changing the display of a table element takes its
+    // implicit role with it -- at which point scope="col" governs nothing and
+    // the cells are announced as a flat list of values. An explicit role is
+    // not affected by display, so the table stays a table in the accessibility
+    // tree at every width while only its painting changes.
+    //
+    // The alternative is the usual one for this layout: drop the roles, and
+    // give every <td> a data-label repeating its header for ::before to print
+    // beside the value. That is a second copy of all four header strings with
+    // nothing keeping them equal, and screen readers read generated content --
+    // so the label arrives twice. The card in App.css prints no labels at all
+    // instead, which is why it does not need them.
+    <table className="transactions" role="table">
       <caption>Everything recorded, newest first.</caption>
 
-      <thead>
-        <tr>
+      <thead role="rowgroup">
+        <tr role="row">
           {/* scope tells a screen reader which cells each header governs.
               Two lines of markup, and without them the table is read as a
               list of unlabelled values. */}
-          <th scope="col">Date</th>
-          <th scope="col">Description</th>
-          <th scope="col">Category</th>
-          <th scope="col" className="numeric">
+          <th scope="col" role="columnheader">
+            Date
+          </th>
+          <th scope="col" role="columnheader">
+            Description
+          </th>
+          <th scope="col" role="columnheader">
+            Category
+          </th>
+          <th scope="col" role="columnheader" className="numeric">
             Amount
           </th>
         </tr>
       </thead>
 
-      <tbody>
+      <tbody role="rowgroup">
         {state.transactions.map((transaction) => (
           // key is the server's id, not the array index. React uses it to
           // decide which row is which between renders, and an index says every
           // row changed the moment one is inserted at the top -- which is
           // exactly what adding a transaction does here.
-          <tr key={transaction.id}>
-            <td>
+          <tr key={transaction.id} role="row">
+            <td role="cell">
               {/*
                 The date printed exactly as it arrived. It is already
                 "2026-08-19": a day anyone can read, and the one format that
@@ -106,15 +127,25 @@ export function TransactionList({ state, onRetry }: TransactionListProps) {
               </time>
             </td>
 
-            <td>{transaction.description}</td>
+            <td role="cell">{transaction.description}</td>
 
-            <td>
-              {transaction.category ?? (
-                <span className="uncategorised">Uncategorised</span>
+            <td role="cell">
+              {/*
+                A span around the category where the text used to stand on its
+                own, so both halves of the state can be drawn as one token --
+                see .tag in App.css. It carries no role and no aria: it is the
+                same cell with the same text in it, governed by the same
+                scope="col" header, and a screen reader reads it exactly as it
+                did before.
+              */}
+              {transaction.category ? (
+                <span className="tag">{transaction.category}</span>
+              ) : (
+                <span className="tag tag-empty">Uncategorised</span>
               )}
             </td>
 
-            <td className="numeric">
+            <td role="cell" className="numeric">
               {formatAmount(transaction.amount, transaction.currency)}
             </td>
           </tr>

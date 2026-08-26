@@ -1,19 +1,22 @@
-/* The one screen: a form, then the list. Tokens are in index.css. */
+/* The one screen: a form, then the list. Tokens are in index.css, and no rule
+   in this file may write a colour, a size or a gap that is not one of them --
+   that is the whole contract that makes the dark theme sixteen values. */
 
 main {
-  width: 900px;
-  max-width: 100%;
+  /* 56rem rather than 900px: the page then widens with the reader's own font
+     size instead of holding a pixel width while the text inside it grows. */
+  width: min(56rem, 100%);
   margin: 0 auto;
-  padding: 32px 20px 64px;
+  padding: var(--space-6) var(--space-5) var(--space-8);
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: var(--space-5);
 }
 
 header p {
-  color: var(--muted);
-  margin-top: 4px;
+  color: var(--text-muted);
+  margin-top: var(--space-1);
 }
 
 /* --- the form ------------------------------------------------------------ */
@@ -21,16 +24,17 @@ header p {
 .entry {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 20px;
+  gap: var(--space-4);
+  padding: var(--space-5);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   background: var(--surface);
+  box-shadow: var(--shadow-sm);
 }
 
 .fields {
   display: grid;
-  gap: 16px;
+  gap: var(--space-4);
 
   /* Four named columns, so each field keeps a width that suits it: a date and
      an amount are short and fixed, a description takes what is left. The
@@ -41,51 +45,57 @@ header p {
   align-items: start;
 }
 
-/* One breakpoint, and everything stacks. Two columns of half-width inputs on a
-   phone is worse than one column of full-width ones. */
-@media (max-width: 720px) {
-  .fields {
-    grid-template-columns: 1fr;
-  }
-}
-
 .field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   min-width: 0;
 }
 
 .field label {
-  font-size: 13px;
-  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-muted);
 }
 
 .field input,
 .field select {
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-strong);
   min-width: 0;
+  transition:
+    border-color var(--motion) var(--ease),
+    background-color var(--motion) var(--ease);
 }
 
-.field input:focus-visible,
-.field select:focus-visible,
-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+/* --border rather than --border-strong is what a card gets; a control gets the
+   stronger one, because a box somebody is meant to type into has to look like
+   a box before it is hovered. This is only the extra step on top. */
+@media (hover: hover) {
+  .field input:hover,
+  .field select:hover {
+    border-color: var(--text-muted);
+  }
+}
+
+.field input::placeholder {
+  color: var(--text-muted);
 }
 
 /* Driven by aria-invalid rather than a class of its own. The attribute is
    already there for the screen reader, so the two cannot drift apart -- a
    field cannot look wrong while being announced as fine. */
 .field [aria-invalid='true'] {
-  border-color: var(--danger-border);
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .field-amount input {
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   text-align: right;
 }
 
@@ -93,101 +103,238 @@ button:focus-visible {
   list-style: none;
   margin: 0;
   padding: 0;
-  font-size: 13px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
   color: var(--danger);
 }
 
+/* --- buttons -------------------------------------------------------------- */
+
+/* The bare element rather than a class, because this screen has exactly two
+   buttons and the second one is reached below by where it sits. A .btn-primary
+   / .btn-secondary pair is the right shape at five buttons and is ceremony at
+   two. */
 button {
   align-self: flex-start;
-  padding: 9px 16px;
-  border-radius: 6px;
-  border: 2px solid transparent;
-  color: var(--accent);
-  background: var(--accent-bg);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  color: var(--accent-contrast);
+  background: var(--accent);
   cursor: pointer;
-  transition: border-color 0.2s;
+  transition:
+    background-color var(--motion) var(--ease),
+    transform var(--motion) var(--ease),
+    box-shadow var(--motion) var(--ease);
 }
 
-button:hover:not(:disabled) {
-  border-color: var(--accent-border);
+/* @media (hover: hover) so a phone does not leave the pressed-looking state
+   stuck on the last button touched, which is what a bare :hover does there. */
+@media (hover: hover) {
+  button:hover:not(:disabled) {
+    background: var(--accent-strong);
+    box-shadow: var(--shadow-sm);
+    transform: translateY(-1px);
+  }
 }
 
+button:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+/* Submitting, not "broken". cursor: progress rather than not-allowed says the
+   difference: something is happening and it is not this reader's turn. */
 button:disabled {
   cursor: progress;
-  opacity: 0.6;
+  opacity: 0.7;
+  transform: none;
+}
+
+/* The spinner is the only thing on the screen that says the wait is still
+   going. The label already changes to "Adding...", which is a fact and not a
+   heartbeat -- a frozen label and a frozen page look identical. Drawn from the
+   button's own colour, so it needs no token and cannot be wrong in either
+   theme, and stopped outright under prefers-reduced-motion by the rule in
+   index.css. */
+button:disabled::after {
+  content: '';
+  width: 0.85em;
+  height: 0.85em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: var(--radius-pill);
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
 }
 
 /* --- states -------------------------------------------------------------- */
 
 .banner {
-  padding: 12px 14px;
-  border-radius: 8px;
-  font-size: 14px;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
 }
 
 .banner-error {
   color: var(--danger);
-  background: var(--danger-bg);
+  background: var(--danger-soft);
   border: 1px solid var(--danger-border);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
+/* The retry button is the secondary one: an outline in the banner's own
+   colour, so it reads as part of the message rather than competing with the
+   filled Add button further up the page. */
 .banner-error button {
   color: var(--danger);
   background: transparent;
   border-color: var(--danger-border);
 }
 
-.banner-error button:hover:not(:disabled) {
-  border-color: var(--danger);
+@media (hover: hover) {
+  .banner-error button:hover:not(:disabled) {
+    background: var(--surface);
+    border-color: var(--danger);
+    box-shadow: none;
+  }
 }
 
 .list-status {
-  padding: 24px;
-  border: 1px dashed var(--border);
-  border-radius: 10px;
+  padding: var(--space-7) var(--space-5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
   text-align: center;
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 /* --- the list ------------------------------------------------------------ */
 
+/* A real <table> at every width -- the element, the headers and the roles all
+   survive down to 390px. How the *rows* are drawn changes there, and the query
+   at the bottom of this file is where that happens and where the reasoning
+   for it is. */
+
 .transactions {
   width: 100%;
-  border-collapse: collapse;
+
+  /* separate, not collapse. A collapsed table cannot have a border-radius --
+     the cells' borders replace the table's, so the corners are square whatever
+     the radius says. The cost is that each border below has to be declared on
+     one side of one cell rather than once on the table. */
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
 }
 
+/* A caption is laid out outside the table's border box, so this is a label
+   sitting above the card rather than a first row inside it. */
 .transactions caption {
   text-align: left;
-  color: var(--muted);
-  font-size: 13px;
-  padding-bottom: 8px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  padding-bottom: var(--space-2);
 }
 
 .transactions th,
 .transactions td {
   text-align: left;
-  padding: 10px 12px;
+  padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border);
 }
 
 .transactions th {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--surface-sunken);
+  white-space: nowrap;
+}
+
+/* The header row is the top edge of the card, so its own corners have to be
+   rounded or its background squares off the border's. One pixel less than the
+   table's radius is the border's width -- the inner curve of a rounded box is
+   always the outer one minus the border. */
+.transactions thead th:first-child {
+  border-top-left-radius: calc(var(--radius-md) - 1px);
+}
+
+.transactions thead th:last-child {
+  border-top-right-radius: calc(var(--radius-md) - 1px);
 }
 
 .transactions td {
-  color: var(--text-h);
+  color: var(--text-strong);
+}
+
+/* The last row's border would sit a pixel above the card's own bottom border
+   and read as a double line. */
+.transactions tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+@media (hover: hover) {
+  .transactions tbody tr:hover td {
+    background: var(--surface-sunken);
+  }
+}
+
+/* Column widths by position, because the cells carry no class of their own and
+   adding four would be markup written for CSS to read. 1% plus nowrap is the
+   table idiom for "as narrow as the content": a percentage too small to honour
+   collapses to the minimum, and the description column, having no width at
+   all, takes everything that is left.
+
+   Held inside a min-width query rather than left to the cascade, and this is
+   the one thing in the file that had to be fixed after being measured. Below
+   640px the rows are a grid and none of these widths mean anything -- but
+   .transactions td:nth-child(1) outranks the plain .transactions td that the
+   card layout writes its reset in, so width: 1% survived into the card and
+   made the date cell three pixels wide. A rule that only applies to one layout
+   is safer written where it cannot reach the other one than corrected by a
+   second rule of equal weight.
+
+   641px is the 640px below, plus one. The two have to move together. */
+@media (min-width: 641px) {
+  .transactions th:nth-child(1),
+  .transactions td:nth-child(1),
+  .transactions th:nth-child(3),
+  .transactions td:nth-child(3),
+  .transactions th:nth-child(4),
+  .transactions td:nth-child(4) {
+    width: 1%;
+    white-space: nowrap;
+  }
+}
+
+.transactions td:nth-child(1) {
+  color: var(--text-muted);
+
+  /* The dates are a column of digits even though they are not the amount
+     column, so they line up for the same reason it does. */
+  font-variant-numeric: tabular-nums;
 }
 
 .transactions .numeric {
   text-align: right;
-  white-space: nowrap;
 }
 
 .transactions td.numeric {
@@ -196,16 +343,228 @@ button:disabled {
   /* Digits of equal width, so the amounts line up on the decimal point rather
      than wandering by a pixel per 1 in the column. */
   font-variant-numeric: tabular-nums;
+  font-weight: 500;
 }
 
 /* time carries a title, which browsers show as a tooltip on hover. The dotted
-   underline is the only hint that there is something to hover over. */
+   underline is the only hint that there is something to hover over.
+   text-decoration rather than a border-bottom, so the line follows the text if
+   it ever wraps and sits at the font's own underline position instead of at
+   the bottom of the line box. */
 .transactions time[title] {
-  border-bottom: 1px dotted var(--border);
+  text-decoration: underline dotted var(--border);
+  text-underline-offset: 3px;
   cursor: help;
 }
 
-.uncategorised {
-  color: var(--muted);
-  font-style: italic;
+/* The hint gets stronger on the row being pointed at, which is the only row
+   whose tooltip can appear anyway. At rest it is faint enough to be a texture
+   rather than twenty-one underlines. */
+@media (hover: hover) {
+  .transactions tbody tr:hover time[title] {
+    text-decoration-color: var(--border-strong);
+  }
+}
+
+/* A category is a value out of a closed list -- eleven of them, fixed in
+   docs/evals.md -- so it is drawn as one token rather than as a sentence. */
+.tag {
+  display: inline-block;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--accent-soft);
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: var(--leading-normal);
+  white-space: nowrap;
+}
+
+/* The absence of a category is a real state and not an empty cell: nothing has
+   categorised this row yet. Dashed and uncoloured, so it reads as an outline
+   waiting to be filled rather than as a category called "Uncategorised".
+
+   The dash is --border and not --border-strong, which it was until the first
+   screenshot: until the categorizer has run over the back catalogue most rows
+   are this one, and nineteen dashed outlines down a page shout louder than the
+   three real categories they are supposed to sit behind. */
+.tag-empty {
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* --- narrow ---------------------------------------------------------------- */
+
+/* One breakpoint, and everything stacks. Two columns of half-width inputs on a
+   phone is worse than one column of full-width ones. */
+@media (max-width: 720px) {
+  .fields {
+    grid-template-columns: 1fr;
+  }
+
+  /* A full-width button is easier to hit with a thumb and stops the card
+     ending in a lot of empty space beside a small control. */
+  .entry button {
+    align-self: stretch;
+    justify-content: center;
+  }
+}
+
+/* Below this, one row is one card. This is the item #51 called the thing that
+   would look worst, and the answer here was measured rather than chosen.
+
+   The first attempt was to keep four columns and step the type and the padding
+   down one place on their scales. At 390px that gives Date 88px, Category 111px
+   -- "subscriptions" and "Uncategorised" are both thirteen characters, and the
+   column is as wide as its widest cell -- Amount 93px, and whatever is left for
+   the description: **91px**, in which "Taxi home after the restart" is three
+   lines. The description is the column somebody actually reads, and it came
+   last in every budget. Four columns do not fit at 390px; they only stop
+   overflowing.
+
+   So the row is redrawn: the date and the amount on one line, the description
+   under them, the category under that. No labels are printed beside the
+   values, and that is a design decision rather than an omission -- a date, a
+   sum of money, a sentence and a tag do not need to be told apart. It is also
+   what avoids the usual cost of this layout, a data-label attribute repeating
+   every header so ::before can print it: a second copy of the header text with
+   nothing keeping the two equal, which screen readers then read on top of the
+   header they already announced.
+
+   **What it costs, and what TransactionList.tsx pays for it.** Changing the
+   display of a table element drops its implicit ARIA role -- a <tr> that is
+   display: grid is no longer a row, so the columnheaders govern nothing and
+   scope="col" has nothing to scope. Explicit role="table" / "rowgroup" /
+   "row" / "columnheader" / "cell" in the markup restores it, and costs nothing
+   at any other width because it names the role the element already had.
+
+   This one is asserted rather than measured, which is worth saying plainly:
+   it is documented behaviour in every current engine, and the tooling
+   available in this session reads a flattened tree that shows table cells as
+   generic at *every* width, so it cannot tell the two states apart. The check
+   that would settle it is a real screen reader, or DevTools' accessibility
+   pane on the running page at 390px -- with the roles present it should read
+   "Amount, €15.00" and not "€15.00". */
+@media (max-width: 640px) {
+  main {
+    padding: var(--space-5) var(--space-4) var(--space-7);
+    gap: var(--space-4);
+  }
+
+  h1 {
+    font-size: var(--text-lg);
+  }
+
+  .entry {
+    padding: var(--space-4);
+  }
+
+  /* The card moves from the table to each row, so the table itself stops being
+     one: no border, no background, nothing to round. */
+  .transactions {
+    display: block;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  /* A caption keeps display: table-caption whatever its parent does, and a
+     table-caption whose parent is no longer a table gets an anonymous table
+     wrapper around it -- which shrink-wraps. The first screenshot at 390px had
+     "Everything recorded, newest first." set four words tall in a column about
+     sixty pixels wide. Nothing about the styling above says caption, which is
+     why it took a screenshot to find. */
+  .transactions caption {
+    display: block;
+  }
+
+  /* Visually gone, still in the accessibility tree -- which is the whole
+     reason it is clipped rather than display: none. The headers are what the
+     columnheader roles above hang on, and a hidden element has no role at all.
+     clip-path over the older clip: rect(...) hack, which is deprecated and
+     which Safari reads differently. */
+  .transactions thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .transactions tbody {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .transactions tbody tr {
+    display: grid;
+
+    /* The description and the category each span both columns, so this is
+       really "the date takes what it needs, the amount takes what it needs,
+       and the amount is the one pinned to the right edge". */
+    grid-template-columns: 1fr auto;
+    gap: var(--space-1) var(--space-3);
+    align-items: baseline;
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .transactions td {
+    display: block;
+    padding: 0;
+    border: 0;
+  }
+
+  .transactions td:nth-child(1) {
+    grid-area: 1 / 1;
+    font-size: var(--text-sm);
+    white-space: nowrap;
+  }
+
+  /* Second in the markup, third down the card. The reading order the source
+     gives -- and the order a screen reader keeps, since grid-area moves the
+     paint and not the tree -- is date, description, category, amount, which is
+     the row as it is written. Only the amount is placed out of that order, and
+     only to sit level with the date. */
+  .transactions td:nth-child(2) {
+    grid-area: 2 / 1 / 3 / 3;
+    color: var(--text-strong);
+  }
+
+  .transactions td:nth-child(3) {
+    grid-area: 3 / 1 / 4 / 3;
+    margin-top: var(--space-1);
+  }
+
+  .transactions td:nth-child(4) {
+    grid-area: 1 / 2;
+    white-space: nowrap;
+
+    /* The number is what the card is for, so it is the one thing in it set
+       above body size. */
+    font-size: var(--text-md);
+    font-weight: 600;
+  }
+
+  /* The whole card is one surface now; tinting a cell inside it would paint a
+     stripe across part of a rounded box. */
+  .transactions tbody tr:hover td {
+    background: transparent;
+  }
+
+  .list-status {
+    padding: var(--space-5) var(--space-4);
+  }
 }
