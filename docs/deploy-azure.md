@@ -919,14 +919,20 @@ personal address produces, which is what this subscription has.
 
 The federated credential is a JSON document, and it goes through a file rather
 than an inline string -- PowerShell, `az`'s own parser and the `.cmd` shim
-between them each have an opinion about quotes, and a file has none:
+between them each have an opinion about quotes, and a file has none. **Do not
+type the subject from the template below** -- read it out of GitHub first, for
+the reason directly underneath:
+
+```powershell
+gh api repos/landcovschi/LandMoney/actions/oidc/customization/sub --jq .sub_claim_prefix
+```
 
 ```powershell
 @'
 {
   "name": "github-main",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:landcovschi/LandMoney:ref:refs/heads/main",
+  "subject": "<sub_claim_prefix>:ref:refs/heads/main",
   "audiences": ["api://AzureADTokenExchange"]
 }
 '@ | Set-Content -Encoding utf8 fedcred.json
@@ -935,22 +941,62 @@ az ad app federated-credential create --id $appId --parameters fedcred.json
 ```
 
 **The `subject` must match what the run presents, character for character**, and
-this is #38's first trap. Three ways to get it wrong, all of which fail as the
-same login error naming neither half:
+this is #38's first trap. It bit on the first deployment, in the one way neither
+the issue nor the documentation predicts: **the subject GitHub sends is not the
+`repo:owner/name:ref:...` that every guide shows.** It carries immutable numeric
+ids, and the run says so precisely:
 
-- `repo:landcovschi/LandMoney:environment:production` is a **different subject**
-  from the `ref:` one above. It is what to use if the `deploy` job is ever given
+```
+AADSTS700213: No matching federated identity record found for presented
+assertion subject 'repo:landcovschi@257582719/LandMoney@1324374880:ref:refs/heads/main'.
+Check your federated identity credential Subject, Audience and Issuer against
+the presented assertion.
+```
+
+Which is a good error -- it prints the string it wanted, so the fix is a copy.
+The confirmation that this is a default rather than something someone switched
+on is the API above, and it is worth reading twice:
+
+```
+{"use_default":true,"use_immutable_subject":false,
+ "sub_claim_prefix":"repo:landcovschi@257582719/LandMoney@1324374880"}
+```
+
+`use_default` is true, `use_immutable_subject` is **false**, and the effective
+prefix is the immutable one anyway. So there is no flag here to have set wrongly
+and nothing to switch back; the numeric form is simply what the default now
+produces. It is also the better string on its merits, which is presumably why:
+`257582719` and `1324374880` survive a rename of the account or the repository,
+where the names do not.
+
+What that costs: the subject stops reading as anything and has to be fetched
+from the API rather than typed. Hence the `gh api` line above the template.
+
+Three more ways to get it wrong, all of which fail as that same error:
+
+- `<prefix>:environment:production` is a **different subject** from the `ref:`
+  one. It is what to use if the `deploy` job is ever given
   `environment: production` -- and then it is the only one that works, because a
-  job with an environment presents that subject and not the branch one.
-- The repository name is **case-sensitive** here. `LandMoney` is what GitHub puts
-  in the token; `landmoney` is the image name, and they are not interchangeable
-  -- which is the same trap as #24's, one system further along.
+  job with an environment presents that subject and not the branch one. Which is
+  the reason the job has no environment: one fewer string that must agree with a
+  string in another system.
+- The repository name is **case-sensitive** here, numeric ids or not.
+  `LandMoney` is what GitHub puts in the token; `landmoney` is the image name,
+  and they are not interchangeable -- the same trap as #24's, one system further
+  along.
 - `refs/heads/main` and not `main`.
 
 Read it back rather than trusting the paste:
 
 ```powershell
 az ad app federated-credential list --id $appId --query "[].{name:name,subject:subject}" -o table
+```
+
+Changing it later is an `update` on the existing credential rather than a delete
+and a create, which is what the first deployment needed:
+
+```powershell
+az ad app federated-credential update --id $appId --federated-credential-id github-main --parameters fedcred.json
 ```
 
 Then the permission. `Contributor` on the resource group, which is what the
@@ -1041,17 +1087,31 @@ ${{ github.event_name == 'pull_request' }}` -- pull requests keep the old
 behaviour, and pushes to `main` queue instead, since a concurrency group without
 cancellation makes the second run wait for the first.
 
-**The firewall, which is still a question.** Step 13 left it open: the rule is
-the 0.0.0.0 "all Azure services" one from step 5, and whether a GitHub-hosted
-runner's outbound address falls inside it is not something that could be
-answered from here. GitHub's hosted runners are Azure virtual machines, so it is
-likely -- and likely is not measured. **The first run on `main` is the
-measurement.**
+**The firewall, answered.** Step 13 left it open: the rule is the 0.0.0.0 "all
+Azure services" one from step 5, and whether a GitHub-hosted runner's outbound
+address falls inside it could not be answered from here. **It does.** The
+`Apply migrations` step of the first deployment connected and reported
 
-If it fails, it fails in the `Apply migrations` step with a timeout or a
-`no pg_hba.conf entry` from Npgsql, **before** anything is deployed -- which is
-the migrate-first order paying for itself. The fix is a rule created and removed
-by the job, which the OIDC login already makes possible:
+```
+No migrations were applied. The database is already up to date.
+Done.
+```
+
+in seven seconds, which is the whole answer: a runner reaches the server, and
+the bundle applied on 2026-08-26 by hand had already recorded its migration.
+GitHub's hosted runners are Azure virtual machines and that rule admits Azure,
+so the reasoning was right -- it is now measured rather than likely.
+
+**Which is also the argument against that rule getting any narrower.** It
+already admits every Azure tenant's resources; it now demonstrably admits a
+GitHub runner too. Nothing here changes the conclusion of #34 -- the password
+and enforced TLS are the controls -- but it is one more reason the question to
+reopen alongside Neon at the end of the free year is "is this still the right
+shape" rather than "is this still cheap".
+
+Kept for the day it stops being true, since a rule this broad is exactly the
+kind of thing that gets tightened: the fallback is a firewall rule created and
+removed by the job, which the OIDC login already makes possible.
 
 ```
 ip=$(curl -sS https://api.ipify.org)
@@ -1060,6 +1120,38 @@ az postgres flexible-server firewall-rule create -g rg-landmoney -n psql-landmon
 
 with the matching `firewall-rule delete` in a step carrying `if: always()`, or
 the rules accumulate one per deployment for ever.
+
+### What the first deployment measured
+
+Run 32962766830, revision `landmoney--0000003` on
+`sha-3f467199c8f97df8e7808e25a8fd8d8a9949fd5d` -- the merge commit of #55.
+
+| Step                            | Took |
+| ------------------------------- | ---- |
+| Download the migration bundle   | 2 s  |
+| Log in to Azure                 | 5 s  |
+| Install the containerapp extension | 10 s |
+| Apply migrations                | 7 s  |
+| Deploy the revision             | 19 s |
+| Check what is running           | 26 s |
+| **The whole job**               | **71 s** |
+
+Three things worth keeping. **`az extension add` is 10 s of a 71 s job**, and it
+is the one step that does nothing but prepare -- worth remembering before
+anything else gets blamed for the length. **The verification's retry never
+fired**: the first `curl` answered 200, so the loop printed no `attempt` line at
+all. It stays, because "the revision was provisioned before it was serving" is a
+race and this run winning it is not evidence there is no race. And the job spent
+**19 s on `containerapp update`** against the 23.3 s cold start #35 measured,
+which is the difference between provisioning a revision and starting one from
+zero.
+
+**The failure that came first landed exactly where the design put it.** The
+login failed -- the subject above -- and the job stopped at step 2 of 6, before
+`containerapp secret show`, before the bundle ran and before any revision
+existed. `build` and `publish` were green, so the image for that commit was
+already on `ghcr.io` and the fix needed no new commit, only a re-run. Azure was
+never touched, and the previous revision served throughout.
 
 ### Rolling back
 
