@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { ApiError } from '../api/transactions'
 import type { FieldErrors, NewTransaction } from '../api/types'
+import { FieldMessages } from './FieldMessages'
 
 // The three codes the entity's own documentation names. A <select> rather than
 // a text input because the server validates the *shape* of a currency and not
@@ -262,30 +263,5 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
         {submitting ? 'Adding...' : 'Add transaction'}
       </button>
     </form>
-  )
-}
-
-/** The server's messages about one field, or nothing at all. */
-// A list rather than a single line, because the errors dictionary holds an
-// array per field and more than one rule can fail at once: an amount of -0.005
-// breaks both [Range] and [DecimalScale], and showing one of the two would send
-// someone round the loop twice.
-function FieldMessages({
-  id,
-  messages,
-}: {
-  id: string
-  messages?: readonly string[]
-}) {
-  if (!messages || messages.length === 0) {
-    return null
-  }
-
-  return (
-    <ul className="field-error" id={id}>
-      {messages.map((message) => (
-        <li key={message}>{message}</li>
-      ))}
-    </ul>
   )
 }

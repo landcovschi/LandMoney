@@ -754,176 +754,218 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   line, never written into a file, or the documentation of the check becomes the
   only thing the check finds. Which is what happened on the first run of it.
 
-- **Authentication: OpenID Connect in the application, with a cookie -- decided
-  2026-08-26** (#52). Provider-agnostic: `Authentication:Oidc:Authority`,
-  `ClientId` and `ClientSecret` are configuration, and no file in `src/` names a
-  provider. The wiring is `src/LandMoney.Web/Auth/AuthenticationSetup.cs`, the
-  registration commands are step 15 of `docs/deploy-azure.md`, and the owner
-  creates the registration -- Claude does not, for the same reason it does not
-  run `gh auth login`.
+- **Authentication: ASP.NET Core Identity, a username and a password, a form in
+  the client -- decided 2026-08-27** (#52). Registration needs an invite code;
+  there is no password reset and no email. The wiring is
+  `src/LandMoney.Web/Auth/`, the commands are step 15 of `docs/deploy-azure.md`,
+  and the screen is `src/landmoney.client/src/components/LoginForm.tsx`.
 
-  **What lost, and the first one lost for a reason this repository has already
-  paid once.** *Container Apps built-in authentication (Easy Auth)* is the
-  cheapest thing that closes the hole and needs no application change at all. It
-  makes authentication a property of the host: under `docker compose`, behind the
-  nginx container expected when the categorizer arrives, or anywhere that is not
-  Container Apps, there would be no authentication and nothing reporting it.
-  That is the identical argument #36 used to keep `UseHsts` and
-  `UseHttpsRedirection` in the application rather than trusting the ingress, and
-  the thing being lost silently here is a closed door rather than a header.
-  *ASP.NET Core Identity* lost on surface: a user table, password hashing, reset
-  flows and email delivery to arrange, for one user, in the slice that is meant
-  to stay thin.
+  **This replaces an OpenID Connect decision taken the previous day, in the same
+  issue and the same branch**, and the reversal is the part worth keeping. #52
+  lists three options and recommends the first or the second on the grounds that
+  "the value here is a closed door, not a user-management system". Claude followed
+  that recommendation and wired OpenID Connect against a configurable provider.
+  The owner then asked for the third: a login form, a password, and a name in the
+  header, which is what they had wanted from the start. Nothing about the
+  recommendation was wrong; it answered a question about cost, and the owner was
+  answering a different one about what the application should feel like. Recorded
+  because the merged branch shows only the ending, and because it is the second
+  time in two days that a written recommendation was taken as a decision when only
+  the owner could make it.
 
-  **The cookie, not a token in the browser.** The client is served by this same
-  application out of `wwwroot` (#20), so a cookie is same-origin: no CORS, no
-  refresh logic in TypeScript, and no access token anywhere JavaScript can read.
-  `SaveTokens = false` for the same reason -- nothing here calls anything on the
-  user's behalf, and keeping the access token would put it in a cookie sent with
-  every request.
+  **What it cost to change direction, measured**: `AuthenticationSetup.cs` and
+  `AuthEndpoints.cs` rewritten, one package swapped, one migration added, and the
+  client's login screen written. Everything about *ownership* survived untouched --
+  the `owner_id` column, the global query filter, the `SaveChanges` stamping, the
+  index and its tests. That is the payoff of `ICurrentUser` being one property
+  rather than a provider-shaped interface: the auth subsystem was swapped a day
+  after it was written and the domain half did not notice. It is also the argument
+  that kept `owner_id` a plain string rather than a foreign key to `asp_net_users`
+  -- an FK would have made the transactions table depend on the schema of whichever
+  subsystem happened to be signing people in, and that subsystem has now changed
+  once already.
 
-  **The three branches, and the order they are tested in is the security
-  property.** Configured -> OpenID Connect. Not configured and Development -> a
-  local scheme that signs every request in as `local-development-user`. Not
-  configured and anything else -> a scheme that authenticates nobody, so every
-  protected request is 401.
+  **What lost, and why the earlier reasoning did not survive contact.** *Container
+  Apps Easy Auth* still loses, for the reason #36 established: it makes
+  authentication a property of one host, and under `docker compose` or behind the
+  nginx container expected later there would be none, with nothing reporting it.
+  *OpenID Connect against an external provider* is the one that was built and
+  removed. It is genuinely cheaper to operate -- no password to store, no lockout
+  to tune, nothing in the database worth stealing -- and it was rejected on product
+  grounds rather than technical ones: it makes signing in a redirect to somebody
+  else's page, and it makes "who may use this at all" a property of the provider's
+  audience setting rather than of this application. The invite code below is what
+  buys that decision back.
 
-  The configured case is tested **first**, and that is what keeps
-  `ASPNETCORE_ENVIRONMENT` from being a door. #36 recorded that four middlewares
-  hang off `!IsDevelopment()`, so a typo in that variable turns four things off
-  at once and says nothing; authentication would have been a fifth and by far the
-  worst. It is not, because the deployed app has an Authority and therefore takes
-  the first branch whatever the environment claims to be. Reaching the
-  development sign-in in Azure would mean deleting a secret, not mistyping a
-  word.
+  **`AddIdentityCore`, not `AddIdentity`,** and the difference is why the
+  registration is three calls instead of one. `AddIdentity` registers its own
+  cookie schemes *and* points the default challenge at `/Account/Login` -- a Razor
+  page this repository deleted in #20 and would not want back.
+  `AddIdentityCore` registers the managers and no schemes, so
+  `AddAuthentication(...).AddIdentityCookies()` beside it is the only cookie
+  configuration there is. `.AddSignInManager()` has to be added explicitly or
+  `SignInManager` cannot be resolved, and the failure is at the first request
+  rather than at startup.
 
-  **There is no `?? throw` for a missing Authority, and that is #57's rule being
-  applied rather than re-learned.** `efbundle` runs `Program.cs` from a directory
-  holding nothing but itself, in Production, with no `appsettings.json` -- which
-  is exactly how a required-configuration throw for `Categorizer:BaseUrl` killed
-  a deployment at `Apply migrations`. A throw here would have been the same
-  landmine in the same job. So the process starts either way and the fail-closed
-  behaviour moved from startup to the request: it serves nothing, and it logs an
-  error saying why. Verified by building a win-x64 bundle and running it from an
-  empty directory -- the host builds, the failure is `No such host is known`, and
-  `ci.yml`'s "The bundle must start without appsettings.json" step passes it.
+  **Three endpoints written by hand rather than `MapIdentityApi<IdentityUser>()`,**
+  which is one line and was the first choice. It maps nine: four of them need an
+  email sender this application deliberately does not have, so they would answer
+  200 and send nothing -- an endpoint that reports success and does nothing is
+  worse than one that is absent. Sixty lines of `UserManager` and `SignInManager`
+  calls is the same machinery underneath with nothing in it that does not work.
 
-  **The obvious cookie event is the wrong one, and it fails as a JSON parse
-  error.** Every example of the API-versus-page split uses
-  `CookieAuthenticationEvents.OnRedirectToLogin`. Here that is dead code: the
-  challenge scheme is OpenID Connect, so an unauthenticated request is handled by
-  that handler and the cookie handler is never consulted. The split has to be
-  made in `OnRedirectToIdentityProvider`, with `HandleResponse()` to stop the
-  handler writing its redirect over the 401 -- without that call the event
-  appears to do nothing at all. Written the wrong way, `fetch` follows the 302 to
-  the provider, is answered with a sign-in page, and the client reports a JSON
-  parse error about a request that was refused for a reason it never saw.
+  **`lockoutOnFailure: true` is the argument that matters on the whole page.** The
+  lockout policy in `IdentityOptions` does nothing unless a call opts into it, so
+  with `PasswordSignInAsync`'s default of `false` the configured five-attempt limit
+  would sit in the options object looking like protection while an attacker guessed
+  at whatever rate the network allowed. Measured rather than assumed: five wrong
+  passwords, and the *correct* one is then refused with the lockout message.
 
-  **Ownership is a global query filter, not a `.Where` per query.** #52's
-  sharpest line is "every query gains a filter, and the one that forgets it is a
-  data leak rather than a bug", and a filter written by hand is correct today,
-  with one query, and one new endpoint away from being wrong for ever with
-  nothing reporting it. `HasQueryFilter` makes the filter the default and makes
-  the exception something that has to be asked for by name --
-  `IgnoreQueryFilters`, a call that shows up in a diff and can be grepped for.
-  Nothing in `src/` calls it. `SaveChanges` is overridden to stamp the owner on
-  added rows for the mirror-image reason: a filter protects reads and does
-  nothing about writes, and `TransactionEndpoints.CreateAsync` deliberately never
-  mentions `OwnerId`.
+  **A wrong password and a username that does not exist return the same
+  sentence**, so the endpoint cannot be used to find out which usernames are real.
+  Lockout deliberately breaks that symmetry -- it confirms the account exists --
+  and is the accepted price of not leaving somebody staring at "wrong password"
+  while typing the right one.
 
-  **The filter compares to NULL when nobody is signed in, and that is the
-  fail-closed half.** `owner_id = NULL` is never true in SQL, not even for a row
-  whose `owner_id` is also NULL, so an unauthenticated context reads nothing
-  rather than everything. It is also the single easiest thing here to break with
-  a well-meant "skip the filter when there is no user", which is why a test
-  asserts the filter is still emitted for a null owner.
+  **Password rules are length over composition**: ten characters, no required
+  digit, case or symbol. Identity's defaults are the opposite (six characters with
+  four character classes), and character-class rules push people towards
+  `Password1!`, which is worth less than four more characters. The number is
+  written twice, here and as a hint in `LoginForm.tsx`, and that is the two-places
+  problem #6's validation rule exists to avoid -- taken knowingly, because a
+  password rule discovered by failing is the worse trade.
 
-  **`OwnerId` is nullable and nothing is backfilled.** The database does not know
-  who entered the rows written before #52 -- the fact was never recorded -- and a
-  non-nullable column would need a value invented at migration time, which is a
-  claim about ownership that is not true. The consequence is concrete and reads
-  as data loss if it is not expected: after the migration and before the claiming
-  `UPDATE` in step 15 of the runbook, **the site is empty**. The rows are all
-  still there.
+  **No email address is collected at all.** There is no flow that would send one:
+  password reset was left out in the same decision, because it means an external
+  provider, an API key, a sender domain and deliverability to debug. Storing a
+  personal email for a flow that does not exist is worse than not storing one. What
+  it costs is written into step 15: a forgotten password is a command run against
+  the database, and it is the owner who runs it.
 
-  It is also not a foreign key and there is no users table. A row needs to know
-  which subject owns it; nothing here lists users or relates anything else to
-  them. The price is that the owner is the provider's `sub`, so **changing
-  provider orphans every row** -- recoverable with the same one-line `UPDATE`,
-  and written down rather than designed around.
+  **Registration needs an invite code, from configuration.** The deployed URL is
+  public, and open registration with no email confirmation is a sign-up page for
+  anything that finds it. `RegistrationPolicy` is a record with the code and a
+  `RequiresInvite` flag, and the two are deliberately separate: "needs a code, and
+  none is configured" is the fail-closed state, and inferring it from the code
+  being null would make it indistinguishable from "needs no code" -- which is the
+  wrong direction to guess in. Comparison is `CryptographicOperations.FixedTimeEquals`,
+  because a code is a shared secret and `==` leaks its matching prefix through
+  timing.
 
-  **The index was replaced, not extended, and this is #37's own argument applied
-  to a changed query.** The list is now
-  `WHERE owner_id = @p ORDER BY occurred_at DESC, created_at DESC`, and an index
-  that does not start with the equality column cannot serve the filter -- so
-  `ix_transactions_occurred_at_created_at`, correct for #37's query, answers
-  nothing about this one. Measured the way #37 measured it, with
-  `SET enable_seqscan = off`: `Index Scan Backward using
-  ix_transactions_owner_id_occurred_at_created_at`, `Index Cond` on `owner_id`,
-  and no sort step. The old index is dropped rather than kept beside it, because
-  the query filter guarantees every query is now filtered by owner and a second
-  index is paid for on every write.
+  **The three-branch order from the OpenID Connect version was kept, and it is the
+  same trick for the same reason.** Configured is tested first, so the deployed
+  application takes that branch whatever `ASPNETCORE_ENVIRONMENT` claims to be; the
+  Development branch, which lets registration proceed with no code, cannot be
+  reached by mistyping one environment variable. #36 recorded that four middlewares
+  hang off `!IsDevelopment()`; this is a fifth thing that must not be.
 
-  **That migration drops an index, which the migrate-first rule did not cover.**
-  #37 records "migrate first, then deploy the revision... safe while every
-  migration only adds". This one does not only add, and it is still safe, for a
-  reason worth separating out: dropping an *index* can only change a plan, never
-  an answer, so the old revision briefly running against the new schema is
-  slower at worst. Dropping a *column* is the case that rule is really about, and
-  there is still none.
+  **There is still no `?? throw`, and #57 is still the reason.** `efbundle` runs
+  `Program.cs` from a directory holding nothing but itself, in Production, with no
+  `appsettings.json`. A missing invite code closes registration and logs an error;
+  it does not stop the process starting, and existing accounts still sign in.
 
-  **`Microsoft.AspNetCore.Mvc.Testing` is in, and #21 named this as the day.**
-  #21 refused it because an `IEndpointFilter` is an object with one method and
-  `EndpointFilterInvocationContext.Create` builds its argument. Authorization is
-  the opposite: whether an anonymous request is refused depends on the order of
-  two middlewares, on metadata hung on an endpoint, and on which of the three
-  branches above was taken -- none of it reachable from anything smaller than the
-  assembled application. 33 new tests, 103 in total, and **they still need no
-  Postgres, no Docker and no network**: every request they make is refused before
-  a handler runs, or is answered by `/api/me`, which reads the principal and
-  nothing else. The ownership filter is asserted through `ToQueryString()`, which
-  translates the expression without opening a connection.
+  **Every refusal is a status and never a redirect.** Identity's cookie handler
+  redirects to `/Account/Login` and `/Account/AccessDenied` by default; neither
+  exists, so without `OnRedirectToLogin` and `OnRedirectToAccessDenied` overridden
+  the client would receive 404 HTML where it expected JSON and report a parse error
+  about a request that was actually refused.
 
-  **Two traps inside the test factory, both of which read as something else.**
-  `ConfigureAppConfiguration` is applied *after* `Program.cs` has already read
-  its configuration, so settings arrive correctly and too late, and every test
-  fails with `ConnectionStrings:Default is not set` -- which reads as a test that
-  forgot to set it. `UseSetting` is early enough. And setting
-  `OpenIdConnectOptions.Configuration` to avoid discovery does nothing: the
-  framework's own post-configure has already built a `ConfigurationManager` from
-  `Authority`, and the handler prefers the manager whenever it has one. The type
-  that means "here is the answer, never go and ask" is
-  `StaticConfigurationManager<T>`, and without it the tests reach the internet and
-  fail with `IDX20803: Unable to obtain configuration from`.
+  **`SameSite=Lax` is the CSRF protection, and there is no antiforgery token
+  anywhere.** A Lax cookie is withheld from every cross-site request that is not a
+  top-level GET navigation, so a form on another site cannot POST to
+  `/api/transactions` with this user's session attached. The JSON `Content-Type` the
+  client sends is a second lock on the same door -- a cross-site form cannot set it
+  without a preflight this server never answers. Changing that one word to `None`
+  removes both silently.
 
-  **What is deliberately still open: Data Protection keys are not persisted.**
-  The authentication cookie is encrypted with keys generated in memory, so they
-  die with the process -- and with `--min-replicas 0` the process dies after
-  about fourteen idle minutes (#35). The practical rule is that coming back to
-  the site after a pause means signing in again, which with a live provider
-  session is a redirect and no typing. Two sharper edges of the same cause: a
-  revision replaced mid-sign-in fails the callback with `Correlation failed`, and
-  the day `--min-replicas` goes above 1 the symptom becomes "signed out at
-  random" because two replicas cannot read each other's cookies. The fix is
-  `PersistKeysToAzureBlobStorage` plus `ProtectKeysWithAzureKeyVault` -- two
-  packages and another Azure resource, which is a deployment decision with a bill
-  attached rather than part of closing the door.
+  **The shell is now anonymous, and that is a change of shape rather than a
+  loosening.** Under OpenID Connect, `MapFallbackToFile` required authorization, so
+  a signed-out visitor was redirected to a provider. With the form inside the
+  client, the shell is exactly what a signed-out visitor needs -- protecting it
+  would mean refusing the request whose job is to deliver the way back in. It also
+  makes the pipeline honest about what was already true: `UseStaticFiles` is not an
+  endpoint and consults no authorization metadata, so `/index.html` was public
+  either way.
 
-  **The categorizer stays user-unaware.** #52 said its boundary "changes shape:
-  it is either called by the API on behalf of a user, or it needs to know about
-  users itself". It is the first, and no identity crosses the wire: the service
-  is sent a description, an amount and a currency, exactly as in #39, because it
-  has no use for who is asking and sending it would put user identity into a
-  second service's logs for nothing. That changes at #66, where the user's own
-  history becomes few-shot examples -- and that is the issue where it has to be
-  reopened, not this one.
+  **The seven Identity tables had to be renamed by hand, and finding that out cost
+  a schema that was half one thing and half the other.** `UseSnakeCaseNamingConvention`
+  renames what EF named by convention; `IdentityDbContext` names its tables
+  *explicitly* with `ToTable("AspNetUsers")` and six more, and an explicit name is a
+  decision the convention is right not to overrule. The first run produced
+  `transactions` beside `AspNetUsers`, with constraint and index names snake_cased
+  either way because those were left to convention -- read out of the running
+  database with `\dt`, not guessed at. That is exactly what #13 decided against: a
+  capital letter in a Postgres identifier makes it quoted for ever. Seven explicit
+  `ToTable` calls in `OnModelCreating` fix it, and they are seven lines rather than
+  a loop over `GetEntityTypes()` because the loop hides which tables it renames
+  behind a `StartsWith` and needs a `ToSnakeCase` this repository would then own a
+  second copy of.
 
-  **`/index.html` is public and `/` is not.** `UseStaticFiles` is not an endpoint
-  and consults no authorization metadata, so `wwwroot` is served to anyone at any
-  position in the pipeline; `/` is protected because it is matched by
-  `MapFallbackToFile`, which is an endpoint. Deliberate: the shell is the same
-  bytes for every visitor and holds no data, exactly as public as the JavaScript
-  bundle it loads, and the only thing behind it refuses an anonymous request.
+  **One context, not two.** A separate `IdentityDbContext` against its own schema
+  is what a larger system does and keeps the domain tables clear of the auth
+  subsystem. It lost on machinery: two connection strings' worth of ceremony, two
+  migration histories, `--context` on every `dotnet ef` invocation, and a second
+  `efbundle` in the deploy job, for a table count in single figures.
+
+  **The bug that reached a running application, and the reason it is the most
+  important paragraph here.** `AppDbContext` captured `currentUser.OwnerId` into a
+  string field in its constructor, on the reasoning that a context lives for one
+  request and is resolved when the endpoint's arguments are bound -- after
+  authorization. That reasoning is wrong the moment Identity is in the pipeline:
+  the cookie handler validates the security stamp during `UseAuthentication`, which
+  resolves `SignInManager` -> `UserManager` -> the EF store -> **this context**. So
+  it is built while `HttpContext.User` is still anonymous, and because a scoped
+  service is created once, the captured null stays null for the whole request.
+
+  What that looked like from outside is the half to remember. Every read answered
+  `WHERE owner_id IS NULL` and every write stamped null, so two accounts saw one
+  consistent, plausible, shared list -- with no error anywhere, and every unit test
+  green, because they all construct the context with the owner already known, which
+  is the one thing production does not do. **A filter that fails to nothing is
+  loud; this one failed to everything.** It was caught by registering two users and
+  sending requests, which is the discipline #19 put in the review rules and #23,
+  #35 and #39 have each paid for since.
+
+  The fix is to hold the service and read the property inside the expression, which
+  is still parameterised -- EF evaluates `_currentUser.OwnerId` client-side at
+  execution and passes it as a parameter, so one compiled query stays correct for
+  every user. Only *when* it is read changes.
+  `The_owner_is_read_when_the_query_runs_and_not_when_the_context_is_built` is the
+  regression test, and it was checked by mutating the code back and watching it
+  fail, per #21.
+
+  **The error keys have to be camelCase**, and this one also only appears by
+  sending a request. `ValidationFilter<T>` runs every member name through
+  `JsonNamingPolicy.CamelCase.ConvertName`, and the client matches the key against
+  its own field names to decide where to put the message. Written as
+  `nameof(request.Password)` and left alone, the server answered `"Password"`, the
+  form found no field by that name, and the sentence appeared in the banner at the
+  top instead of under the password box: correct, visible, and in the wrong place.
+
+  **Tests: 105, and they still need no Postgres, no Docker and no network.** That
+  property is #22's and it survived, but not for free -- registering and signing in
+  reach `UserManager`, so those cannot be tested in process without either a second
+  EF provider whose behaviour is not Postgres's or a database container in CI. What
+  is automated: every anonymous refusal, that no refusal is a redirect, that the
+  shell is served while signed out, that sign-in endpoints are anonymous, that the
+  process starts with nothing configured, the query filter's SQL, and
+  `RegistrationPolicy`, which is a pure function and is where the invite decision
+  actually lives. What is not is written at the top of `AuthorizationTests` in as
+  many words, and was verified by hand against the compose database: register,
+  sign in, wrong password, unknown user, lockout, sign out, and two accounts that
+  cannot see each other.
+
+  **Still deliberately open: Data Protection keys are not persisted.** The
+  authentication cookie is encrypted with keys generated in memory, so they die
+  with the process -- and with `--min-replicas 0` that is roughly every fourteen
+  idle minutes (#35). Coming back after a pause means signing in again, and here
+  that means **typing a password**, which is a good deal worse than it was under
+  OpenID Connect, where a live provider session made it a redirect and no typing.
+  This is the one item on this list most likely to be worth fixing next: two
+  packages (`PersistKeysToAzureBlobStorage`, `ProtectKeysWithAzureKeyVault`) and
+  one more Azure resource. Left out of #52 because it is a deployment decision with
+  a bill attached rather than part of closing the door.
+
 
 - **Database: Postgres. A container locally, Azure Database for PostgreSQL
   Flexible Server once deployed -- decided 2026-08-25** (#34). This replaces the

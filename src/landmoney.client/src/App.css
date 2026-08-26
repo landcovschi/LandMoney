@@ -19,11 +19,45 @@ header p {
   margin-top: var(--space-1);
 }
 
-/* #52. The one line in the header that changes with who is looking at it. Small
-   and muted on purpose: it is a status, not a control, and the only thing anyone
-   does with it is read it once. */
+/* #52. The line that changes with who is looking at the page. Small and muted on
+   purpose: it is a status, and the only thing anyone does with it is read it once
+   -- except for the one button it carries. */
 .session {
   font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+/* A button that has to look like a link, because it is a link in every way except
+   the one that matters: it does not navigate. Sign-out is a POST, and the switch
+   between signing in and registering only changes what is on screen -- neither is
+   an <a>, so neither is announced as one. This class buys back the appearance the
+   element gives up. */
+.link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent, inherit);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link:hover {
+  text-decoration: none;
+}
+
+/* A field that takes the full width of the grid, for the two forms whose inputs
+   have nothing to sit beside. */
+.field-wide {
+  grid-column: 1 / -1;
+}
+
+/* Said before the rule is broken rather than after. Muted, because it is guidance
+   and not an error -- .field-error is the one that has to be noticed. */
+.field-hint {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  margin-top: var(--space-1);
 }
 
 /* --- the form ------------------------------------------------------------ */

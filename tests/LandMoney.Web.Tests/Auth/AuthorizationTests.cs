@@ -1,42 +1,48 @@
 using System.Net;
 using System.Net.Http.Json;
-using LandMoney.Web.Auth;
 using Microsoft.Extensions.Hosting;
 
 namespace LandMoney.Web.Tests.Auth;
 
 /// <summary>#52's "verified by", as far as it can be checked without a database.</summary>
-// The issue asks for three things: a signed-out visitor gets a redirect and no
-// data, a signed-in one sees only their own rows, and another user's id returns
-// nothing. The first is entirely here. The second and third are properties of the
-// query filter and need Postgres to observe end to end -- OwnershipFilterTests
-// checks the SQL those two produce, and docs/deploy-azure.md records the run
-// against a real database.
+// The issue asks for three things: a signed-out visitor gets no data, a signed-in
+// one sees only their own rows, and another user's id returns nothing. The first
+// is entirely here. The second and third belong to the query filter, and
+// OwnershipFilterTests checks the SQL it produces.
+//
+// What is deliberately NOT here, said plainly because a suite that hides its gaps
+// is worth less than a smaller one that does not: registering and signing in reach
+// UserManager and SignInManager, which reach the database. Making those testable
+// in process would mean a second EF provider whose behaviour is not Postgres's, or
+// a Postgres container in CI -- and CLAUDE.md's "the tests need no Postgres, no
+// Docker and no network" is a property #22 was built on. They are verified by hand
+// against the compose database instead, and the run is written up in
+// docs/deploy-azure.md. The invite-code rule, which is the part with a decision in
+// it, is a pure function and is covered by RegistrationPolicyTests.
 public class AuthorizationTests
 {
-    // ---------------------------------------------------------------------
-    // A provider is configured. This is the deployed shape.
-    // ---------------------------------------------------------------------
-
-    [Fact]
-    public async Task An_anonymous_api_request_is_refused_with_401()
+    [Theory]
+    [InlineData("/api/transactions")]
+    [InlineData("/api/me")]
+    public async Task An_anonymous_request_for_data_is_refused_with_401(string path)
     {
-        using var app = TestApp.WithProvider();
+        using var app = TestApp.WithInviteCode();
         using var client = app.CreateNonFollowingClient();
 
-        var response = await client.GetAsync("/api/transactions");
+        var response = await client.GetAsync(path);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
-    // The half that matters more than the status, and the one a wrong event would
-    // break silently. If the API redirected, `fetch` would follow it to the
-    // provider, be answered with a sign-in page, and the client would report a
-    // JSON parse error about a request that was refused for a reason it never saw.
+    // The half that matters as much as the status. Identity's cookie handler
+    // redirects to /Account/Login by default -- a Razor page this application does
+    // not have -- so without the events in AuthenticationSetup the client would
+    // receive 404 HTML where it expected JSON and report a parse error about a
+    // request that was actually refused.
     [Fact]
-    public async Task An_anonymous_api_request_is_not_redirected_to_the_provider()
+    public async Task An_anonymous_request_is_never_redirected()
     {
-        using var app = TestApp.WithProvider();
+        using var app = TestApp.WithInviteCode();
         using var client = app.CreateNonFollowingClient();
 
         var response = await client.GetAsync("/api/transactions");
@@ -47,7 +53,7 @@ public class AuthorizationTests
     [Fact]
     public async Task An_anonymous_post_is_refused_before_the_body_is_looked_at()
     {
-        using var app = TestApp.WithProvider();
+        using var app = TestApp.WithInviteCode();
         using var client = app.CreateNonFollowingClient();
 
         // A body that would fail validation with a 400 if it ever reached the
@@ -60,121 +66,87 @@ public class AuthorizationTests
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    // The behaviour that changed when sign-in became a form. Under OpenID Connect
+    // this endpoint required authorization and answered 302 to the provider; now it
+    // has to serve the shell to a signed-out visitor, because the shell is what
+    // draws the login form. Protecting it would mean refusing the request whose job
+    // is to deliver the way back in.
+    //
+    // Asserted as "not refused" rather than "200", so that this stays a test about
+    // authorization. A 404 here would mean the client had not been built into
+    // wwwroot, which is a different fact and not this test's to report.
     [Fact]
-    public async Task An_anonymous_visitor_is_redirected_to_the_provider()
+    public async Task The_client_shell_is_served_to_a_signed_out_visitor()
     {
-        using var app = TestApp.WithProvider();
+        using var app = TestApp.WithInviteCode();
         using var client = app.CreateNonFollowingClient();
 
-        // "/" is MapFallbackToFile, which is every client route. This is the
-        // sentence "a signed-out visitor gets a redirect" in one assertion.
         var response = await client.GetAsync("/");
 
-        Assert.Equal(HttpStatusCode.Found, response.StatusCode);
-        Assert.StartsWith(
-            TestApp.FakeAuthorizationEndpoint,
-            response.Headers.Location?.ToString(),
-            StringComparison.Ordinal);
+        Assert.NotEqual(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.NotEqual(HttpStatusCode.Found, response.StatusCode);
     }
 
-    [Fact]
-    public async Task Signing_in_does_not_itself_require_being_signed_in()
-    {
-        using var app = TestApp.WithProvider();
-        using var client = app.CreateNonFollowingClient();
-
-        // AllowAnonymous on /auth/login, and the failure it prevents is a loop
-        // rather than a refusal: an authorization requirement here would challenge,
-        // and the challenge would come back here.
-        var response = await client.GetAsync("/auth/login");
-
-        Assert.Equal(HttpStatusCode.Found, response.StatusCode);
-        Assert.StartsWith(
-            TestApp.FakeAuthorizationEndpoint,
-            response.Headers.Location?.ToString(),
-            StringComparison.Ordinal);
-    }
-
-    // ---------------------------------------------------------------------
-    // No provider configured, and not Development. The fail-closed branch.
-    // ---------------------------------------------------------------------
-
-    // The most important test in this file. "No identity provider is configured"
-    // must never degrade into "no authentication is required" -- and it is exactly
-    // the degradation a design that threw at startup would have avoided by never
-    // starting, which #57 forbids. So it has to be checked at the request instead.
+    // Signing in cannot itself require being signed in -- that is a locked door
+    // with the key inside. Checked with an empty body on purpose: ValidationFilter
+    // refuses it with a 400 before the handler runs, so this proves the endpoint is
+    // anonymous and reachable without going anywhere near UserManager or the
+    // database.
     [Theory]
-    [InlineData("/api/transactions")]
-    [InlineData("/api/me")]
-    [InlineData("/")]
-    public async Task An_unconfigured_deployment_refuses_everything(string path)
+    [InlineData("/api/auth/login")]
+    [InlineData("/api/auth/register")]
+    public async Task Signing_in_does_not_itself_require_being_signed_in(string path)
     {
-        using var app = TestApp.WithoutProvider(Environments.Production);
+        using var app = TestApp.WithInviteCode();
         using var client = app.CreateNonFollowingClient();
 
-        var response = await client.GetAsync(path);
+        var response = await client.PostAsJsonAsync(path, new { });
 
-        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
-    // And it still starts, which is the other half of the same decision: efbundle
-    // runs Program.cs from a directory with no configuration at all, and a throw
-    // for a missing Authority would kill the deploy at "Apply migrations" -- #57's
-    // failure, one issue later. Building the host is the whole assertion.
+    // Signing out while already signed out is a no-op and must not be a 401 -- the
+    // person whose cookie has expired is exactly the person trying to clear it.
     [Fact]
-    public async Task An_unconfigured_deployment_still_starts()
+    public async Task Signing_out_when_signed_out_is_not_an_error()
     {
-        using var app = TestApp.WithoutProvider(Environments.Production);
+        using var app = TestApp.WithInviteCode();
+        using var client = app.CreateNonFollowingClient();
+
+        var response = await client.PostAsync("/api/auth/logout", content: null);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    // The process must start with no configuration at all: efbundle runs Program.cs
+    // from a directory holding nothing but itself, and #57 is what a
+    // required-configuration throw on that path costs. Building the host and
+    // answering anything is the whole assertion; /api/nope is the catch-all of #20,
+    // which is anonymous and touches nothing.
+    [Theory]
+    [InlineData("Production")]
+    [InlineData("Development")]
+    public async Task It_starts_with_no_invite_code_configured(string environment)
+    {
+        using var app = TestApp.WithoutInviteCode(environment);
         using var client = app.CreateNonFollowingClient();
 
         var response = await client.GetAsync("/api/nope");
 
-        // The /api catch-all of #20, which is AllowAnonymous and proves the
-        // pipeline is assembled and answering rather than merely not throwing.
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
-    // ---------------------------------------------------------------------
-    // No provider configured, in Development. The local loop.
-    // ---------------------------------------------------------------------
-
+    // And an unconfigured deployment still refuses data. "No invite code" must
+    // never degrade into "no authentication" -- it closes registration and nothing
+    // else.
     [Fact]
-    public async Task Development_signs_every_request_in_as_the_local_developer()
+    public async Task An_unconfigured_deployment_still_refuses_data()
     {
-        using var app = TestApp.WithoutProvider(Environments.Development);
+        using var app = TestApp.WithoutInviteCode(Environments.Production);
         using var client = app.CreateNonFollowingClient();
 
-        var response = await client.GetAsync("/api/me");
-        var me = await response.Content.ReadFromJsonAsync<Me>();
+        var response = await client.GetAsync("/api/transactions");
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(AuthenticationSetup.DevelopmentSubjectId, me?.OwnerId);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
-
-    // The one that would catch the mistake worth catching: a subject regenerated
-    // per start makes every locally entered row invisible after a restart, and the
-    // ownership filter then looks broken at exactly the moment it is working.
-    [Fact]
-    public async Task The_local_developer_is_the_same_person_after_a_restart()
-    {
-        string? first;
-        string? second;
-
-        using (var app = TestApp.WithoutProvider(Environments.Development))
-        using (var client = app.CreateNonFollowingClient())
-        {
-            first = (await client.GetFromJsonAsync<Me>("/api/me"))?.OwnerId;
-        }
-
-        using (var app = TestApp.WithoutProvider(Environments.Development))
-        using (var client = app.CreateNonFollowingClient())
-        {
-            second = (await client.GetFromJsonAsync<Me>("/api/me"))?.OwnerId;
-        }
-
-        Assert.NotNull(first);
-        Assert.Equal(first, second);
-    }
-
-    private sealed record Me(string? OwnerId, string? Name);
 }

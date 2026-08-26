@@ -387,14 +387,12 @@ app.UseRouting();
 // nothing and allows everything. This is the one middleware ordering mistake in
 // ASP.NET Core that fails open rather than throwing.
 //
-// Before UseStaticFiles is a choice with no effect and is worth saying so: the
-// static file middleware is not an endpoint and consults no authorization
-// metadata, so wwwroot is served to anyone at any position in this pipeline. What
-// that means in practice is that /index.html -- the SPA shell, the same bytes for
-// every visitor, containing no data -- is public, while / is not, because / is
-// matched by MapFallbackToFile and that endpoint requires authorization.
-// Deliberate: the shell is as public as the JavaScript bundle it loads, and the
-// only thing behind it, /api/transactions, refuses an anonymous request.
+// Their position relative to UseStaticFiles has no effect, which is worth saying
+// out loud: the static file middleware is not an endpoint and consults no
+// authorization metadata, so wwwroot is served to anyone wherever these two sit.
+// The client is public on purpose -- it is the same bytes for every visitor, and
+// one of the screens it can draw is the login form. Everything behind it is under
+// /api and refuses an anonymous request.
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -460,9 +458,7 @@ app.UseStaticFiles(staticFileOptions);
 
 app.MapTransactionEndpoints().RequireAuthorization();
 
-// #52. The two links a browser follows to start and end a session. Anonymous by
-// necessity -- a sign-in that required a sign-in would be a loop -- and outside
-// /api, because everything under that prefix answers 401 instead of redirecting.
+// #52. Register, sign in, sign out, and /api/me.
 app.MapAuthEndpoints();
 
 // A wrong path under /api answers 404 as JSON, and this line is the only reason
@@ -547,17 +543,21 @@ app.MapMethods(
 // answers 404 rather than pretending. That is the intended behaviour and it is
 // also what F5 in Visual Studio now shows when only the API has been started:
 // the fix is to build the client once, not to bring the redirect back.
-app.MapFallbackToFile("index.html", staticFileOptions)
-
-    // #52, and this is the line the issue's "a signed-out visitor gets a redirect"
-    // is describing. Every client route -- "/", "/anything" -- is this endpoint, so
-    // requiring authorization here is what turns opening the site while signed out
-    // into a redirect to the provider rather than into a React application that
-    // loads and then cannot fetch anything.
-    //
-    // It does not protect /index.html, which UseStaticFiles serves directly. See
-    // the note beside UseAuthorization above; the shell holds no data.
-    .RequireAuthorization();
+// Anonymous, deliberately, and this is where the shape of #52 changed when the
+// sign-in became a form instead of a redirect to a provider.
+//
+// The first version of #52 required authorization here: an anonymous visitor was
+// sent to an identity provider, so the shell never had to render for one. With
+// the login form living inside the client, the shell is exactly what a signed-out
+// visitor needs -- protecting it would mean answering 401 to the request whose
+// job is to deliver the form.
+//
+// Nothing is given away by that. index.html and the bundle are the same bytes for
+// every visitor and hold no data; the only things behind them are under /api, and
+// those refuse an anonymous request. It also makes the pipeline honest about what
+// was already true: UseStaticFiles is not an endpoint and consults no
+// authorization metadata, so /index.html was being served to anyone regardless.
+app.MapFallbackToFile("index.html", staticFileOptions);
 
 app.Run();
 

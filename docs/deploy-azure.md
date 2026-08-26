@@ -1178,104 +1178,65 @@ being true.
 
 Until #52 the deployed URL was open. Anyone holding it could read every
 transaction and write new ones; there was no account, no owner and no check
-anywhere. That was tolerable while every row was invented and is not once the
-rows are real spending.
+anywhere.
 
-What #52 chose is **OpenID Connect in the application** -- the second of the
-three options the issue listed -- with a cookie holding the session. The
-reasoning is in `CLAUDE.md`; the short version is that Easy Auth would have made
-authentication a property of Container Apps, and this repository has already
-paid once for depending on a property of one host (#36, `UseHsts` behind the
-ingress).
+What #52 landed is a username and a password, held by this application: ASP.NET
+Core Identity, a login form in the client, and an invite code required to create
+an account. There is no identity provider to register with and no redirect
+anywhere -- so unlike almost every other step in this file, **most of this one is
+configuration rather than commands**.
 
-The commands below are the owner's. Claude does not create an app registration
-and does not type a client secret, for the same reason it does not run
-`gh auth login`.
+The reasoning, including what Easy Auth and OpenID Connect lost on, is in
+`CLAUDE.md`.
 
-### The registration, once
+### The one setting
 
-Any OpenID Connect provider works -- nothing in the code names one. Microsoft
-Entra ID is what the commands below use, because the tenant already exists: #38
-created an app registration in it for GitHub Actions, and this is a second,
-unrelated one.
+Registration is refused unless the request quotes `Authentication:InviteCode`.
+It is a shared secret, so it goes in as a Container Apps secret and is referenced
+rather than pasted -- the same road the connection string takes (#36):
 
 ```
-az ad app create --display-name landmoney-web --sign-in-audience AzureADMyOrg
-```
-
-Read the `appId` out of that answer; it is the `ClientId` below. Then the reply
-URL, which has to match `CallbackPath` in `AuthenticationSetup.cs` exactly:
-
-```
-az ad app update --id <appId> --web-redirect-uris https://landmoney.redstone-8c11320c.polandcentral.azurecontainerapps.io/signin-oidc
-```
-
-And the secret. This is the one value in the whole runbook that is a password:
-
-```
-az ad app credential reset --id <appId> --display-name landmoney-container-app --years 1
-```
-
-`--years 1` rather than the default two, and it is a diary entry rather than a
-setting: the day it expires, every sign-in fails with `AADSTS7000215: Invalid
-client secret provided` and nothing warns beforehand. Rotating it is this
-command again plus the secret update below.
-
-Two things about the reply URL that cost time if they are got wrong.
-
-**It must be the https one, and that works only because of #36.** The
-application builds `redirect_uri` from `Request.Scheme`, and inside the
-container the request arrives over plain http from the ingress. Without
-`UseForwardedHeaders` the application would send `http://.../signin-oidc`, the
-provider would refuse it as unregistered, and the error would name the redirect
-URI rather than the middleware. That middleware went in for HSTS and is now
-load-bearing for authentication as well.
-
-**A trailing slash is a different URI.** `/signin-oidc/` does not match
-`/signin-oidc`, and the provider's error says only that the reply URL is not
-registered.
-
-### The three settings, on the container app
-
-Authority and client id are not secrets -- they name a registration. The client
-secret is one, and it goes in the same place the connection string does (#36),
-referenced rather than pasted:
-
-```
-az containerapp secret set -g rg-landmoney -n landmoney --secrets oidc-secret=<the value from credential reset>
+az containerapp secret set -g rg-landmoney -n landmoney --secrets invite-code=<a long random string>
 ```
 
 ```
-az containerapp update -g rg-landmoney -n landmoney --set-env-vars "Authentication__Oidc__Authority=https://login.microsoftonline.com/<tenantId>/v2.0" "Authentication__Oidc__ClientId=<appId>" "Authentication__Oidc__ClientSecret=secretref:oidc-secret"
+az containerapp update -g rg-landmoney -n landmoney --set-env-vars "Authentication__InviteCode=secretref:invite-code"
 ```
 
-Double underscores, not colons: that is how a nested configuration key is
-spelled as an environment variable, on every platform. `--set-env-vars` adds and
-`--replace-env-vars` removes everything else, which is the same one-word trap
-step 12 records for the connection string -- the wrong one here would delete the
-connection string and the categorizer's base URL together.
+Double underscores, not a colon: that is how a nested configuration key is
+spelled as an environment variable. `--set-env-vars` adds and
+`--replace-env-vars` removes everything else -- one word apart in the same help
+text, and the wrong one deletes the connection string.
 
-**`/v2.0` on the authority is not optional for Entra.** The v1 endpoint does not
-publish an OpenID Connect discovery document in the shape the handler expects,
-and the failure is `IDX20803: Unable to obtain configuration from`, which reads
-as a network problem.
-
-### Checking it
-
-Signed out, from a machine with no cookie:
+Generate the value rather than inventing one. Anything long and random will do;
+this produces one without it reaching a shell history file:
 
 ```
-curl.exe -s -o NUL -w "%{http_code} %{redirect_url}\n" https://landmoney.redstone-8c11320c.polandcentral.azurecontainerapps.io/
-curl.exe -s -o NUL -w "%{http_code}\n" https://landmoney.redstone-8c11320c.polandcentral.azurecontainerapps.io/api/transactions
+python -c "import secrets; print(secrets.token_urlsafe(24))"
 ```
 
-The first is `302` to `login.microsoftonline.com`. The second is `401` with no
-`Location` at all -- the split `OnRedirectToIdentityProvider` makes, and the
-reason the client can tell "you are signed out" from "the API is broken".
+**Set this before the image that needs it is deployed.** The current revision has
+never heard of the variable and ignores it, so there is no window where the site
+is wrong -- and the alternative order leaves the deployed application unable to
+create the first account. Same reasoning as migrate-first (#37): the thing that
+is needed arrives before the thing that needs it.
 
-`curl.exe`, spelled out, because `curl` in Git Bash is the shim and the URL is
-not the problem: CLAUDE.md's rule about arguments that look like Unix paths has
-now been paid for three times.
+**What happens if it is not set.** Registration is refused for everybody and one
+error is logged at startup naming the key. Existing accounts still sign in, and
+nothing else changes -- the missing secret closes the door to new accounts rather
+than to the application. It is deliberately not a startup throw: `efbundle` runs
+`Program.cs` from a directory with no configuration at all, and #57 is what that
+costs.
+
+### The first account
+
+There is no seeding and no bootstrap command. Open the site, follow *I have an
+invite code and need an account*, and fill in three fields. The account that
+registers first has nothing special about it -- there are no roles, and every
+account sees only its own rows.
+
+Passwords are ten characters minimum, with no requirement about digits or
+symbols. Five wrong attempts lock the account for five minutes.
 
 ### Claiming the rows that were there first
 
@@ -1286,51 +1247,72 @@ about ownership that is not true.
 
 The consequence is concrete and looks like data loss if it is not expected:
 **after the migration, and before this step, the site is empty.** Every existing
-row has a null owner and the query filter makes it invisible to everybody.
+row has a null owner and the query filter makes it invisible to everybody. The
+rows are all still in the table.
 
-So: sign in once, which is what produces a subject id to hand them to. Read it
-from `/api/me`, which answers about the caller and nobody else -- in the
-browser, signed in, or from the sign-in line in the header. Then, once:
+So: register, then read the id off `/api/me`, which answers about the caller and
+nobody else. Then, once:
 
 ```
 az postgres flexible-server execute -n psql-landmoney-pl -u landmoney -p <the password> -d landmoney -q "UPDATE transactions SET owner_id = '<the ownerId from /api/me>' WHERE owner_id IS NULL;"
 ```
 
-Run it once and never again as written. A second run after a second person has
-used the site would hand that person's rows over as well, since theirs are not
-null -- which is safe today, when there is one user by assumption, and is the
-line to re-read the day that stops being true.
+Run it once and never again as written. A second run after somebody else has used
+the site would hand their rows over too -- their `owner_id` is not null, so they
+are safe from this exact statement, but a broader `WHERE` would not be. Safe
+today, when there is one user by assumption, and the line to re-read the day that
+stops being true.
 
-**The same UPDATE is what a change of provider needs.** The owner is the `sub`
-claim, and `sub` is issued by the provider: moving from Entra to Google issues a
-new one, and every row silently belongs to nobody again. That is the cost of not
-having a users table, it is written down rather than designed around, and the
-recovery is this paragraph.
+### A forgotten password
+
+There is no reset flow, because there is no email -- #52 left that out on
+purpose, and `CLAUDE.md` has the argument. So this is an administrative act, and
+it is the owner's.
+
+The password is stored as a hash, so it cannot be read back or set with an
+`UPDATE`. The two honest routes are to delete the account and register again with
+the same invite code:
+
+```
+az postgres flexible-server execute -n psql-landmoney-pl -u landmoney -p <the password> -d landmoney -q "DELETE FROM asp_net_users WHERE normalized_user_name = 'ALICE';"
+```
+
+**`normalized_user_name`, upper-cased**, which is the column Identity actually
+looks up by -- `user_name` holds what was typed and is not what a query should
+match on.
+
+The rows survive that, because `owner_id` is a plain string and not a foreign
+key: they are simply invisible until the new account's id is written over them
+with the same `UPDATE` as above. That is a property worth knowing rather than
+discovering -- and it is the same property that made swapping the whole
+authentication subsystem cheap.
+
+The other route is a small one-off program using `UserManager.ResetPasswordAsync`
+with a generated token. It is the correct answer and it is not written here,
+because a program that can reset any password is a thing that then exists.
 
 ### What is not solved, and it will be noticed
 
-**The cookie does not survive a restart of the container.** ASP.NET Core
-encrypts the authentication cookie with Data Protection keys, and with no
-configured key ring those keys are generated in memory and die with the process.
-With `--min-replicas 0` the process dies after roughly fourteen idle minutes
-(#35), so the practical rule is: **coming back to the site after a pause means
-signing in again.** With the provider's own session still alive that is a
-redirect and no typing, which is why it is tolerable.
+**The cookie does not survive a restart of the container.** ASP.NET Core encrypts
+the authentication cookie with Data Protection keys, and with no configured key
+ring those keys are generated in memory and die with the process. With
+`--min-replicas 0` the process dies after roughly fourteen idle minutes (#35), so
+the practical rule is: **coming back to the site after a pause means signing in
+again** -- and here that means typing a password, where under an external
+provider it would have been a redirect and no typing.
 
-Two sharper edges of the same cause. A revision replaced mid-sign-in fails the
-callback with `Correlation failed` -- the nonce cookie was protected by keys the
-new container has never seen -- and a retry works. And the day `--min-replicas`
-goes above 1, two replicas cannot read each other's cookies at all, so the
-symptom stops being "signed out after a pause" and becomes "signed out at
-random".
+Two sharper edges of the same cause. A revision replaced mid-session signs
+everybody out. And the day `--min-replicas` goes above 1, two replicas cannot
+read each other's cookies at all, so the symptom stops being "signed out after a
+pause" and becomes "signed out at random".
 
 The fix is a persisted key ring: `PersistKeysToAzureBlobStorage` plus
-`ProtectKeysWithAzureKeyVault`, which is two packages and at least one more
-Azure resource. Deliberately not done in #52 -- it is a deployment decision with
-a bill attached rather than part of closing the door, and the failure it removes
-is an inconvenience rather than a hole. `--min-replicas 1` removes the everyday
-half of it and surrenders the reason Container Apps beat App Service, which is
-the trade #35 already wrote down.
+`ProtectKeysWithAzureKeyVault`, which is two packages and at least one more Azure
+resource. Deliberately not done in #52 -- it is a deployment decision with a bill
+attached rather than part of closing the door -- and it is the first thing to pick
+up afterwards, because a password typed on every visit is what makes people pick
+short ones.
+
 
 ## Tearing it all down
 

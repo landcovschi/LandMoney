@@ -1,14 +1,18 @@
 import { useEffect, useState } from 'react'
-import { createTransaction, getMe, listTransactions, type Me } from './api/transactions'
+import { getMe, logout, type Me } from './api/auth'
+import { createTransaction, listTransactions } from './api/transactions'
 import type { NewTransaction } from './api/types'
+import { LoginForm } from './components/LoginForm'
 import { TransactionForm } from './components/TransactionForm'
 import { TransactionList, type ListState } from './components/TransactionList'
 import './App.css'
 
 /** Who is signed in, once the server has been asked. */
-// A third state rather than `Me | null`, because "not asked yet" and "nobody is
-// signed in" are different things to put on screen, and collapsing them makes the
-// header flash a sign-in link at somebody who is signed in.
+// Three states rather than `Me | null`, because "not asked yet" and "nobody is
+// signed in" are different things to put on screen. Collapsing them shows the
+// login form for one frame to somebody who is already signed in, on every single
+// page load -- which looks like being signed out and is the sort of flicker that
+// makes an application feel broken.
 type SessionState =
   | { status: 'loading' }
   | { status: 'signedIn'; me: Me }
@@ -40,15 +44,16 @@ function App() {
     setReloads((count) => count + 1)
   }
 
-  // #52. Asked once, on mount, and never again: a session that ends while the
-  // page is open surfaces as a 401 on the next list request instead, which is
-  // where the user is already looking. Polling this would be a request every few
-  // seconds against a container that scales to zero.
+  // #52. Asked once, on mount. A session that ends while the page is open
+  // surfaces as a 401 from the list request instead, which is where the user is
+  // already looking; polling this would be a request every few seconds against a
+  // container that scales to zero.
   //
   // getMe answers null rather than throwing on 401 -- "nobody is signed in" is
-  // what the question was, so it is an answer. Anything else is a real failure and
-  // is deliberately left to fall through to the list's own error reporting rather
-  // than given a second place to be shown.
+  // what the question was, so it is an answer. Anything else is a real failure,
+  // and it is treated as signed-out on purpose: the login form is the one screen
+  // that is useful when the server cannot be reached, because it is also the
+  // screen you need if the reason was that the session had gone.
   useEffect(() => {
     const controller = new AbortController()
 
@@ -64,6 +69,14 @@ function App() {
   }, [])
 
   useEffect(() => {
+    // Nothing to list until there is somebody to list it for. Without this guard
+    // the first render fires a request that is certain to be refused, and the
+    // login screen would appear with "The session has ended" printed under it --
+    // a true sentence about a session that never started.
+    if (session.status !== 'signedIn') {
+      return
+    }
+
     // React runs every effect twice in development under StrictMode, on
     // purpose: it is hunting for exactly the effects that break when run twice.
     // Two requests go out, and without an abort the slower of the two wins and
@@ -95,7 +108,7 @@ function App() {
       })
 
     return () => controller.abort()
-  }, [reloads])
+  }, [reloads, session.status])
 
   // Deliberately not caught here. The form needs the ApiError itself to put the
   // server's messages beside its own fields, and catching it in this function
@@ -132,48 +145,63 @@ function App() {
     reload()
   }
 
+  async function handleSignOut() {
+    await logout()
+
+    setSession({ status: 'signedOut' })
+
+    // The rows go with the session. Leaving them in state would put one person's
+    // spending on the screen behind the next person's login form -- which is the
+    // failure this whole issue exists to prevent, reproduced in the client after
+    // the server had got it right.
+    setList({ status: 'loading' })
+  }
+
   return (
     <main>
       <header>
         <h1>LandMoney</h1>
         <p>What has been spent, and when.</p>
 
-        {/*
-          Plain anchors, not fetch. Both of these are navigations by nature: one
-          ends at the identity provider and comes back with a cookie, the other
-          ends at the provider's sign-out and comes back. A fetch would follow the
-          redirects itself and change nothing the user can see.
-
-          Sign-out is a GET because it has to work as a link. The usual objection
-          is that a third-party page could trigger it with an <img> tag; the cost
-          of that is being signed out, which is the least valuable thing an
-          attacker could do here, and the alternative is a form and an antiforgery
-          token for a one-user application.
-        */}
         {session.status === 'signedIn' && (
           <p className="session">
             Signed in as {session.me.name ?? 'someone'}.{' '}
-            <a href="/auth/logout">Sign out</a>
-          </p>
-        )}
-
-        {session.status === 'signedOut' && (
-          <p className="session">
-            <a href="/auth/login">Sign in</a>
+            {/*
+              A button, not a link. Signing out is a POST -- a GET that ends a
+              session can be triggered by any page that can make this browser
+              fetch an image -- and an <a> that fires a request is a link that
+              lies about what it does.
+            */}
+            <button type="button" className="link" onClick={handleSignOut}>
+              Sign out
+            </button>
           </p>
         )}
       </header>
 
       {/*
-        The form is hidden while signed out, and the list is left to report its
-        own 401. Hiding the form is not a security measure -- the API refuses an
-        anonymous POST whatever this renders, which AuthorizationTests asserts --
-        it is that offering a form whose submit cannot succeed is a worse screen
-        than not offering one.
-      */}
-      {session.status !== 'signedOut' && <TransactionForm onSubmit={handleCreate} />}
+        Nothing is rendered until the session is known, which is the whole point
+        of the third state above. `null` rather than a spinner: the answer arrives
+        in a few milliseconds on a warm container, and a spinner that flashes is
+        worse than a beat of nothing.
 
-      <TransactionList state={list} onRetry={reload} />
+        Hiding the application is not the security measure -- the API refuses every
+        anonymous request whatever this renders, which AuthorizationTests asserts.
+        It is that a form whose submit cannot succeed is a worse screen than the
+        one that says why.
+      */}
+      {session.status === 'loading' && null}
+
+      {session.status === 'signedOut' && (
+        <LoginForm onSignedIn={(me) => setSession({ status: 'signedIn', me })} />
+      )}
+
+      {session.status === 'signedIn' && (
+        <>
+          <TransactionForm onSubmit={handleCreate} />
+          <TransactionList state={list} onRetry={reload} />
+        </>
+      )}
     </main>
   )
 }

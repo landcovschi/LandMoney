@@ -106,7 +106,50 @@ public class OwnershipFilterTests
             index.Properties.Select(p => p.Name));
     }
 
-    private static AppDbContext ContextFor(string? ownerId)
+    // The regression test for the bug that reached a running application, and the
+    // only one in this file that could not have been written by reading the code.
+    //
+    // The first version of AppDbContext captured currentUser.OwnerId in the
+    // constructor. That is wrong with Identity in the pipeline: the cookie handler
+    // validates the security stamp during UseAuthentication, which resolves
+    // UserManager, which resolves the store, which resolves this context -- so it
+    // is built while HttpContext.User is still anonymous, and the captured null
+    // stays null for the rest of the request.
+    //
+    // The failure was invisible from inside: reads answered `WHERE owner_id IS
+    // NULL` and writes stamped null, so two accounts saw one consistent shared
+    // list with no error anywhere. Two users, one view, and every unit test in this
+    // file still green -- because they all construct the context with the owner
+    // already known, which is the one thing production does not do.
+    //
+    // So this one changes the owner AFTER construction, which is exactly what a
+    // request does.
+    [Fact]
+    public void The_owner_is_read_when_the_query_runs_and_not_when_the_context_is_built()
+    {
+        var user = new StubCurrentUser(null);
+        using var db = ContextForUser(user);
+
+        // Authentication happens here, in effect: the principal arrives after the
+        // context exists.
+        user.OwnerId = "owner-a";
+
+        var sql = db.Transactions.ToQueryString();
+
+        // Under the bug this reads `WHERE t.owner_id IS NULL`, and every row
+        // belonging to nobody is returned to everybody.
+        Assert.DoesNotContain("IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("owner-a", sql, StringComparison.Ordinal);
+    }
+
+    private static AppDbContext ContextFor(string? ownerId) =>
+        ContextForUser(new StubCurrentUser(ownerId));
+
+    // Two methods rather than one overload taking ICurrentUser. `ContextFor(null)`
+    // is ambiguous between `string?` and an interface, and the compiler says so --
+    // CS0121, which reads as a mistake in the test rather than as a name that has
+    // to be different.
+    private static AppDbContext ContextForUser(ICurrentUser currentUser)
     {
         var options = new DbContextOptionsBuilder<AppDbContext>()
 
@@ -117,14 +160,18 @@ public class OwnershipFilterTests
             .UseSnakeCaseNamingConvention()
             .Options;
 
-        return new AppDbContext(options, new StubCurrentUser(ownerId));
+        return new AppDbContext(options, currentUser);
     }
 
     // Not a mock and not derived from anything -- ICurrentUser has one property,
     // which is the whole argument for it being an interface rather than a reach
     // into IHttpContextAccessor from inside AppDbContext.
+    //
+    // Settable rather than readonly, which is not laziness: the test above needs to
+    // change the answer after the context has been built, because that is what
+    // signing in does to a request that is already in flight.
     private sealed class StubCurrentUser(string? ownerId) : ICurrentUser
     {
-        public string? OwnerId { get; } = ownerId;
+        public string? OwnerId { get; set; } = ownerId;
     }
 }

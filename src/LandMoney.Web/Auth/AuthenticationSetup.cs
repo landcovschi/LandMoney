@@ -1,6 +1,7 @@
-using Microsoft.AspNetCore.Authentication.Cookies;
-using Microsoft.AspNetCore.Authentication.OpenIdConnect;
-using Microsoft.IdentityModel.Protocols.OpenIdConnect;
+using System.Security.Cryptography;
+using System.Text;
+using LandMoney.Web.Data;
+using Microsoft.AspNetCore.Identity;
 
 namespace LandMoney.Web.Auth;
 
@@ -9,22 +10,12 @@ namespace LandMoney.Web.Auth;
 // path names the feature instead of growing it.
 public static class AuthenticationSetup
 {
-    /// <summary>The cookie that carries the session once the provider has spoken.</summary>
-    public const string CookieScheme = CookieAuthenticationDefaults.AuthenticationScheme;
-
-    /// <summary>The section every key below is read from.</summary>
-    public const string ConfigurationSection = "Authentication:Oidc";
-
-    /// <summary>The subject every row entered on a developer machine belongs to.</summary>
-    // A fixed string rather than a fresh Guid per start: the rows in the local
-    // Postgres have to still be visible after the application is restarted, or
-    // the local database empties itself from the screen every time and the
-    // ownership filter looks broken exactly when it is working.
-    public const string DevelopmentSubjectId = "local-development-user";
+    /// <summary>The configuration key holding the code a new account must quote.</summary>
+    public const string InviteCodeKey = "Authentication:InviteCode";
 
     /// <summary>
-    /// Registers authentication. OpenID Connect when it is configured; otherwise a
-    /// local developer in Development, and nobody at all anywhere else.
+    /// Registers ASP.NET Core Identity with a cookie, and nothing else. There is no
+    /// external provider and no redirect: the login form is part of the client.
     /// </summary>
     public static IServiceCollection AddLandMoneyAuthentication(
         this IServiceCollection services,
@@ -38,257 +29,182 @@ public static class AuthenticationSetup
         services.AddHttpContextAccessor();
         services.AddScoped<ICurrentUser, CurrentUser>();
 
-        var section = configuration.GetSection(ConfigurationSection);
-        var authority = section["Authority"];
-        var clientId = section["ClientId"];
-        var clientSecret = section["ClientSecret"];
+        services.AddSingleton(ReadRegistrationPolicy(configuration, environment, logger));
 
-        // Authority and ClientId decide it. ClientSecret is deliberately not part
-        // of this test, because a public client using PKCE legitimately has none --
-        // and treating a missing secret as "not configured" would drop such a
-        // deployment into one of the two branches below without saying so.
-        var oidcConfigured =
-            !string.IsNullOrWhiteSpace(authority) && !string.IsNullOrWhiteSpace(clientId);
+        // AddIdentityCore, not AddIdentity, and the difference is the reason this is
+        // three calls instead of one. AddIdentity registers its own cookie schemes
+        // AND sets the default challenge to a redirect at "/Account/Login" -- a
+        // Razor page that does not exist here and would not be wanted if it did.
+        // AddIdentityCore registers the managers and no schemes, so the cookies
+        // below are the only ones configured and there is no path to a page nobody
+        // wrote.
+        services
+            .AddIdentityCore<IdentityUser>(options =>
+            {
+                // Length over composition, which is the modern guidance and the
+                // opposite of Identity's defaults (six characters, but one digit,
+                // one upper, one lower and one symbol). Character-class rules push
+                // people towards Password1! and buy less than four more characters
+                // do.
+                options.Password.RequiredLength = 10;
+                options.Password.RequireDigit = false;
+                options.Password.RequireLowercase = false;
+                options.Password.RequireUppercase = false;
+                options.Password.RequireNonAlphanumeric = false;
 
-        // Recorded once, here, where the branch is actually taken. AuthEndpoints
-        // reads this rather than asking the configuration the same question a
-        // second time.
-        services.AddSingleton(new AuthenticationMode(oidcConfigured));
+                // Five attempts, then five minutes. On by default in Identity and
+                // written out because PasswordSignInAsync has to opt into it per
+                // call -- see AuthEndpoints -- so a reader who finds this block
+                // could reasonably assume lockout is already happening when it is
+                // not.
+                options.Lockout.MaxFailedAccessAttempts = 5;
+                options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(5);
 
-        // The order of these three branches is itself a decision, and it is the one
-        // that keeps ASPNETCORE_ENVIRONMENT from being a door.
-        //
-        // #36 recorded that four middlewares hang off !IsDevelopment(), so a typo in
-        // that variable turns four things off at once and says nothing.
-        // Authentication would have been the fifth and by far the worst, except that
-        // the configured case is tested FIRST: the deployed application has an
-        // Authority, so it takes the OpenID Connect branch whatever the environment
-        // claims to be. The development sign-in below is not reachable by setting
-        // one environment variable -- it needs the provider configuration to be
-        // absent as well, which in Azure means deleting a secret.
-        if (oidcConfigured)
+                // No email is collected, so there is nothing to require to be
+                // unique and nothing to confirm. This application has no flow that
+                // would send a message: password reset was deliberately left out
+                // (#52), because it means an email provider, an API key, a sender
+                // domain and deliverability to debug. Storing a personal email
+                // address for a flow that does not exist is worse than not storing
+                // one.
+                options.User.RequireUniqueEmail = false;
+                options.SignIn.RequireConfirmedAccount = false;
+            })
+            .AddEntityFrameworkStores<AppDbContext>()
+
+            // AddIdentityCore leaves this out, and without it SignInManager cannot
+            // be resolved -- the failure is at first request rather than at
+            // startup, and it names the type rather than the missing call.
+            .AddSignInManager();
+
+        services
+            .AddAuthentication(IdentityConstants.ApplicationScheme)
+            .AddIdentityCookies();
+
+        services.ConfigureApplicationCookie(options =>
         {
-            AddOpenIdConnect(services, environment, authority!, clientId!, clientSecret, section);
-        }
-        else if (environment.IsDevelopment())
-        {
-            // `dotnet run` with nothing configured still works, and still exercises
-            // the ownership filter -- rows written here have an owner, it is just
-            // always the same one. A local loop that ran unauthenticated would test
-            // a code path production never takes.
-            logger.LogInformation(
-                "No {Section}:Authority is configured. Every request will be signed in as the " +
-                "local development user. This happens in the Development environment only.",
-                ConfigurationSection);
+            options.Cookie.Name = "landmoney.auth";
+            options.Cookie.HttpOnly = true;
 
-            services
-                .AddAuthentication(LocalAuthenticationHandler.SchemeName)
-                .AddScheme<LocalAuthenticationOptions, LocalAuthenticationHandler>(
-                    LocalAuthenticationHandler.SchemeName,
-                    options => options.SubjectId = DevelopmentSubjectId);
-        }
-        else
-        {
-            // Fail closed, at the request rather than at startup. The process has to
-            // start -- efbundle runs Program.cs with no configuration at all -- and
-            // it must not serve anything while it is in this state.
-            logger.LogError(
-                "No {Section}:Authority is configured and this is not the Development " +
-                "environment, so nobody can sign in and every protected request will be " +
-                "answered with 401. Set {Section}:Authority and {Section}:ClientId.",
-                ConfigurationSection,
-                ConfigurationSection,
-                ConfigurationSection);
+            // Lax, and here it is doing more work than it was under OpenID Connect.
+            // A Lax cookie is withheld from any cross-site request that is not a
+            // top-level GET navigation, so a form on another site cannot POST to
+            // /api/transactions with this user's session attached. That is the
+            // CSRF protection for this application; there is no antiforgery token
+            // anywhere, and this is why one is not needed. Changing this to None
+            // removes it silently.
+            options.Cookie.SameSite = SameSiteMode.Lax;
 
-            services
-                .AddAuthentication(LocalAuthenticationHandler.SchemeName)
-                .AddScheme<LocalAuthenticationOptions, LocalAuthenticationHandler>(
-                    LocalAuthenticationHandler.SchemeName,
-                    options => options.SubjectId = null);
-        }
+            // Always outside Development. The local loop is http://localhost:5150
+            // (#4), where Always would mean the browser stores no cookie and the
+            // sign-in appears to succeed and then not have happened. Deployed,
+            // Request.IsHttps is true because of #36's UseForwardedHeaders.
+            options.Cookie.SecurePolicy = environment.IsDevelopment()
+                ? CookieSecurePolicy.SameAsRequest
+                : CookieSecurePolicy.Always;
+
+            options.ExpireTimeSpan = TimeSpan.FromDays(14);
+            options.SlidingExpiration = true;
+
+            // Every refusal is a status, never a redirect, and that is a change of
+            // shape from the OpenID Connect version rather than a tweak. There, an
+            // anonymous visitor was sent to a provider, so "/" had to be protected.
+            // Here the login form IS the client, so the shell has to load for a
+            // signed-out visitor in order to show it -- MapFallbackToFile is
+            // anonymous, and the only protected things left are under /api, which
+            // are called by `fetch` and want a status they can read.
+            //
+            // Without these two, the defaults redirect to /Account/Login and
+            // /Account/AccessDenied. Neither exists, so the client would receive
+            // 404 HTML where it expected JSON and report a parse error about a
+            // request that was actually refused.
+            options.Events.OnRedirectToLogin = context =>
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return Task.CompletedTask;
+            };
+
+            options.Events.OnRedirectToAccessDenied = context =>
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return Task.CompletedTask;
+            };
+        });
 
         services.AddAuthorization();
 
         return services;
     }
 
-    private static void AddOpenIdConnect(
-        IServiceCollection services,
+    private static RegistrationPolicy ReadRegistrationPolicy(
+        IConfiguration configuration,
         IWebHostEnvironment environment,
-        string authority,
-        string clientId,
-        string? clientSecret,
-        IConfigurationSection section)
+        ILogger logger)
     {
-        services
-            .AddAuthentication(options =>
-            {
-                // The cookie holds the session; the provider is only asked when
-                // there is no cookie. This is the "backend for frontend" shape, and
-                // it is chosen over handing the SPA a token: the client is served by
-                // this same application out of wwwroot, so a cookie is same-origin
-                // and needs no CORS, no refresh logic in TypeScript, and puts no
-                // access token anywhere JavaScript can read it.
-                options.DefaultScheme = CookieScheme;
-                options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
-                options.DefaultSignOutScheme = OpenIdConnectDefaults.AuthenticationScheme;
-            })
-            .AddCookie(CookieScheme, options =>
-            {
-                options.Cookie.Name = "landmoney.auth";
-                options.Cookie.HttpOnly = true;
+        var inviteCode = configuration[InviteCodeKey];
 
-                // Lax rather than Strict. The last leg of a sign-in is the provider
-                // redirecting the browser back to /signin-oidc, which is a
-                // cross-site navigation; Strict withholds the cookie on exactly that
-                // request, and the symptom is a sign-in that loops for ever without
-                // ever reporting an error.
-                options.Cookie.SameSite = SameSiteMode.Lax;
-
-                // SameAsRequest in Development only, and it is not a preference: the
-                // local loop is http://localhost:5150 -- #4's decision, and the same
-                // reason UseHttpsRedirection is gated this way -- so Always would
-                // mean the browser never stores the cookie, and the sign-in would
-                // appear to succeed and then not have happened. Deployed,
-                // Request.IsHttps is true because of #36's UseForwardedHeaders, so
-                // Always is a rule that holds rather than one that bites.
-                options.Cookie.SecurePolicy = environment.IsDevelopment()
-                    ? CookieSecurePolicy.SameAsRequest
-                    : CookieSecurePolicy.Always;
-
-                options.ExpireTimeSpan = TimeSpan.FromDays(14);
-                options.SlidingExpiration = true;
-
-                // OnRedirectToAccessDenied and not OnRedirectToLogin, and the
-                // absence of the second one is the point.
-                //
-                // OnRedirectToLogin is the event every example of this pattern
-                // uses, and here it would be dead code: it fires when the *cookie*
-                // handler is challenged, and the challenge scheme above is
-                // OpenIdConnect. An unauthenticated request is therefore handled by
-                // the OpenID Connect handler, which redirects to the provider
-                // without ever consulting this handler at all. The API-versus-page
-                // split has to be made there instead, and it is --
-                // OnRedirectToIdentityProvider, below.
-                //
-                // Worth knowing how that mistake presents, because it looks like
-                // anything but a wrong event: `fetch` follows the 302 to the
-                // provider, is answered with a sign-in page, and the client reports
-                // a JSON parse error about a request that was actually refused for
-                // a reason it never saw.
-                //
-                // This one is live: Forbid uses DefaultForbidScheme, which falls
-                // back to DefaultScheme, which is the cookie. Nothing in this
-                // application forbids anything yet -- there are no roles and no
-                // policies beyond "signed in" -- so it cannot fire today. It is
-                // here because the day a policy is added is not the day anyone
-                // remembers that a 403 leaves this application as HTML.
-                options.Events.OnRedirectToAccessDenied = context =>
-                {
-                    if (IsApiRequest(context.Request))
-                    {
-                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                        return Task.CompletedTask;
-                    }
-
-                    context.Response.Redirect(context.RedirectUri);
-                    return Task.CompletedTask;
-                };
-            })
-            .AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, options =>
-            {
-                options.Authority = authority;
-                options.ClientId = clientId;
-                options.ClientSecret = clientSecret;
-
-                // The authorization code flow with PKCE. `code` rather than the
-                // implicit `id_token`, which puts the token in a URL fragment and
-                // therefore into browser history and into any proxy log that keeps
-                // fragments. UsePkce defaults to true and is written out because it
-                // is the part that makes a client with no secret safe.
-                options.ResponseType = OpenIdConnectResponseType.Code;
-                options.UsePkce = true;
-
-                // This application calls nothing on the user's behalf, so there is
-                // no reason to keep the access token -- and keeping it puts it in
-                // the cookie, which is sent on every single request to this origin.
-                options.SaveTokens = false;
-
-                options.Scope.Clear();
-                foreach (var scope in ReadScopes(section))
-                {
-                    options.Scope.Add(scope);
-                }
-
-                // Some providers put `name` and `email` only at the userinfo
-                // endpoint rather than in the id_token. One extra call per sign-in,
-                // not per request, and without it the header can end up greeting a
-                // subject id.
-                options.GetClaimsFromUserInfoEndpoint = true;
-
-                // MapInboundClaims is left at its default of true, so `sub` arrives
-                // as ClaimTypes.NameIdentifier -- which is what CurrentUser reads
-                // first. Turning it off is the tidier choice, and it would change
-                // the claim every stored OwnerId was written from, so it is a
-                // decision with a data migration attached rather than a style one.
-                options.TokenValidationParameters.NameClaimType = "name";
-
-                // Written out although both are the defaults, because they have to
-                // be registered with the provider by hand and this is the only place
-                // in the repository that says what they are.
-                options.CallbackPath = "/signin-oidc";
-                options.SignedOutCallbackPath = "/signout-callback-oidc";
-
-                // Where the provider is asked to send the browser after a sign-out
-                // it has been told about. Relative, so it follows the host instead
-                // of naming one.
-                options.SignedOutRedirectUri = "/";
-
-                // The line that keeps /api answering in JSON. Everything under that
-                // prefix is called by `fetch` and never by a navigating browser, so
-                // "you are not signed in" has to arrive as a status it can read
-                // rather than as a redirect it will follow into HTML.
-                //
-                // HandleResponse is what stops the handler continuing to build the
-                // authorization request after the status is set. Without it the
-                // 401 is written, the redirect is then written over it, and the
-                // symptom is that this event appears to do nothing.
-                options.Events.OnRedirectToIdentityProvider = context =>
-                {
-                    if (IsApiRequest(context.Request))
-                    {
-                        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                        context.HandleResponse();
-                    }
-
-                    return Task.CompletedTask;
-                };
-            });
-    }
-
-    private static IEnumerable<string> ReadScopes(IConfigurationSection section)
-    {
-        // A space-separated string rather than a configuration array, because that
-        // is how a scope list is written everywhere else -- in the provider's own
-        // console, in the specification, and in every error a provider returns
-        // about one. Splitting it here costs a line and means the value can be
-        // copied rather than transcribed.
-        var configured = section["Scopes"];
-
-        if (string.IsNullOrWhiteSpace(configured))
+        if (!string.IsNullOrWhiteSpace(inviteCode))
         {
-            return ["openid", "profile", "email"];
+            return new RegistrationPolicy(inviteCode, RequiresInvite: true);
         }
 
-        return configured.Split(
-            ' ',
-            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-    }
+        // The order of these two is the same trick the OpenID Connect version used
+        // and it is kept for the same reason: the configured case is tested first,
+        // so a wrong ASPNETCORE_ENVIRONMENT in Azure cannot open registration. The
+        // deployed app has an invite code, so it takes the branch above whatever
+        // the environment claims to be, and reaching the branch below would mean
+        // deleting a secret rather than mistyping a word.
+        if (environment.IsDevelopment())
+        {
+            logger.LogInformation(
+                "No {Key} is configured, so registration on this machine needs no code. " +
+                "This happens in the Development environment only.",
+                InviteCodeKey);
 
-    // StartsWithSegments, not StartsWith. "/apixyz" starts with the string "/api"
-    // and is not in the API; the segment-aware overload is what knows the
-    // difference, and it is the same distinction Program.cs's own /api catch-all
-    // is already careful about.
-    private static bool IsApiRequest(HttpRequest request) =>
-        request.Path.StartsWithSegments("/api");
+            return new RegistrationPolicy(InviteCode: null, RequiresInvite: false);
+        }
+
+        // Fail closed, at the request rather than at startup. The process must
+        // start: efbundle runs Program.cs from a directory with no configuration at
+        // all, and #57 is what a required-configuration throw on that path costs.
+        // Existing accounts keep working; only new ones are refused.
+        logger.LogError(
+            "No {Key} is configured and this is not the Development environment, so no new " +
+            "account can be created. Anyone who already has one can still sign in. Set {Key}.",
+            InviteCodeKey,
+            InviteCodeKey);
+
+        return new RegistrationPolicy(InviteCode: null, RequiresInvite: true);
+    }
+}
+
+/// <summary>Whether a new account needs a code, and which one.</summary>
+// A registered singleton rather than the endpoint reading configuration again:
+// reading it twice is how two places come to disagree about which branch was
+// taken. RequiresInvite is separate from InviteCode being null on purpose --
+// "needs a code, and there is none configured" is the fail-closed state, and
+// collapsing the two would make it indistinguishable from "needs no code".
+public sealed record RegistrationPolicy(string? InviteCode, bool RequiresInvite)
+{
+    /// <summary>Whether this code opens the door.</summary>
+    public bool Accepts(string? offered)
+    {
+        if (!RequiresInvite)
+        {
+            return true;
+        }
+
+        if (string.IsNullOrEmpty(InviteCode))
+        {
+            return false;
+        }
+
+        // Ordinal and fixed-time. A code is a shared secret, and comparing secrets
+        // with == leaks their length and their matching prefix through how long the
+        // comparison takes. The window here is small and the fix is one call, which
+        // is a better trade than an argument about whether it is exploitable.
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(InviteCode),
+            Encoding.UTF8.GetBytes(offered ?? string.Empty));
+    }
 }
