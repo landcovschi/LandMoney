@@ -755,7 +755,37 @@ the thing that produced the number can be shown.
 
 Recorded so they do not creep back in:
 
-- Authentication, roles, an admin panel -- until slice 4 is running
+- Roles and an admin panel -- until slice 4 is running
+
+  **Authentication came off this list on 2026-08-26**, in #52, and it came off
+  early rather than on schedule. The line read "until slice 4 is running" and
+  slice 4 was not: steps 4 and 5 (#59, #60) were open, so there was no number to
+  quote. The owner was shown that and asked for it anyway. Recorded here in the
+  same words as in `CLAUDE.md`, because an exception nobody wrote down is how a
+  list like this stops meaning anything
+
+  What landed: **ASP.NET Core Identity** -- a username, a password and a login
+  form in the client -- with registration gated on an invite code, no email and
+  no password reset. Every transaction is owned by the account that entered it,
+  and a global query filter makes forgetting to scope a query something a future
+  endpoint cannot do. 35 new tests, still with no Postgres and no network. The
+  decision is in `CLAUDE.md`; the commands are step 15 of `docs/deploy-azure.md`
+
+  **It was OpenID Connect for one day first**, wired against a configurable
+  provider on 2026-08-26 because that is what #52 recommends, and replaced on
+  2026-08-27 because the owner wanted a form and a password rather than a
+  redirect to somebody else's page. The ownership half -- column, filter,
+  stamping, index, tests -- survived the swap untouched, which is the clearest
+  evidence available that `ICurrentUser` was cut in the right place
+
+  **The bug worth carrying forward, and it was caught by running rather than
+  reading.** `AppDbContext` captured the owner in its constructor, which is wrong
+  once Identity is in the pipeline: the cookie handler resolves the EF store
+  during `UseAuthentication`, so the context is built while the request is still
+  anonymous, and a scoped service keeps that null for the whole request. Every
+  read answered `WHERE owner_id IS NULL` and every write stamped null, so two
+  accounts saw one shared list with no error anywhere and every unit test green.
+  A filter that fails to nothing is loud; that one failed to everything
 - Multi-currency conversion. Amounts keep their currency; no implicit maths
 - Bank integrations. Manual entry and CSV import are enough to learn from
 - Anything resembling investment or financial advice. Categorising past

@@ -1,12 +1,26 @@
 import { useEffect, useState } from 'react'
+import { getMe, logout, type Me } from './api/auth'
 import { createTransaction, listTransactions } from './api/transactions'
 import type { NewTransaction } from './api/types'
+import { LoginForm } from './components/LoginForm'
 import { TransactionForm } from './components/TransactionForm'
 import { TransactionList, type ListState } from './components/TransactionList'
 import './App.css'
 
+/** Who is signed in, once the server has been asked. */
+// Three states rather than `Me | null`, because "not asked yet" and "nobody is
+// signed in" are different things to put on screen. Collapsing them shows the
+// login form for one frame to somebody who is already signed in, on every single
+// page load -- which looks like being signed out and is the sort of flicker that
+// makes an application feel broken.
+type SessionState =
+  | { status: 'loading' }
+  | { status: 'signedIn'; me: Me }
+  | { status: 'signedOut' }
+
 function App() {
   const [list, setList] = useState<ListState>({ status: 'loading' })
+  const [session, setSession] = useState<SessionState>({ status: 'loading' })
 
   // A counter, incremented to ask for the list again. It is a dependency of the
   // effect below, so changing it re-runs the effect -- which is the boring way
@@ -30,7 +44,39 @@ function App() {
     setReloads((count) => count + 1)
   }
 
+  // #52. Asked once, on mount. A session that ends while the page is open
+  // surfaces as a 401 from the list request instead, which is where the user is
+  // already looking; polling this would be a request every few seconds against a
+  // container that scales to zero.
+  //
+  // getMe answers null rather than throwing on 401 -- "nobody is signed in" is
+  // what the question was, so it is an answer. Anything else is a real failure,
+  // and it is treated as signed-out on purpose: the login form is the one screen
+  // that is useful when the server cannot be reached, because it is also the
+  // screen you need if the reason was that the session had gone.
   useEffect(() => {
+    const controller = new AbortController()
+
+    getMe(controller.signal)
+      .then((me) => setSession(me ? { status: 'signedIn', me } : { status: 'signedOut' }))
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setSession({ status: 'signedOut' })
+        }
+      })
+
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    // Nothing to list until there is somebody to list it for. Without this guard
+    // the first render fires a request that is certain to be refused, and the
+    // login screen would appear with "The session has ended" printed under it --
+    // a true sentence about a session that never started.
+    if (session.status !== 'signedIn') {
+      return
+    }
+
     // React runs every effect twice in development under StrictMode, on
     // purpose: it is hunting for exactly the effects that break when run twice.
     // Two requests go out, and without an abort the slower of the two wins and
@@ -62,7 +108,7 @@ function App() {
       })
 
     return () => controller.abort()
-  }, [reloads])
+  }, [reloads, session.status])
 
   // Deliberately not caught here. The form needs the ApiError itself to put the
   // server's messages beside its own fields, and catching it in this function
@@ -99,15 +145,63 @@ function App() {
     reload()
   }
 
+  async function handleSignOut() {
+    await logout()
+
+    setSession({ status: 'signedOut' })
+
+    // The rows go with the session. Leaving them in state would put one person's
+    // spending on the screen behind the next person's login form -- which is the
+    // failure this whole issue exists to prevent, reproduced in the client after
+    // the server had got it right.
+    setList({ status: 'loading' })
+  }
+
   return (
     <main>
       <header>
         <h1>LandMoney</h1>
         <p>What has been spent, and when.</p>
+
+        {session.status === 'signedIn' && (
+          <p className="session">
+            Signed in as {session.me.name ?? 'someone'}.{' '}
+            {/*
+              A button, not a link. Signing out is a POST -- a GET that ends a
+              session can be triggered by any page that can make this browser
+              fetch an image -- and an <a> that fires a request is a link that
+              lies about what it does.
+            */}
+            <button type="button" className="link" onClick={handleSignOut}>
+              Sign out
+            </button>
+          </p>
+        )}
       </header>
 
-      <TransactionForm onSubmit={handleCreate} />
-      <TransactionList state={list} onRetry={reload} />
+      {/*
+        Nothing is rendered until the session is known, which is the whole point
+        of the third state above. `null` rather than a spinner: the answer arrives
+        in a few milliseconds on a warm container, and a spinner that flashes is
+        worse than a beat of nothing.
+
+        Hiding the application is not the security measure -- the API refuses every
+        anonymous request whatever this renders, which AuthorizationTests asserts.
+        It is that a form whose submit cannot succeed is a worse screen than the
+        one that says why.
+      */}
+      {session.status === 'loading' && null}
+
+      {session.status === 'signedOut' && (
+        <LoginForm onSignedIn={(me) => setSession({ status: 'signedIn', me })} />
+      )}
+
+      {session.status === 'signedIn' && (
+        <>
+          <TransactionForm onSubmit={handleCreate} />
+          <TransactionList state={list} onRetry={reload} />
+        </>
+      )}
     </main>
   )
 }

@@ -1174,6 +1174,146 @@ migration -- while every migration only adds, an older image against a newer
 schema is exactly the safe direction, and the day one drops a column that stops
 being true.
 
+## Step 15 -- who may use it
+
+Until #52 the deployed URL was open. Anyone holding it could read every
+transaction and write new ones; there was no account, no owner and no check
+anywhere.
+
+What #52 landed is a username and a password, held by this application: ASP.NET
+Core Identity, a login form in the client, and an invite code required to create
+an account. There is no identity provider to register with and no redirect
+anywhere -- so unlike almost every other step in this file, **most of this one is
+configuration rather than commands**.
+
+The reasoning, including what Easy Auth and OpenID Connect lost on, is in
+`CLAUDE.md`.
+
+### The one setting
+
+Registration is refused unless the request quotes `Authentication:InviteCode`.
+It is a shared secret, so it goes in as a Container Apps secret and is referenced
+rather than pasted -- the same road the connection string takes (#36):
+
+```
+az containerapp secret set -g rg-landmoney -n landmoney --secrets invite-code=<a long random string>
+```
+
+```
+az containerapp update -g rg-landmoney -n landmoney --set-env-vars "Authentication__InviteCode=secretref:invite-code"
+```
+
+Double underscores, not a colon: that is how a nested configuration key is
+spelled as an environment variable. `--set-env-vars` adds and
+`--replace-env-vars` removes everything else -- one word apart in the same help
+text, and the wrong one deletes the connection string.
+
+Generate the value rather than inventing one. Anything long and random will do;
+this produces one without it reaching a shell history file:
+
+```
+python -c "import secrets; print(secrets.token_urlsafe(24))"
+```
+
+**Set this before the image that needs it is deployed.** The current revision has
+never heard of the variable and ignores it, so there is no window where the site
+is wrong -- and the alternative order leaves the deployed application unable to
+create the first account. Same reasoning as migrate-first (#37): the thing that
+is needed arrives before the thing that needs it.
+
+**What happens if it is not set.** Registration is refused for everybody and one
+error is logged at startup naming the key. Existing accounts still sign in, and
+nothing else changes -- the missing secret closes the door to new accounts rather
+than to the application. It is deliberately not a startup throw: `efbundle` runs
+`Program.cs` from a directory with no configuration at all, and #57 is what that
+costs.
+
+### The first account
+
+There is no seeding and no bootstrap command. Open the site, follow *I have an
+invite code and need an account*, and fill in three fields. The account that
+registers first has nothing special about it -- there are no roles, and every
+account sees only its own rows.
+
+Passwords are ten characters minimum, with no requirement about digits or
+symbols. Five wrong attempts lock the account for five minutes.
+
+### Claiming the rows that were there first
+
+`owner_id` is nullable and the migration backfills nothing, deliberately: the
+database does not know who entered the rows written before #52, because the fact
+was never recorded, and inventing a value at migration time would be a claim
+about ownership that is not true.
+
+The consequence is concrete and looks like data loss if it is not expected:
+**after the migration, and before this step, the site is empty.** Every existing
+row has a null owner and the query filter makes it invisible to everybody. The
+rows are all still in the table.
+
+So: register, then read the id off `/api/me`, which answers about the caller and
+nobody else. Then, once:
+
+```
+az postgres flexible-server execute -n psql-landmoney-pl -u landmoney -p <the password> -d landmoney -q "UPDATE transactions SET owner_id = '<the ownerId from /api/me>' WHERE owner_id IS NULL;"
+```
+
+Run it once and never again as written. A second run after somebody else has used
+the site would hand their rows over too -- their `owner_id` is not null, so they
+are safe from this exact statement, but a broader `WHERE` would not be. Safe
+today, when there is one user by assumption, and the line to re-read the day that
+stops being true.
+
+### A forgotten password
+
+There is no reset flow, because there is no email -- #52 left that out on
+purpose, and `CLAUDE.md` has the argument. So this is an administrative act, and
+it is the owner's.
+
+The password is stored as a hash, so it cannot be read back or set with an
+`UPDATE`. The two honest routes are to delete the account and register again with
+the same invite code:
+
+```
+az postgres flexible-server execute -n psql-landmoney-pl -u landmoney -p <the password> -d landmoney -q "DELETE FROM asp_net_users WHERE normalized_user_name = 'ALICE';"
+```
+
+**`normalized_user_name`, upper-cased**, which is the column Identity actually
+looks up by -- `user_name` holds what was typed and is not what a query should
+match on.
+
+The rows survive that, because `owner_id` is a plain string and not a foreign
+key: they are simply invisible until the new account's id is written over them
+with the same `UPDATE` as above. That is a property worth knowing rather than
+discovering -- and it is the same property that made swapping the whole
+authentication subsystem cheap.
+
+The other route is a small one-off program using `UserManager.ResetPasswordAsync`
+with a generated token. It is the correct answer and it is not written here,
+because a program that can reset any password is a thing that then exists.
+
+### What is not solved, and it will be noticed
+
+**The cookie does not survive a restart of the container.** ASP.NET Core encrypts
+the authentication cookie with Data Protection keys, and with no configured key
+ring those keys are generated in memory and die with the process. With
+`--min-replicas 0` the process dies after roughly fourteen idle minutes (#35), so
+the practical rule is: **coming back to the site after a pause means signing in
+again** -- and here that means typing a password, where under an external
+provider it would have been a redirect and no typing.
+
+Two sharper edges of the same cause. A revision replaced mid-session signs
+everybody out. And the day `--min-replicas` goes above 1, two replicas cannot
+read each other's cookies at all, so the symptom stops being "signed out after a
+pause" and becomes "signed out at random".
+
+The fix is a persisted key ring: `PersistKeysToAzureBlobStorage` plus
+`ProtectKeysWithAzureKeyVault`, which is two packages and at least one more Azure
+resource. Deliberately not done in #52 -- it is a deployment decision with a bill
+attached rather than part of closing the door -- and it is the first thing to pick
+up afterwards, because a password typed on every visit is what makes people pick
+short ones.
+
+
 ## Tearing it all down
 
 One command, and it is the reason everything went into one resource group:

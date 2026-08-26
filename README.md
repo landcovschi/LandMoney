@@ -104,6 +104,25 @@ with a default of `http://localhost:8000` and is overridden by an environment
 variable (`Categorizer__BaseUrl`) only inside compose. A value being
 configuration is not the same as a value being a secret.
 
+**Signing in needs one setting, and it is a secret.** Accounts live in this
+application's own database -- ASP.NET Core Identity, a username and a password,
+and a login form in the client. There is no identity provider and nothing to
+register with. What is configured is `Authentication:InviteCode`: the code a new
+account has to quote, without which registration is refused. Deployed it is a
+Container Apps secret, referenced the way the connection string is; step 15 of
+`docs/deploy-azure.md` has the commands.
+
+**Locally there is no code and none is needed.** With `Authentication:InviteCode`
+empty, registration on a developer machine asks for none, so `dotnet run` plus one
+form is a working account. That happens in the `Development` environment and
+nowhere else: anywhere else, an empty code means nobody new may register at all.
+It fails closed, and it still starts -- `efbundle` runs `Program.cs` with no
+configuration at all, and #57 is what a startup throw on that path costs.
+
+**There is no password reset**, on purpose: it would mean an email provider, an
+API key and a sender domain. A forgotten password is an administrative act, and
+step 15 has it.
+
 `Program.cs` reads `GetConnectionString("Default")` and throws at startup naming
 the user-secrets command if it is missing. That message is right on a developer
 machine and misleading everywhere else -- if it ever appears in the deployed
