@@ -310,6 +310,63 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   beyond tidiness; the whole run is 22 seconds. For the day it is wanted:
   `setup-dotnet`'s `cache: true` requires a `packages.lock.json`, which this
   repository does not have, so it is not a flag to flip.
+
+  **A third job, `deploy`, decided 2026-08-26** (#38), and it is a transcription
+  of steps 12 and 13 of `docs/deploy-azure.md` rather than anything new:
+  download the `efbundle` artifact from this same run, `azure/login`, read the
+  connection string out of the Container Apps secret, apply migrations, then
+  `az containerapp update --image ...:sha-<github.sha>` and check what is
+  actually running. Migrate first, deploy second -- #37's order.
+
+  **Authentication is OIDC, so there is no credential in the repository at
+  all.** An app registration with no client secret, plus a federated credential
+  in Entra ID saying that a GitHub Actions token for
+  `repo:landcovschi/LandMoney:ref:refs/heads/main` may act as it; `azure/login`
+  trades this run's token for an Azure one that dies with the job. What lost is
+  `az ad sp create-for-rbac --sdk-auth` into `secrets.AZURE_CREDENTIALS`, which
+  every tutorial shows and which is a long-lived password kept in a store built
+  to hand it to any workflow in the repository. **The three ids are `vars`, not
+  `secrets`** -- they name an app registration, they are not a credential, and
+  filing them as secrets would imply there is something to leak. Creating the
+  registration is the owner's act, and step 14 has the commands.
+
+  **The subject string is case-sensitive in the half the image name is not.**
+  GitHub puts `landcovschi/LandMoney` in the token; `metadata-action` lower-cases
+  the same string for `ghcr.io`. So the two systems disagree about the
+  repository's name on purpose, and a subject written in the image's spelling
+  fails with a login error that names neither half. Adding `environment:` to the
+  job changes the subject to `...:environment:<name>` and needs a second
+  credential -- which is why the job has no environment: one fewer thing that
+  must agree with a string in another system.
+
+  **The `concurrency` block had to change, and #38's own suggested fix does not
+  work.** A run cancelled between "migrations applied" and "revision replaced"
+  is worse than one that waits, and the issue proposes a job-level group on
+  `deploy` without `cancel-in-progress`. Cancellation happens to the whole run
+  and takes every job in it, so a job-level group changes nothing about that.
+  What works is `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`
+  at the workflow level: pull requests keep the old behaviour, pushes to `main`
+  queue instead -- a concurrency group without cancellation makes the second run
+  wait rather than drop.
+
+  **The deploy job has no `actions/checkout`**, which is #38's third trap
+  answered rather than met. The bundle is an artifact of the same run that built
+  the image, so the commit that produced the schema and the commit whose image is
+  deployed are the same by construction; a checkout is a third copy that can
+  differ from both. `download-artifact` is **v8 while `upload-artifact` is v7** --
+  independently versioned, both current as of 2026-08-26, checked rather than
+  remembered for the fourth time after #22, #24 and #37. They still agree,
+  because v7 skips zipping only under `archive: false` and v8's new
+  Content-Type check therefore unzips.
+
+  **What is not measured yet, and is deliberately left for the first run on
+  `main`:** whether a GitHub-hosted runner reaches the Postgres server through
+  the 0.0.0.0 "all Azure services" firewall rule, and whether the federated
+  credential is right. Neither can be tested from a pull request -- the
+  credential is scoped to `main` -- and both fail in a step that runs before
+  anything is deployed. `docs/deploy-azure.md` step 14 carries the fallback for
+  the first: a firewall rule created from `api.ipify.org` and removed in a step
+  with `if: always()`.
 - **`Dockerfile` at the repository root: three stages, non-root, decided
   2026-08-24** (#23). `node:24-slim` builds the client, `sdk:10.0` publishes the
   app, `aspnet:10.0` runs it as uid 1654. 350 MB, of which 7.75 MB is this
