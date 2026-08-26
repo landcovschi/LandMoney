@@ -697,6 +697,17 @@ again by itself after 7 days.
        the latency of a working call, it is the latency of a broken one, on the
        path where the user's transaction is being written
 
+       **The first deploy after this failed**, and the site did not. A `?? throw`
+       for `Categorizer:BaseUrl` in `Program.cs` killed `efbundle`, which runs
+       that file from a directory with no `appsettings.json`; the job died at
+       `Apply migrations`, before `Deploy the revision`, so no revision and no
+       schema changed and `landmoney--0000004` served throughout. Fixed by making
+       an absent categorizer a legal state -- the same principle as the null
+       category, one step earlier -- and by a `ci.yml` step that runs the bundle
+       in an empty directory on every pull request, verified against the bundle
+       that broke. `CLAUDE.md` has the full record and the general rule: every
+       `?? throw` in `Program.cs` is also a deploy-time landmine
+
        Not in CI, deliberately: nothing builds or tests `src/categorizer/` on a
        pull request yet, so `build` can be green over a broken service. It is
        already a slice 5 item ("Evals run in CI on every PR") and it is the

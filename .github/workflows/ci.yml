@@ -185,6 +185,61 @@ jobs:
           -o efbundle
           --force
 
+      # The step that would have caught the failed deploy of #57, and the reason
+      # it is worth a whole step rather than a comment.
+      #
+      # `efbundle` runs Program.cs to find the DbContext. In the deploy job it
+      # runs from a directory holding nothing but itself -- no appsettings.json --
+      # so every `?? throw` in Program.cs for a key whose default lives in that
+      # file is a landmine that goes off at deploy time. #57 added one for
+      # Categorizer:BaseUrl and the deploy died at "Apply migrations".
+      #
+      # Building the bundle cannot catch it, which is the structural half:
+      # the step above runs inside the checked-out source tree, where
+      # appsettings.json exists and every key resolves. The bundle only meets the
+      # bare directory when it is RUN. So `build` was green and `deploy` was red,
+      # and that is not luck -- it is where the two environments differ.
+      #
+      # `cd` into an empty directory is the whole trick: it reproduces the deploy
+      # job's filesystem exactly. The host is deliberately unresolvable, so this
+      # needs no database, no service container and no network, and it cannot
+      # touch anything real.
+      #
+      # The assertion is on WHICH failure. The bundle is expected to fail -- it
+      # cannot reach `build-time-only` -- and the two failures look alike from a
+      # distance:
+      #
+      #   host built, could not connect  ->  "No such host is known."       PASS
+      #   host would not build           ->  "Unable to create a 'DbContext'" FAIL
+      #
+      # So the exit code says nothing useful and is ignored on purpose; the
+      # message is the signal. `set +e` is needed because the shell is `bash -e`
+      # and a non-zero exit is the expected outcome here.
+      - name: The bundle must start without appsettings.json
+        env:
+          ASPNETCORE_ENVIRONMENT: Production
+          ConnectionStrings__Default: "Host=build-time-only;Database=none;Username=none;Password=none"
+        run: |
+          mkdir -p bundle-smoke
+          cp efbundle bundle-smoke/
+          cd bundle-smoke
+
+          set +e
+          output=$(./efbundle 2>&1)
+          set -e
+          echo "$output"
+
+          if grep -q "Unable to create a 'DbContext'" <<<"$output"; then
+            echo "::error::efbundle could not build the application host with no \
+          appsettings.json present, which is exactly how it runs in the deploy job. \
+          The cause is almost always a new required-configuration throw in Program.cs \
+          for a key whose default lives in appsettings.json. See the comment above \
+          this step."
+            exit 1
+          fi
+
+          echo "The host built; the bundle failed at connecting, which is the expected outcome."
+
       # v7, checked rather than remembered -- from memory this would have been
       # v4, which is the third time that lesson has been paid for after #22 and
       # #24.

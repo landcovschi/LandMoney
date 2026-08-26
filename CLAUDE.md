@@ -1098,6 +1098,85 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   expectation by calling `predict`, so it knows nothing about which rule wins and
   cannot itself drift.
 
+  **The first deployment after #39 failed, and the cause was a `?? throw` in
+  `Program.cs` -- 2026-08-26.** Worth the space because the lesson is general and
+  this repository had already written down the specific case and not applied it.
+
+  `Categorizer:BaseUrl` was registered as required config with `?? throw`, exactly
+  like `ConnectionStrings:Default` twenty lines above it. **`efbundle` runs
+  `Program.cs`** to find the `DbContext`, and in the deploy job it runs from a
+  directory holding nothing but the bundle -- **no `appsettings.json`**, which is
+  where that key's default lives. So the key was missing, the throw fired, and the
+  job died at `Apply migrations`:
+
+      An error occurred while accessing the Microsoft.Extensions.Hosting services.
+      Error: Categorizer:BaseUrl is not set.
+      Unable to create a 'DbContext' of type 'AppDbContext'.
+
+  **The general rule, which is the thing to keep: every `?? throw` added to
+  `Program.cs` is also a deploy-time landmine.** #37 recorded this for the
+  connection string ("`dotnet ef` starts the application's host, so `Program.cs`
+  runs and throws on a missing `ConnectionStrings:Default`") and #39 added a
+  second such line without asking whether the bundle survives it. The record
+  existed; applying it is what did not happen.
+
+  **CI could not have caught it as written, and that is structural rather than bad
+  luck.** The `build` job *builds* the bundle inside the checked-out source tree,
+  where `appsettings.json` exists and every key resolves -- so that step was green
+  on the very run whose deploy failed. The bundle only meets the bare directory
+  when it is **run**. Green-build / red-deploy is where those two environments
+  differ, and no amount of care in the build step closes it.
+
+  **EF says so on every single bundle build**, and it had been scrolling past
+  since #37: `Don't forget to copy appsettings.json alongside your bundle if you
+  need it to apply migrations.` It is in the green `build` log of the failed run.
+  A warning nobody reads is worth exactly nothing, which is the argument for the
+  step below rather than for reading harder.
+
+  **What was fixed, and the two keys are now deliberately different.** A missing
+  connection string still throws: the application cannot do its job without it. A
+  missing `Categorizer:BaseUrl` logs a warning and leaves `BaseAddress` null,
+  which `CategorizerClient` reads as "there is no categorizer" and answers null
+  without touching the network. That is the same principle #39 is built on --
+  every failure of that service becomes a null category rather than a failure --
+  extended one step: **a dependency the application is designed to run without
+  must not be able to stop it starting.** A value that is present and unparseable
+  still throws, because that is a mistake to report rather than a state to
+  tolerate, and the bundle never has a value there at all.
+
+  What it costs: a mistyped *key* now degrades silently to no categorisation
+  instead of failing loudly, with one startup warning as the only signal. Small in
+  practice -- `appsettings.json` ships inside the image, so the key is present in
+  every environment that serves a request.
+
+  **A placeholder base address was the obvious alternative and is worse.** It
+  starts, and then every save pays the full two-second timeout against a service
+  that was never meant to exist. Null is the state that says so.
+
+  **`ci.yml` gained "The bundle must start without appsettings.json"**, which is
+  the structural half and matters more than the code fix. It copies the bundle
+  into an empty directory and runs it with a deliberately unresolvable host: no
+  database, no service container, no network. The bundle is *expected* to fail --
+  the assertion is on which failure, because from a distance the two look alike:
+
+      host built, could not connect  ->  "No such host is known."          pass
+      host would not build           ->  "Unable to create a 'DbContext'"  fail
+
+  So the exit code is ignored on purpose and the message is the signal, and
+  `set +e` is required because the step's shell is `bash -e` and non-zero is the
+  expected outcome. **Verified against the artifact that actually broke**: the
+  guard fails the build on the pre-fix bundle and passes on the fixed one. A guard
+  checked only against the fixed code is a guard that has never been seen to
+  catch anything.
+
+  **What went right, and it is the half not to lose in the retelling.** The site
+  never went down. Migrate-first ordering (#37) meant the job died at step 5 of 7,
+  before `Deploy the revision` -- no new revision, no schema change, revision
+  `landmoney--0000004` serving `sha-1310f26` throughout, confirmed with `curl` and
+  `az containerapp revision list`. That is the second time that ordering has paid
+  for itself on a first attempt, after the OIDC subject failure of #38, and both
+  times the failure landed before anything in Azure was touched.
+
   **Nothing builds or tests `src/categorizer/` in CI**, so `build` can be green
   over a broken service. Left alone deliberately -- #39 did not ask, and slice 5
   already carries "Evals run in CI on every PR", which is the natural home for
