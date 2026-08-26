@@ -390,8 +390,8 @@ public repositories. One fewer paid service, one fewer set of credentials.
       environment variable. Doing it the other way round would leave the password
       readable in `az containerapp show` until #36 got to it. The rest of #36 is
       untouched -- `ASPNETCORE_ENVIRONMENT`, `ForwardedHeaders`, the README note
-- [ ] Azure Container Apps, deployed from GitHub Actions, pulling from
-      `ghcr.io` -- by hand first in #35, automated in #38. The order is
+- [x] Azure Container Apps, deployed from GitHub Actions, pulling from
+      `ghcr.io` -- by hand first in #35, automated in #38, 2026-08-26. The order is
       deliberate: a deployment written straight into a workflow fails inside a
       runner where nothing can be inspected. Two things #34 leaves on the mat
       for #35: a Container App on the Consumption workload profile has **no
@@ -402,8 +402,9 @@ public repositories. One fewer paid service, one fewer set of credentials.
       `azure.extensions` parameter under the name **`vector`**, worth doing when
       the server is created rather than as a restart in slice 5
 
-      **The `deploy` job is written -- #38, 2026-08-26 -- and the box stays
-      unticked until a merge to `main` has actually produced a revision.** It is
+      **Done: revision `landmoney--0000003` on
+      `sha-3f467199c8f97df8e7808e25a8fd8d8a9949fd5d`**, the merge commit of #55,
+      with no command typed by hand. The `deploy` job is
       a transcription of steps 12 and 13 of `docs/deploy-azure.md` and nothing
       else: download the bundle from this same run, log in to Azure, read the
       connection string out of the Container Apps secret, apply migrations,
@@ -429,14 +430,23 @@ public repositories. One fewer paid service, one fewer set of credentials.
       works, and the queueing comes free: a group without cancellation makes the
       second run wait for the first.
 
-      **Two things still to measure, both on the first run.** Whether a
-      GitHub-hosted runner reaches the database through the 0.0.0.0 "all Azure
-      services" rule -- likely, since hosted runners are Azure virtual machines,
-      and likely is not measured; if not, step 14 carries the temporary
-      firewall rule. And whether the OIDC login works at all, which cannot be
-      tested before merging, because the credential is scoped to `main`. Both
-      fail before anything is deployed, which is the migrate-first order paying
-      for itself.
+      **Both open questions are now measured, and one of them failed first.**
+      A GitHub-hosted runner *does* reach the database through the 0.0.0.0 "all
+      Azure services" rule -- `Apply migrations` connected in seven seconds --
+      so step 14's temporary firewall rule stays written down and unused. The
+      OIDC login did **not** work on the first attempt, for a reason neither #38
+      nor the documentation predicts: GitHub sends an immutable subject,
+      `repo:<owner>@<ownerId>/<repo>@<repoId>:ref:refs/heads/main`, and
+      `use_immutable_subject` reads `false` while the prefix is immutable
+      anyway. The error printed the string it wanted, so the fix was a copy.
+
+      **What that failure proved is worth more than the fix.** It stopped at
+      step 2 of 6, before the secret was read, before the bundle ran and before
+      any revision existed; `build` and `publish` were already green, so the
+      image existed and a re-run was the whole remedy. Azure was never touched
+      and the previous revision served throughout. The whole job is 71 s once it
+      works, of which 10 s is `az extension add` preparing and 19 s is
+      `containerapp update`.
 
 **Why not "all of it in GitHub".** GitHub covers two of the three layers: the
 pipeline (Actions) and the registry (`ghcr.io`). It does not cover the third.

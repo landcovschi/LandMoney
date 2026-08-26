@@ -330,14 +330,27 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   filing them as secrets would imply there is something to leak. Creating the
   registration is the owner's act, and step 14 has the commands.
 
-  **The subject string is case-sensitive in the half the image name is not.**
-  GitHub puts `landcovschi/LandMoney` in the token; `metadata-action` lower-cases
-  the same string for `ghcr.io`. So the two systems disagree about the
-  repository's name on purpose, and a subject written in the image's spelling
-  fails with a login error that names neither half. Adding `environment:` to the
-  job changes the subject to `...:environment:<name>` and needs a second
-  credential -- which is why the job has no environment: one fewer thing that
-  must agree with a string in another system.
+  **The subject is not the one every guide prints, and it cost the first
+  deployment.** GitHub sends an *immutable* subject by default --
+  `repo:<owner>@<ownerId>/<repo>@<repoId>:ref:refs/heads/main` -- and a
+  credential written in the documented `repo:owner/name:...` form matches
+  nothing. The error is a good one and prints the string it wanted, so the fix is
+  a copy: `AADSTS700213: No matching federated identity record found for
+  presented assertion subject '...'`. What confirms it is a default rather than
+  something switched on is
+  `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`, which answers
+  `use_default: true`, `use_immutable_subject: false` **and** an immutable
+  `sub_claim_prefix` -- so there is no flag to have set wrongly. Read the prefix
+  from that API rather than typing it; the numeric ids are the point, since they
+  survive a rename of the account or the repository where the names do not.
+
+  **The repository name is still case-sensitive in the half the image name is
+  not.** GitHub puts `LandMoney` in the token; `metadata-action` lower-cases the
+  same string for `ghcr.io`. The two systems disagree about the repository's
+  name on purpose. Adding `environment:` to the job changes the subject again, to
+  `...:environment:<name>`, and needs its own credential -- which is why the job
+  has no environment: one fewer string that must agree with a string in another
+  system.
 
   **The `concurrency` block had to change, and #38's own suggested fix does not
   work.** A run cancelled between "migrations applied" and "revision replaced"
@@ -359,14 +372,28 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   because v7 skips zipping only under `archive: false` and v8's new
   Content-Type check therefore unzips.
 
-  **What is not measured yet, and is deliberately left for the first run on
-  `main`:** whether a GitHub-hosted runner reaches the Postgres server through
-  the 0.0.0.0 "all Azure services" firewall rule, and whether the federated
-  credential is right. Neither can be tested from a pull request -- the
-  credential is scoped to `main` -- and both fail in a step that runs before
-  anything is deployed. `docs/deploy-azure.md` step 14 carries the fallback for
-  the first: a firewall rule created from `api.ipify.org` and removed in a step
-  with `if: always()`.
+  **Measured on the first deployment, 2026-08-26.** A GitHub-hosted runner
+  **does** reach the Postgres server through the 0.0.0.0 "all Azure services"
+  rule -- `Apply migrations` connected and answered "No migrations were applied.
+  The database is already up to date." in seven seconds. Hosted runners are Azure
+  virtual machines and that rule admits Azure, so the reasoning was right; it is
+  now a measurement rather than a likelihood, and step 14 keeps the temporary
+  firewall rule written down for the day that rule is narrowed. The whole
+  `deploy` job is **71 s**, of which 10 s is `az extension add` doing nothing but
+  preparing, and 19 s is `containerapp update` -- against the 23.3 s cold start
+  of #35, which is the difference between provisioning a revision and starting
+  one from zero. The verification's retry **never fired**: the first `curl`
+  answered 200. It stays anyway, because winning a race once is not evidence
+  there is no race.
+
+  **The failure that came first landed where the design put it**, which is the
+  half worth keeping. The login failed on the subject above and the job stopped
+  at step 2 of 6 -- before `containerapp secret show`, before the bundle, before
+  any revision existed. `build` and `publish` were green, so the image for that
+  commit was already on `ghcr.io` and the fix needed no new commit, only a
+  re-run. Azure was never touched and the previous revision served throughout.
+  That is the migrate-first order and the "log in before you do anything"
+  ordering both paying for themselves on the first try.
 - **`Dockerfile` at the repository root: three stages, non-root, decided
   2026-08-24** (#23). `node:24-slim` builds the client, `sdk:10.0` publishes the
   app, `aspnet:10.0` runs it as uid 1654. 350 MB, of which 7.75 MB is this
