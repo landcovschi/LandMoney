@@ -19,6 +19,13 @@ header p {
   margin-top: var(--space-1);
 }
 
+/* #52. The one line in the header that changes with who is looking at it. Small
+   and muted on purpose: it is a status, not a control, and the only thing anyone
+   does with it is read it once. */
+.session {
+  font-size: 0.875rem;
+}
+
 /* --- the form ------------------------------------------------------------ */
 
 .entry {

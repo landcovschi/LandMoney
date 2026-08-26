@@ -1,12 +1,22 @@
 import { useEffect, useState } from 'react'
-import { createTransaction, listTransactions } from './api/transactions'
+import { createTransaction, getMe, listTransactions, type Me } from './api/transactions'
 import type { NewTransaction } from './api/types'
 import { TransactionForm } from './components/TransactionForm'
 import { TransactionList, type ListState } from './components/TransactionList'
 import './App.css'
 
+/** Who is signed in, once the server has been asked. */
+// A third state rather than `Me | null`, because "not asked yet" and "nobody is
+// signed in" are different things to put on screen, and collapsing them makes the
+// header flash a sign-in link at somebody who is signed in.
+type SessionState =
+  | { status: 'loading' }
+  | { status: 'signedIn'; me: Me }
+  | { status: 'signedOut' }
+
 function App() {
   const [list, setList] = useState<ListState>({ status: 'loading' })
+  const [session, setSession] = useState<SessionState>({ status: 'loading' })
 
   // A counter, incremented to ask for the list again. It is a dependency of the
   // effect below, so changing it re-runs the effect -- which is the boring way
@@ -29,6 +39,29 @@ function App() {
     setList({ status: 'loading' })
     setReloads((count) => count + 1)
   }
+
+  // #52. Asked once, on mount, and never again: a session that ends while the
+  // page is open surfaces as a 401 on the next list request instead, which is
+  // where the user is already looking. Polling this would be a request every few
+  // seconds against a container that scales to zero.
+  //
+  // getMe answers null rather than throwing on 401 -- "nobody is signed in" is
+  // what the question was, so it is an answer. Anything else is a real failure and
+  // is deliberately left to fall through to the list's own error reporting rather
+  // than given a second place to be shown.
+  useEffect(() => {
+    const controller = new AbortController()
+
+    getMe(controller.signal)
+      .then((me) => setSession(me ? { status: 'signedIn', me } : { status: 'signedOut' }))
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setSession({ status: 'signedOut' })
+        }
+      })
+
+    return () => controller.abort()
+  }, [])
 
   useEffect(() => {
     // React runs every effect twice in development under StrictMode, on
@@ -104,9 +137,42 @@ function App() {
       <header>
         <h1>LandMoney</h1>
         <p>What has been spent, and when.</p>
+
+        {/*
+          Plain anchors, not fetch. Both of these are navigations by nature: one
+          ends at the identity provider and comes back with a cookie, the other
+          ends at the provider's sign-out and comes back. A fetch would follow the
+          redirects itself and change nothing the user can see.
+
+          Sign-out is a GET because it has to work as a link. The usual objection
+          is that a third-party page could trigger it with an <img> tag; the cost
+          of that is being signed out, which is the least valuable thing an
+          attacker could do here, and the alternative is a form and an antiforgery
+          token for a one-user application.
+        */}
+        {session.status === 'signedIn' && (
+          <p className="session">
+            Signed in as {session.me.name ?? 'someone'}.{' '}
+            <a href="/auth/logout">Sign out</a>
+          </p>
+        )}
+
+        {session.status === 'signedOut' && (
+          <p className="session">
+            <a href="/auth/login">Sign in</a>
+          </p>
+        )}
       </header>
 
-      <TransactionForm onSubmit={handleCreate} />
+      {/*
+        The form is hidden while signed out, and the list is left to report its
+        own 401. Hiding the form is not a security measure -- the API refuses an
+        anonymous POST whatever this renders, which AuthorizationTests asserts --
+        it is that offering a form whose submit cannot succeed is a worse screen
+        than not offering one.
+      */}
+      {session.status !== 'signedOut' && <TransactionForm onSubmit={handleCreate} />}
+
       <TransactionList state={list} onRetry={reload} />
     </main>
   )

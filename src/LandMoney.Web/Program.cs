@@ -1,4 +1,5 @@
 ﻿using LandMoney.Web.Api;            // MapTransactionEndpoints
+using LandMoney.Web.Auth;          // AddLandMoneyAuthentication, MapAuthEndpoints
 using LandMoney.Web.Categorizing;  // CategorizerClient
 using LandMoney.Web.Data;          // AppDbContext
 using Microsoft.AspNetCore.HttpOverrides; // ForwardedHeaders
@@ -210,6 +211,25 @@ builder.Services
             builder.Configuration.GetValue("Categorizer:TimeoutSeconds", 2d));
     });
 
+// #52. Everything about which provider, and what happens when there is none, is
+// in AuthenticationSetup -- including the reason this cannot be a `?? throw` for
+// a missing Authority the way the connection string above is. The short version:
+// efbundle runs this file with no configuration at all, and #57 is what a throw
+// on that path costs.
+//
+// A logger is passed in because this runs before builder.Build(), so there is no
+// ILogger<T> to resolve yet. CreateBootstrapLogger-style plumbing would be the
+// tidy answer and is a dependency; a factory built here, used once and disposed
+// is four lines.
+using (var startupLoggerFactory = LoggerFactory.Create(logging =>
+    logging.AddConfiguration(builder.Configuration.GetSection("Logging")).AddConsole()))
+{
+    builder.Services.AddLandMoneyAuthentication(
+        builder.Configuration,
+        builder.Environment,
+        startupLoggerFactory.CreateLogger("LandMoney.Web.Auth"));
+}
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -361,6 +381,23 @@ if (!app.Environment.IsDevelopment())
 
 app.UseRouting();
 
+// #52. After UseRouting, because both of these want to know which endpoint was
+// matched -- UseAuthorization has to read the endpoint's metadata to find the
+// RequireAuthorization put there below, and with the order reversed it finds
+// nothing and allows everything. This is the one middleware ordering mistake in
+// ASP.NET Core that fails open rather than throwing.
+//
+// Before UseStaticFiles is a choice with no effect and is worth saying so: the
+// static file middleware is not an endpoint and consults no authorization
+// metadata, so wwwroot is served to anyone at any position in this pipeline. What
+// that means in practice is that /index.html -- the SPA shell, the same bytes for
+// every visitor, containing no data -- is public, while / is not, because / is
+// matched by MapFallbackToFile and that endpoint requires authorization.
+// Deliberate: the shell is as public as the JavaScript bundle it loads, and the
+// only thing behind it, /api/transactions, refuses an anonymous request.
+app.UseAuthentication();
+app.UseAuthorization();
+
 // The built React client, out of wwwroot, on the same origin as the API. One
 // process, one image, one deployment -- and no CORS, because from the browser's
 // point of view there is only ever one server.
@@ -421,7 +458,12 @@ var staticFileOptions = new StaticFileOptions
 
 app.UseStaticFiles(staticFileOptions);
 
-app.MapTransactionEndpoints();
+app.MapTransactionEndpoints().RequireAuthorization();
+
+// #52. The two links a browser follows to start and end a session. Anonymous by
+// necessity -- a sign-in that required a sign-in would be a loop -- and outside
+// /api, because everything under that prefix answers 401 instead of redirecting.
+app.MapAuthEndpoints();
 
 // A wrong path under /api answers 404 as JSON, and this line is the only reason
 // it does. MapFallbackToFile below matches "{*path:nonfile}", and `nonfile`
@@ -505,6 +547,33 @@ app.MapMethods(
 // answers 404 rather than pretending. That is the intended behaviour and it is
 // also what F5 in Visual Studio now shows when only the API has been started:
 // the fix is to build the client once, not to bring the redirect back.
-app.MapFallbackToFile("index.html", staticFileOptions);
+app.MapFallbackToFile("index.html", staticFileOptions)
+
+    // #52, and this is the line the issue's "a signed-out visitor gets a redirect"
+    // is describing. Every client route -- "/", "/anything" -- is this endpoint, so
+    // requiring authorization here is what turns opening the site while signed out
+    // into a redirect to the provider rather than into a React application that
+    // loads and then cannot fetch anything.
+    //
+    // It does not protect /index.html, which UseStaticFiles serves directly. See
+    // the note beside UseAuthorization above; the shell holds no data.
+    .RequireAuthorization();
 
 app.Run();
+
+// #52. Top-level statements compile into an `internal` class called Program, and
+// WebApplicationFactory<T> needs T to be reachable from the test assembly. This
+// partial declaration makes the generated class public without giving it a body
+// or a second Main.
+//
+// The alternative is [assembly: InternalsVisibleTo("LandMoney.Web.Tests")], which
+// keeps the type internal and opens every other internal in this assembly to the
+// tests -- a wider hole to close a narrower gap. This line is the documented one.
+//
+// #21 refused Microsoft.AspNetCore.Mvc.Testing on the grounds that an
+// IEndpointFilter is an object with one method and needs no server. Authorization
+// is not: whether a filter hangs on the POST or on the group, whether the pipeline
+// order is right, and what status an anonymous request actually receives are
+// properties of the assembled application and of nothing smaller. #52 named this
+// as the day that package earns its place, and this is it.
+public partial class Program;

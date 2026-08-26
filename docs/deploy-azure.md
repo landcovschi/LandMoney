@@ -1174,6 +1174,164 @@ migration -- while every migration only adds, an older image against a newer
 schema is exactly the safe direction, and the day one drops a column that stops
 being true.
 
+## Step 15 -- who may use it
+
+Until #52 the deployed URL was open. Anyone holding it could read every
+transaction and write new ones; there was no account, no owner and no check
+anywhere. That was tolerable while every row was invented and is not once the
+rows are real spending.
+
+What #52 chose is **OpenID Connect in the application** -- the second of the
+three options the issue listed -- with a cookie holding the session. The
+reasoning is in `CLAUDE.md`; the short version is that Easy Auth would have made
+authentication a property of Container Apps, and this repository has already
+paid once for depending on a property of one host (#36, `UseHsts` behind the
+ingress).
+
+The commands below are the owner's. Claude does not create an app registration
+and does not type a client secret, for the same reason it does not run
+`gh auth login`.
+
+### The registration, once
+
+Any OpenID Connect provider works -- nothing in the code names one. Microsoft
+Entra ID is what the commands below use, because the tenant already exists: #38
+created an app registration in it for GitHub Actions, and this is a second,
+unrelated one.
+
+```
+az ad app create --display-name landmoney-web --sign-in-audience AzureADMyOrg
+```
+
+Read the `appId` out of that answer; it is the `ClientId` below. Then the reply
+URL, which has to match `CallbackPath` in `AuthenticationSetup.cs` exactly:
+
+```
+az ad app update --id <appId> --web-redirect-uris https://landmoney.redstone-8c11320c.polandcentral.azurecontainerapps.io/signin-oidc
+```
+
+And the secret. This is the one value in the whole runbook that is a password:
+
+```
+az ad app credential reset --id <appId> --display-name landmoney-container-app --years 1
+```
+
+`--years 1` rather than the default two, and it is a diary entry rather than a
+setting: the day it expires, every sign-in fails with `AADSTS7000215: Invalid
+client secret provided` and nothing warns beforehand. Rotating it is this
+command again plus the secret update below.
+
+Two things about the reply URL that cost time if they are got wrong.
+
+**It must be the https one, and that works only because of #36.** The
+application builds `redirect_uri` from `Request.Scheme`, and inside the
+container the request arrives over plain http from the ingress. Without
+`UseForwardedHeaders` the application would send `http://.../signin-oidc`, the
+provider would refuse it as unregistered, and the error would name the redirect
+URI rather than the middleware. That middleware went in for HSTS and is now
+load-bearing for authentication as well.
+
+**A trailing slash is a different URI.** `/signin-oidc/` does not match
+`/signin-oidc`, and the provider's error says only that the reply URL is not
+registered.
+
+### The three settings, on the container app
+
+Authority and client id are not secrets -- they name a registration. The client
+secret is one, and it goes in the same place the connection string does (#36),
+referenced rather than pasted:
+
+```
+az containerapp secret set -g rg-landmoney -n landmoney --secrets oidc-secret=<the value from credential reset>
+```
+
+```
+az containerapp update -g rg-landmoney -n landmoney --set-env-vars "Authentication__Oidc__Authority=https://login.microsoftonline.com/<tenantId>/v2.0" "Authentication__Oidc__ClientId=<appId>" "Authentication__Oidc__ClientSecret=secretref:oidc-secret"
+```
+
+Double underscores, not colons: that is how a nested configuration key is
+spelled as an environment variable, on every platform. `--set-env-vars` adds and
+`--replace-env-vars` removes everything else, which is the same one-word trap
+step 12 records for the connection string -- the wrong one here would delete the
+connection string and the categorizer's base URL together.
+
+**`/v2.0` on the authority is not optional for Entra.** The v1 endpoint does not
+publish an OpenID Connect discovery document in the shape the handler expects,
+and the failure is `IDX20803: Unable to obtain configuration from`, which reads
+as a network problem.
+
+### Checking it
+
+Signed out, from a machine with no cookie:
+
+```
+curl.exe -s -o NUL -w "%{http_code} %{redirect_url}\n" https://landmoney.redstone-8c11320c.polandcentral.azurecontainerapps.io/
+curl.exe -s -o NUL -w "%{http_code}\n" https://landmoney.redstone-8c11320c.polandcentral.azurecontainerapps.io/api/transactions
+```
+
+The first is `302` to `login.microsoftonline.com`. The second is `401` with no
+`Location` at all -- the split `OnRedirectToIdentityProvider` makes, and the
+reason the client can tell "you are signed out" from "the API is broken".
+
+`curl.exe`, spelled out, because `curl` in Git Bash is the shim and the URL is
+not the problem: CLAUDE.md's rule about arguments that look like Unix paths has
+now been paid for three times.
+
+### Claiming the rows that were there first
+
+`owner_id` is nullable and the migration backfills nothing, deliberately: the
+database does not know who entered the rows written before #52, because the fact
+was never recorded, and inventing a value at migration time would be a claim
+about ownership that is not true.
+
+The consequence is concrete and looks like data loss if it is not expected:
+**after the migration, and before this step, the site is empty.** Every existing
+row has a null owner and the query filter makes it invisible to everybody.
+
+So: sign in once, which is what produces a subject id to hand them to. Read it
+from `/api/me`, which answers about the caller and nobody else -- in the
+browser, signed in, or from the sign-in line in the header. Then, once:
+
+```
+az postgres flexible-server execute -n psql-landmoney-pl -u landmoney -p <the password> -d landmoney -q "UPDATE transactions SET owner_id = '<the ownerId from /api/me>' WHERE owner_id IS NULL;"
+```
+
+Run it once and never again as written. A second run after a second person has
+used the site would hand that person's rows over as well, since theirs are not
+null -- which is safe today, when there is one user by assumption, and is the
+line to re-read the day that stops being true.
+
+**The same UPDATE is what a change of provider needs.** The owner is the `sub`
+claim, and `sub` is issued by the provider: moving from Entra to Google issues a
+new one, and every row silently belongs to nobody again. That is the cost of not
+having a users table, it is written down rather than designed around, and the
+recovery is this paragraph.
+
+### What is not solved, and it will be noticed
+
+**The cookie does not survive a restart of the container.** ASP.NET Core
+encrypts the authentication cookie with Data Protection keys, and with no
+configured key ring those keys are generated in memory and die with the process.
+With `--min-replicas 0` the process dies after roughly fourteen idle minutes
+(#35), so the practical rule is: **coming back to the site after a pause means
+signing in again.** With the provider's own session still alive that is a
+redirect and no typing, which is why it is tolerable.
+
+Two sharper edges of the same cause. A revision replaced mid-sign-in fails the
+callback with `Correlation failed` -- the nonce cookie was protected by keys the
+new container has never seen -- and a retry works. And the day `--min-replicas`
+goes above 1, two replicas cannot read each other's cookies at all, so the
+symptom stops being "signed out after a pause" and becomes "signed out at
+random".
+
+The fix is a persisted key ring: `PersistKeysToAzureBlobStorage` plus
+`ProtectKeysWithAzureKeyVault`, which is two packages and at least one more
+Azure resource. Deliberately not done in #52 -- it is a deployment decision with
+a bill attached rather than part of closing the door, and the failure it removes
+is an inconvenience rather than a hole. `--min-replicas 1` removes the everyday
+half of it and surrenders the reason Container Apps beat App Service, which is
+the trade #35 already wrote down.
+
 ## Tearing it all down
 
 One command, and it is the reason everything went into one resource group:

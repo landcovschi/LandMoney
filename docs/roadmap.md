@@ -755,7 +755,21 @@ the thing that produced the number can be shown.
 
 Recorded so they do not creep back in:
 
-- Authentication, roles, an admin panel -- until slice 4 is running
+- Roles and an admin panel -- until slice 4 is running
+
+  **Authentication came off this list on 2026-08-26**, in #52, and it came off
+  early rather than on schedule. The line read "until slice 4 is running" and
+  slice 4 was not: steps 4 and 5 (#59, #60) were open, so there was no number to
+  quote. The owner was shown that and asked for it anyway. Recorded here in the
+  same words as in `CLAUDE.md`, because an exception nobody wrote down is how a
+  list like this stops meaning anything
+
+  What landed: OpenID Connect in the application with a cookie, every transaction
+  owned by the `sub` that entered it, and a global query filter so that
+  forgetting to scope a query is not a thing a future endpoint can do. 33 new
+  tests, still with no Postgres and no network. The whole decision, including
+  what Easy Auth and ASP.NET Core Identity lost on, is in `CLAUDE.md`; the
+  commands are step 15 of `docs/deploy-azure.md`
 - Multi-currency conversion. Amounts keep their currency; no implicit maths
 - Bank integrations. Manual entry and CSV import are enough to learn from
 - Anything resembling investment or financial advice. Categorising past

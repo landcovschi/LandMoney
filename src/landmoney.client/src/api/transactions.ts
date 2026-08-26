@@ -31,7 +31,13 @@ export class ApiError extends Error {
   /** What the server filed against a named field. Empty for anything else. */
   readonly fieldErrors: FieldErrors
 
-  constructor(message: string, fieldErrors: FieldErrors = {}) {
+  /** The status that produced this, or 0 when there was no response at all. */
+  // Added for #52, and for one caller: 401 is the only status this client has to
+  // tell apart from the rest, because it is the only one with an action attached
+  // -- sign in again. Everything else is a sentence to show.
+  readonly status: number
+
+  constructor(message: string, fieldErrors: FieldErrors = {}, status = 0) {
     super(message)
 
     // Set by hand because `Error` does not do it and the class name does not
@@ -39,6 +45,29 @@ export class ApiError extends Error {
     // own name; here the name has to be written down separately.
     this.name = 'ApiError'
     this.fieldErrors = fieldErrors
+    this.status = status
+  }
+}
+
+/** Who is signed in, as the server sees it. */
+export interface Me {
+  ownerId: string | null
+  name: string | null
+}
+
+/** The signed-in user, or null when nobody is. */
+// The one request in this client that treats a 401 as an answer rather than as a
+// failure: "nobody is signed in" is exactly what it was asking, and throwing here
+// would make the caller catch an error to learn a fact.
+export async function getMe(signal?: AbortSignal): Promise<Me | null> {
+  try {
+    return await request<Me>('/api/me', { method: 'GET' }, signal)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      return null
+    }
+
+    throw error
   }
 }
 
@@ -127,6 +156,26 @@ async function request<T>(
     throw unreachable()
   }
 
+  // #52. Before the general branch below, because the message matters more than
+  // the body does: everything under /api answers 401 with nothing in it, by
+  // design -- OnRedirectToIdentityProvider sets the status and stops the handler
+  // rather than letting it redirect to the provider. So toApiError would find no
+  // problem document and say "The API answered 401.", which names the status and
+  // not the fix.
+  //
+  // This is the tab-left-open case, and it is the one that will actually be seen.
+  // Opening the site while signed out never gets here at all: "/" is an endpoint
+  // that requires authorization, so the browser is redirected to the provider
+  // before any of this JavaScript is loaded. What reaches here is a session that
+  // ended while the page stayed open.
+  if (response.status === 401) {
+    throw new ApiError(
+      'The session has ended. Reload the page to sign in again.',
+      {},
+      response.status,
+    )
+  }
+
   if (!response.ok) {
     throw await toApiError(response)
   }
@@ -191,6 +240,7 @@ async function toApiError(response: Response): Promise<ApiError> {
     return new ApiError(
       problem.title ?? 'The API rejected the transaction.',
       problem.errors,
+      response.status,
     )
   }
 
@@ -199,6 +249,8 @@ async function toApiError(response: Response): Promise<ApiError> {
   // message reading "The API answered 500 ." is worse than one without it.
   return new ApiError(
     problem?.detail ?? problem?.title ?? `The API answered ${response.status}.`,
+    {},
+    response.status,
   )
 }
 

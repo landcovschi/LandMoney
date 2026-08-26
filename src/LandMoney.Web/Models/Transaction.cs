@@ -16,6 +16,37 @@ public class Transaction
     // personal transactions, and the reason the trade-off exists at all.
     public Guid Id { get; set; }
 
+    /// <summary>How long an owner id may be. Public because the tests assert against it.</summary>
+    // 200 rather than a Guid column, because the value is not this application's
+    // to shape: it is the `sub` claim of whatever provider signs the user in.
+    // Entra sends a Guid, Google sends 21 digits, and the specification puts no
+    // upper bound on either. 200 is the length the ASP.NET Core Identity schema
+    // uses for the same job, which is the only precedent worth copying here.
+    public const int OwnerIdMaxLength = 200;
+
+    /// <summary>Who this row belongs to: the `sub` claim of the signed-in user.</summary>
+    // Nullable, and that is a migration decision rather than a modelling one.
+    // The column arrives on a table that already holds rows, and nothing in the
+    // database knows who entered them -- the fact was never recorded, because
+    // until #52 there was nobody to record. A non-nullable column would need a
+    // value invented for those rows at migration time, and any value invented
+    // there is a claim about ownership that is not true.
+    //
+    // So null means "entered before there was an owner", and the query filter in
+    // AppDbContext makes such a row invisible to everyone rather than visible to
+    // anyone. That is deliberately the safe half of the trade: the rows are still
+    // in the table, and step 15 of docs/deploy-azure.md is the one UPDATE that
+    // hands them to the account that actually typed them, run once, after the
+    // first sign-in has produced a subject id to hand them to.
+    //
+    // Not a foreign key to a users table, and there is no users table. A row
+    // needs to know which subject owns it; nothing in this application needs to
+    // list users, name them or relate anything else to them. The day something
+    // does -- a shared household budget is the obvious one -- is the day this
+    // becomes an FK, and it is a migration rather than a redesign.
+    [MaxLength(OwnerIdMaxLength)]
+    public string? OwnerId { get; set; }
+
     // A date, not an instant, deliberately. timestamptz stores a moment, and a
     // moment only becomes a day once a timezone is applied -- 01:00 in UTC+3 is
     // stored as 22:00 UTC on the day before, so grouping by day gives a different

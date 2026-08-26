@@ -104,6 +104,22 @@ with a default of `http://localhost:8000` and is overridden by an environment
 variable (`Categorizer__BaseUrl`) only inside compose. A value being
 configuration is not the same as a value being a secret.
 
+**Signing in has one of each**, which is why it is the clearest example of that
+distinction. `Authentication:Oidc:Authority` and `ClientId` name a registration
+and are not secrets -- they sit in `appsettings.json`, empty, and are set as
+plain environment variables on the container app.
+`Authentication:Oidc:ClientSecret` is a password and goes in as a Container Apps
+secret, referenced the way the connection string is. Step 15 of
+`docs/deploy-azure.md` has the commands.
+
+**Locally there is no provider and none is needed.** With `Authority` empty,
+`dotnet run` signs every request in as a fixed local developer, so the ownership
+filter is exercised in the everyday loop rather than only in production. That
+happens in the `Development` environment and nowhere else: anywhere else, an
+empty `Authority` means nobody can sign in and every request is answered with
+401. It fails closed, and it still starts -- `efbundle` runs `Program.cs` with no
+configuration at all, and #57 is what a startup throw on that path costs.
+
 `Program.cs` reads `GetConnectionString("Default")` and throws at startup naming
 the user-secrets command if it is missing. That message is right on a developer
 machine and misleading everywhere else -- if it ever appears in the deployed
