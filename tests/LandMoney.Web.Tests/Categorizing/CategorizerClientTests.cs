@@ -175,6 +175,32 @@ public class CategorizerClientTests
         Assert.Equal(exact, await Ask(client));
     }
 
+    // --- no categorizer at all --------------------------------------------------
+
+    [Fact]
+    public async Task With_no_base_address_it_answers_null_without_calling_anything()
+    {
+        // What Program.cs produces when Categorizer:BaseUrl is absent -- which is
+        // every run of efbundle, since it has no appsettings.json beside it. The
+        // throw that used to be there instead is what failed the first deploy
+        // after #39.
+        //
+        // The handler asserts rather than returns: the point is not only that the
+        // answer is null but that nothing was sent. A placeholder base address
+        // would also answer null, after paying the full timeout on every save.
+        var called = false;
+        var http = new HttpClient(new StubHandler((_, _) =>
+        {
+            called = true;
+            return Json("""{"category":"eating-out","source":"rules"}""");
+        }));
+        // Deliberately not setting BaseAddress at all.
+        var client = new CategorizerClient(http, NullLogger<CategorizerClient>.Instance);
+
+        Assert.Null(await Ask(client));
+        Assert.False(called);
+    }
+
     // --- the clock ------------------------------------------------------------
 
     [Fact]

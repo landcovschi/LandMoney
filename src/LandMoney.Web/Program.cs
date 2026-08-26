@@ -125,17 +125,58 @@ builder.Services.AddDbContext<AppDbContext>(options => options
 // container and nothing is listening there. It is the first place in this project
 // where the two words mean different things.
 //
-// Unlike ConnectionStrings:Default this is not thrown for when missing, and the
-// difference is deliberate: a missing connection string means the application
-// cannot do its job, while a missing categorizer means it does its job without a
-// guess attached. Falling back here would hide a typo, though, so a value that is
-// present and unusable still fails at startup, where the message can name it.
-var categorizerBaseUrl = builder.Configuration["Categorizer:BaseUrl"]
-    ?? throw new InvalidOperationException(
-        "Categorizer:BaseUrl is not set. appsettings.json carries the default; "
-        + "override it with the environment variable Categorizer__BaseUrl.");
+// Absent is a legal state, and this line is the whole of what broke the first
+// deployment after #39. It used to be `?? throw`, matching the connection string
+// twenty lines up -- and `efbundle` runs THIS FILE to find the DbContext, from a
+// directory holding nothing but the bundle itself. appsettings.json is not
+// beside it, so the key is missing, the throw fires, and the deploy job dies at
+// "Apply migrations" with an error about a categorizer:
+//
+//   An error occurred while accessing the Microsoft.Extensions.Hosting services.
+//   Error: Categorizer:BaseUrl is not set.
+//   Unable to create a 'DbContext' of type 'AppDbContext'.
+//
+// CLAUDE.md had already recorded that trap for ConnectionStrings:Default in #37
+// and it was not applied to the second key. The general form, which is the thing
+// to remember rather than this instance: **every `?? throw` added to this file is
+// also a deploy-time landmine**, because the bundle runs the host and sees only
+// what the environment gives it. CI cannot catch it by building the bundle --
+// that happens in the source tree, where appsettings.json exists. It is caught by
+// *running* the bundle in an empty directory, which ci.yml now does on every
+// pull request.
+//
+// So the two keys are treated differently on purpose, and the difference is not
+// arbitrary. A missing connection string means the application cannot do its job
+// and must not start. A missing categorizer means it does its job without a guess
+// attached -- which is the entire design of #39, where every failure of that
+// service becomes a null category rather than a failure. A dependency the
+// application is built to run without must not be able to stop it starting.
+//
+// What that costs, and it is the reason this is not simply deleted: a mistyped
+// *key* -- Categoriser:BaseUrl, say -- now degrades silently to no categorisation
+// instead of failing loudly. The warning below is the only signal, which is why
+// it is a warning and names the key. It is a small risk in practice, because
+// appsettings.json ships inside the image and carries the default, so the key is
+// present in every environment that serves a request.
+var categorizerBaseUrl = builder.Configuration["Categorizer:BaseUrl"];
 
-if (!Uri.TryCreate(categorizerBaseUrl, UriKind.Absolute, out var categorizerUri))
+Uri? categorizerUri = null;
+
+if (string.IsNullOrWhiteSpace(categorizerBaseUrl))
+{
+    // Not a throw and not silence. This is expected exactly once -- inside
+    // efbundle, which never serves a request -- and anywhere else it means a
+    // typo, so it has to be findable in a log.
+    Console.WriteLine(
+        "warn: Categorizer:BaseUrl is not set, so transactions will be stored with no category. "
+        + "This is expected inside efbundle, which has no appsettings.json and never calls the "
+        + "categorizer. Anywhere else it is a misconfiguration.");
+}
+// Present but unusable still throws, and that half is deliberately unchanged. A
+// value someone typed and got wrong is a mistake to report, not a state to
+// tolerate -- and it cannot break the bundle, because the bundle never has a
+// value here at all.
+else if (!Uri.TryCreate(categorizerBaseUrl, UriKind.Absolute, out categorizerUri))
 {
     throw new InvalidOperationException(
         $"Categorizer:BaseUrl is '{categorizerBaseUrl}', which is not an absolute URI. "
@@ -156,7 +197,15 @@ if (!Uri.TryCreate(categorizerBaseUrl, UriKind.Absolute, out var categorizerUri)
 builder.Services
     .AddHttpClient<CategorizerClient>(client =>
     {
-        client.BaseAddress = categorizerUri;
+        // Left null when nothing is configured, which is what CategorizerClient
+        // reads to mean "there is no categorizer" -- it then answers null without
+        // touching the network. Assigning a placeholder instead would make every
+        // save pay the timeout below for a service that was never meant to exist.
+        if (categorizerUri is not null)
+        {
+            client.BaseAddress = categorizerUri;
+        }
+
         client.Timeout = TimeSpan.FromSeconds(
             builder.Configuration.GetValue("Categorizer:TimeoutSeconds", 2d));
     });

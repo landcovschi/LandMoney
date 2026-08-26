@@ -48,6 +48,19 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
         string currency,
         CancellationToken cancellationToken)
     {
+        // No base address means no categorizer is configured, which Program.cs
+        // treats as a legal state rather than a startup failure -- see the long
+        // comment there, and the deploy it broke. Without this check the call
+        // below throws InvalidOperationException ("An invalid request URI was
+        // provided"), which is not one of the three the catch blocks expect, so
+        // it would escape and turn a create request into a 500. That is the exact
+        // shape this class exists to prevent, arriving through configuration
+        // instead of through the network.
+        if (http.BaseAddress is null)
+        {
+            return null;
+        }
+
         try
         {
             using var response = await http.PostAsJsonAsync(
