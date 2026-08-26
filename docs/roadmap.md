@@ -402,6 +402,42 @@ public repositories. One fewer paid service, one fewer set of credentials.
       `azure.extensions` parameter under the name **`vector`**, worth doing when
       the server is created rather than as a restart in slice 5
 
+      **The `deploy` job is written -- #38, 2026-08-26 -- and the box stays
+      unticked until a merge to `main` has actually produced a revision.** It is
+      a transcription of steps 12 and 13 of `docs/deploy-azure.md` and nothing
+      else: download the bundle from this same run, log in to Azure, read the
+      connection string out of the Container Apps secret, apply migrations,
+      `containerapp update --image ...:sha-<github.sha>`, then ask Azure what
+      image is running and request `/api/transactions`. Migrate first and deploy
+      second, which is #37's order.
+
+      **No client secret anywhere.** OIDC federated credentials: an app
+      registration with no credential at all, plus a statement in Entra ID that
+      a GitHub Actions token for `repo:landcovschi/LandMoney:ref:refs/heads/main`
+      may act as it. The client, tenant and subscription ids are repository
+      **variables**, not secrets -- they identify an app, they are not a
+      password. Creating the registration is the owner's act; step 14 of the
+      runbook has the commands, and the subject string is case-sensitive in the
+      half (`LandMoney`) that the image name is not.
+
+      **The concurrency block had to change and the obvious fix was wrong.**
+      #38 suggests a separate group on the deploy job without
+      `cancel-in-progress`; that does not help, because cancellation happens to
+      the whole run and takes every job with it, so a push during a deployment
+      would still kill it between "migrations applied" and "revision replaced".
+      `cancel-in-progress: ${{ github.event_name == 'pull_request' }}` is what
+      works, and the queueing comes free: a group without cancellation makes the
+      second run wait for the first.
+
+      **Two things still to measure, both on the first run.** Whether a
+      GitHub-hosted runner reaches the database through the 0.0.0.0 "all Azure
+      services" rule -- likely, since hosted runners are Azure virtual machines,
+      and likely is not measured; if not, step 14 carries the temporary
+      firewall rule. And whether the OIDC login works at all, which cannot be
+      tested before merging, because the credential is scoped to `main`. Both
+      fail before anything is deployed, which is the migrate-first order paying
+      for itself.
+
 **Why not "all of it in GitHub".** GitHub covers two of the three layers: the
 pipeline (Actions) and the registry (`ghcr.io`). It does not cover the third.
 Pages serves static files -- HTML, CSS, JS -- and this application needs a live

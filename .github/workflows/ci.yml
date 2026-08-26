@@ -18,19 +18,32 @@ on:
     branches: [main]
   pull_request:
 
-# One run per branch. A second push while the first is still building cancels
-# it: that answer was going to be superseded anyway, and a queued run nobody
-# reads is a mark against a commit that no longer exists.
+# One run per branch. On a pull request a second push cancels the first: that
+# answer was going to be superseded anyway, and a queued run nobody reads is a
+# mark against a commit that no longer exists.
+#
+# On `main` it must not cancel, which is #38's fourth trap and the reason this
+# is an expression rather than `true`. The `deploy` job below runs migrations
+# against the deployed database and then replaces the running revision; a run
+# cancelled between those two is worse than one that waits. A job-level
+# `concurrency` block on `deploy` -- the answer #38 suggests -- does not fix it,
+# because cancellation here happens at the level of the whole run and takes
+# every job in it with it. Turning it off for pushes does fix it, and gets the
+# queueing for free: without `cancel-in-progress`, a second run in the same group
+# waits for the first, so two pushes to `main` deploy in order rather than at
+# once.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # The floor, not the whole story. This is what every job gets unless it says
 # otherwise, and `build` -- which compiles and tests and writes nothing anywhere
-# -- wants exactly this. `publish` needs more and asks for it in its own block,
-# which is the fourth trap #24 names: a `packages: write` written up here would
-# hand a token that can push images to the job that runs `npm ci` and
-# `dotnet test`, for no reason other than that it was convenient to type once.
+# -- wants exactly this. `publish` and `deploy` need more and ask for it in their
+# own blocks, which is the fourth trap #24 names and the second trap #38 names,
+# one file apart: a `packages: write` or an `id-token: write` written up here
+# would hand the job that runs `npm ci` and `dotnet test` a token that can push
+# images, or mint an Azure login, for no reason other than that it was convenient
+# to type once.
 permissions:
   contents: read
 
@@ -339,4 +352,200 @@ jobs:
             echo '${{ steps.meta.outputs.tags }}'
             echo 'digest: ${{ steps.push.outputs.digest }}'
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Deploy to Azure -- #38, and the last step of slice 3.
+  #
+  # Nothing here is new. Every command below is one from docs/deploy-azure.md
+  # that already ran by hand in #35, #36 and #37, which is why those went first:
+  # a deployment written straight into a workflow fails inside a runner where
+  # nothing can be inspected. What is new is that nobody types them.
+  #
+  # The order is #37's and it is load-bearing -- migrate, then replace the
+  # revision. In the gap the *old* revision runs against the *new* schema, which
+  # is safe while every migration only adds. The other order puts the new
+  # revision against the old schema, which for an added column is a query naming
+  # a column that is not there. Neither order saves a rename; that needs
+  # expand-and-contract, and nothing here does yet.
+  # ---------------------------------------------------------------------------
+  deploy:
+    # `publish` alone would order this correctly -- it already needs `build`, and
+    # a job whose dependency was skipped is skipped too. `build` is named anyway
+    # because the migration bundle comes from there, and a `needs` list is the
+    # only place that dependency is written down.
+    needs: [build, publish]
+
+    # The same expression as `publish`, and redundant for the reason just given:
+    # if `publish` is skipped this is skipped. Kept because "deploys on pushes to
+    # main" should be legible in the job that deploys rather than inferred two
+    # jobs away.
+    if: github.event_name == 'push'
+
+    runs-on: ubuntu-latest
+
+    # Longer than the others, and it is the cold start that sets the floor:
+    # `containerapp update` provisions a revision, and #35 measured 23.3 s from
+    # zero. Twenty minutes is not a target -- it is the point at which something
+    # has hung, and a stuck deployment should be reported rather than waited on.
+    timeout-minutes: 20
+
+    # #38's second trap, which is #24's fourth wearing different clothes. A
+    # job-level block replaces the workflow-level one rather than adding to it,
+    # so `contents: read` is restated -- `download-artifact` resolves a token
+    # from it -- and `id-token: write` stays down here, in the only job that has
+    # any business minting an Azure login.
+    permissions:
+      contents: read
+      id-token: write
+
+    # The names from docs/deploy-azure.md, in one place rather than five. IMAGE
+    # is written out in lower case rather than built from `github.repository`,
+    # which is #24's second trap and is live everywhere except inside
+    # `metadata-action`: `ghcr.io/landcovschi/LandMoney` is a valid repository
+    # name and an invalid image name, and nothing here sanitizes it.
+    env:
+      RESOURCE_GROUP: rg-landmoney
+      CONTAINER_APP: landmoney
+      IMAGE: ghcr.io/landcovschi/landmoney
+
+    steps:
+      # No `actions/checkout` in this job, which answers #38's third trap rather
+      # than meeting it: the bundle is an artifact of this same run, so the
+      # commit that built it and the commit whose image is deployed below are the
+      # same by construction. A checkout could differ from both.
+      #
+      # v8 while the upload one job up is v7 -- the two are versioned
+      # independently and both are current, checked rather than remembered. They
+      # still agree: v7 skips zipping only when `archive: false` is set, and it
+      # is not, so v8's new "check the Content-Type before unzipping" unzips.
+      - name: Download the migration bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: efbundle
+
+      # No client secret anywhere, which is the whole of #38. These three ids are
+      # `vars` and not `secrets` on purpose: they identify an app registration,
+      # they are not a credential, and storing them as secrets would suggest
+      # there is something here to leak. What authorises the login is a token
+      # minted for this run by GitHub and traded for an Azure one -- scoped to
+      # this repository on this branch, and dead when the job ends.
+      - name: Log in to Azure
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # `containerapp` is an extension, and az installs one on first use only
+      # after asking. A runner cannot answer, so this line is here for the reason
+      # step 9 of the runbook gives for the same line: it keeps an interactive
+      # prompt out of the middle of a deployment.
+      - name: Install the containerapp extension
+        run: az extension add --name containerapp --upgrade --only-show-errors
+
+      # ----------------------------------------------------------------------
+      # The schema first. #37's shape, unchanged -- step 13 of
+      # docs/deploy-azure.md is what each line answered when it ran by hand.
+      # ----------------------------------------------------------------------
+      - name: Apply migrations
+        run: |
+          # Read back out of the Container Apps secret the running app already
+          # uses, rather than stored a second time in GitHub. #37 names the trap:
+          # a deployment needs this string, and two places holding one password
+          # is how they drift. There is still exactly one, and rotating it stays
+          # a single `az containerapp secret set`.
+          conn=$(az containerapp secret show \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --secret-name pgconn --query value -o tsv --only-show-errors)
+
+          # Before anything can echo it. A `run` block does not trace its own
+          # commands, so the value has not been printed yet -- this is for
+          # whatever gets added below by someone debugging at a bad moment.
+          echo "::add-mask::$conn"
+
+          # An artifact is a zip, and a zip carries no executable bit. Without
+          # this the answer is `Permission denied` on a file that is plainly
+          # sitting there.
+          chmod +x ./efbundle
+
+          # By environment variable and never by `--connection`, although that
+          # argument exists and is the first thing the bundle's own --help lists:
+          # an argument is visible in the process list. The bundle runs the
+          # application's own configuration pipeline, so ConnectionStrings__Default
+          # reaches it exactly the way it reaches the app.
+          #
+          # No `docker run` wrapper, unlike the runbook. That exists there
+          # because the bundle is a linux-x64 ELF binary and the machine holding
+          # it runs Windows. Here the runner is the platform it was built for.
+          ConnectionStrings__Default="$conn" ./efbundle
+
+      # ----------------------------------------------------------------------
+      # Then the revision.
+      # ----------------------------------------------------------------------
+      #
+      # The SHA tag, never `latest` -- #24's third trap and #35's. `github.sha`
+      # on a push is the commit that was pushed, and `metadata-action`'s
+      # `type=sha,format=long` one job up tagged the image with exactly that, so
+      # the two cannot disagree about which commit is being deployed.
+      #
+      # `update` and not `create`: revisions are immutable, so this makes a new
+      # one and leaves the previous one deactivated rather than deleted. That is
+      # what a rollback targets, and `revision list --all` is where to find it.
+      - name: Deploy the revision
+        run: |
+          az containerapp update \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --image "$IMAGE:sha-${{ github.sha }}" \
+            --output none --only-show-errors
+
+      # A deployment that reports success while the site is down is the exact
+      # failure this slice exists to remove, so the job does not end at
+      # `update`. Two questions, both asked of Azure rather than of this file:
+      # what image is the app running, and does it answer.
+      - name: Check what is running
+        run: |
+          fqdn=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --query "properties.configuration.ingress.fqdn" -o tsv --only-show-errors)
+          image=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --query "properties.template.containers[0].image" -o tsv --only-show-errors)
+
+          expected="$IMAGE:sha-${{ github.sha }}"
+          if [ "$image" != "$expected" ]; then
+            echo "::error::the app is running $image, expected $expected"
+            exit 1
+          fi
+
+          # /api/transactions rather than /, because it is the one that proves
+          # more than the container started: it reaches Postgres, so a wrong
+          # connection string or an unapplied migration fails here rather than
+          # at whatever hour someone next opens the page.
+          #
+          # --max-time 60 rather than curl's default, which is none, and it is
+          # sized against the cold start -- 23.3 s from zero, measured in #35.
+          # Retried because `containerapp update` returns when the revision is
+          # provisioned, which is earlier than when it is serving; without this
+          # the deployment is correct and the check is a coin flip. `|| true`
+          # because the shell here runs under -e and a curl that times out would
+          # otherwise take the job with it before the retry.
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 "https://$fqdn/api/transactions") || true
+            [ "$code" = "200" ] && break
+            echo "attempt $attempt: $code"
+            sleep 10
+          done
+
+          if [ "$code" != "200" ]; then
+            echo "::error::GET https://$fqdn/api/transactions answered $code"
+            exit 1
+          fi
+
+          {
+            echo '### Deployed'
+            echo
+            echo "- image: $image"
+            echo "- url: https://$fqdn/"
+            echo "- GET /api/transactions: $code"
           } >> "$GITHUB_STEP_SUMMARY"

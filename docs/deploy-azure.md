@@ -13,8 +13,8 @@ a container app pulling from `ghcr.io`, and an Azure Database for PostgreSQL
 Flexible Server. The reasoning behind each of those choices is in `CLAUDE.md`
 under "The stack, and what was rejected"; this file is only the how.
 
-**The automated version of this is #38.** These commands are what it
-transcribes, which is the reason for doing it by hand first: a deployment
+**The automated version of this is #38, and it is step 14.** These commands are
+what it transcribes, which is the reason for doing it by hand first: a deployment
 written straight into a workflow fails inside a runner where nothing can be
 inspected.
 
@@ -637,8 +637,8 @@ curl -sSI https://<app>.polandcentral.azurecontainerapps.io/ | grep -i strict-tr
 ```
 
 The SHA is the merge commit on `main`, and `ci.yml` writes the digest to the run
-summary. **This is the step #38 exists to delete**, and doing it by hand once is
-the point.
+summary. **This is the step #38 exists to delete** -- it is gone as of step 14 --
+and doing it by hand once is the point.
 
 **Done, and what it answered.** Revision `landmoney--0000002` on
 `sha-25720b96132412609096b4844c6ef33c255f2a6f`:
@@ -864,17 +864,223 @@ that does not exist. Strictly worse for the changes this project makes.
 az containerapp update -g rg-landmoney -n landmoney --image ghcr.io/landcovschi/landmoney:sha-<40 characters>
 ```
 
-**Both of these are hand steps today, and #38 is what joins them.** There the
-bundle is downloaded from the same run that built the image, so the two cannot
-disagree about which commit is being deployed -- which is the argument for
-building it in `build` rather than in a job of its own.
+**Both of these were hand steps until #38, and step 14 is where they are
+joined.** There the bundle is downloaded from the same run that built the image,
+so the two cannot disagree about which commit is being deployed -- which is the
+argument for building it in `build` rather than in a job of its own.
 
-**One thing #38 has to measure rather than assume:** whether a GitHub-hosted
-runner can reach the database at all. The firewall is the 0.0.0.0 "all Azure
+**One thing #38 has to measure rather than assume, and still does:** whether a
+GitHub-hosted runner can reach the database at all. Step 14 carries the fallback
+if it cannot. The firewall is the 0.0.0.0 "all Azure
 services" rule from step 5 plus this machine's address, and whether a runner's
 outbound address falls inside the first is not something this file can answer.
 If it does not, the shape is a temporary firewall rule created and removed by
 the deploy job, which the OIDC login #38 already needs makes possible.
+
+## Step 14 -- the same thing, from a workflow
+
+**This is #38, and it is what deletes two hand steps: the
+`az containerapp update --image` at the end of step 12, and the `docker run` of
+step 13.** Everything the `deploy` job in `.github/workflows/ci.yml` runs is a
+command from this file, in the order this file established. That order was the
+reason for doing it by hand first -- a deployment written straight into a
+workflow fails inside a runner where nothing can be inspected.
+
+What stays a hand step, exactly once, is the identity the workflow logs in as.
+Claude does not authenticate; the commands below are the owner's.
+
+### The identity, and why it is not a password
+
+The tutorial answer is `az ad sp create-for-rbac --sdk-auth`, whose output goes
+into `secrets.AZURE_CREDENTIALS`. It works. It is also a password with a long
+life, kept in a store designed to hand it to any workflow in the repository, and
+it expires without warning at the worst possible moment.
+
+What replaces it is an app registration with **no credential at all**, plus a
+statement in Entra ID of the form "a token issued by GitHub Actions, for this
+repository, on this branch, may act as this app". GitHub mints such a token per
+run; `azure/login` trades it for an Azure one that dies with the job. There is
+nothing to rotate and nothing to leak.
+
+### The commands, run once
+
+PowerShell, from anywhere. `az login` first, as the account that owns the
+subscription.
+
+```powershell
+$appId = az ad app create --display-name "github-landmoney-deploy" --query appId -o tsv
+$spId  = az ad sp create --id $appId --query id -o tsv
+```
+
+**`az ad app create` may be refused in a work tenant**, where creating
+registrations is a directory privilege rather than something every user has. It
+is granted by default in the "Default Directory" tenant that signing up with a
+personal address produces, which is what this subscription has.
+
+The federated credential is a JSON document, and it goes through a file rather
+than an inline string -- PowerShell, `az`'s own parser and the `.cmd` shim
+between them each have an opinion about quotes, and a file has none:
+
+```powershell
+@'
+{
+  "name": "github-main",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:landcovschi/LandMoney:ref:refs/heads/main",
+  "audiences": ["api://AzureADTokenExchange"]
+}
+'@ | Set-Content -Encoding utf8 fedcred.json
+
+az ad app federated-credential create --id $appId --parameters fedcred.json
+```
+
+**The `subject` must match what the run presents, character for character**, and
+this is #38's first trap. Three ways to get it wrong, all of which fail as the
+same login error naming neither half:
+
+- `repo:landcovschi/LandMoney:environment:production` is a **different subject**
+  from the `ref:` one above. It is what to use if the `deploy` job is ever given
+  `environment: production` -- and then it is the only one that works, because a
+  job with an environment presents that subject and not the branch one.
+- The repository name is **case-sensitive** here. `LandMoney` is what GitHub puts
+  in the token; `landmoney` is the image name, and they are not interchangeable
+  -- which is the same trap as #24's, one system further along.
+- `refs/heads/main` and not `main`.
+
+Read it back rather than trusting the paste:
+
+```powershell
+az ad app federated-credential list --id $appId --query "[].{name:name,subject:subject}" -o table
+```
+
+Then the permission. `Contributor` on the resource group, which is what the
+workflow needs and no more than the resource group holds:
+
+```powershell
+$subId = az account show --query id -o tsv
+az role assignment create --assignee-object-id $spId --assignee-principal-type ServicePrincipal --role Contributor --scope "/subscriptions/$subId/resourceGroups/rg-landmoney"
+```
+
+**`--assignee-object-id` with `--assignee-principal-type`, not `--assignee`.**
+The short form does a Graph lookup to work out what kind of principal the id
+names, and an account without directory read permission gets a failure about the
+assignee that reads like a bad id. Passing both facts skips the lookup.
+
+**Run the `--scope` commands from PowerShell, not Git Bash**, and this is the
+third outing of one lesson rather than a new one. Git Bash rewrites an argument
+that looks like a Unix path into a Windows path before the program sees it, so
+`--scope "/subscriptions/<sub>/resourceGroups/rg-landmoney"` arrives at ARM as
+something under the Git installation directory, and ARM answers with the only
+thing it can:
+
+```
+ERROR: (MissingSubscription) The request did not have a subscription or a valid
+tenant level resource provider.
+```
+
+An error about a subscription, for a cause that is the shell. It cost two runs
+here before the tell was noticed: `az role assignment list --resource-group
+rg-landmoney` works while `az role assignment list --scope
+"/subscriptions/.../resourceGroups/rg-landmoney"` does not. Same call, same
+permissions, same account -- the only difference is one argument shaped like a
+path. `MSYS_NO_PATHCONV=1` in front of the command fixes it and confirms the
+diagnosis; PowerShell never had the problem. Step 13 records the same rewrite
+turning `docker run -w /w` into `the working directory 'W:/' is invalid`, and
+#53 recorded `curl` being an alias for `Invoke-WebRequest` in the other
+direction. Every runbook line here is PowerShell for that reason.
+
+Narrower scopes were considered and lost. The container app alone is not enough:
+reading the connection string back needs
+`Microsoft.App/containerApps/listSecrets/action`, which no built-in reader role
+carries, and the day the database firewall needs a temporary rule the scope has
+to reach the Postgres server anyway. The resource group is the unit everything
+here is created in and deleted in, so it is the honest boundary.
+
+Finally the three ids, as repository **variables** and not secrets -- they
+identify an app registration, they are not a credential, and filing them as
+secrets would suggest there is something here to leak:
+
+```powershell
+gh variable set AZURE_CLIENT_ID --body $appId
+gh variable set AZURE_TENANT_ID --body (az account show --query tenantId -o tsv)
+gh variable set AZURE_SUBSCRIPTION_ID --body $subId
+```
+
+```powershell
+Remove-Item fedcred.json
+```
+
+### What the job then does
+
+Four steps, all of them from this file:
+
+1. `actions/download-artifact` takes `efbundle` from **this same run**, so there
+   is no checkout in the job at all. The commit that built the bundle and the
+   commit whose image is deployed are then the same by construction rather than
+   by a `git checkout` that could differ from both.
+2. `az containerapp secret show` reads the connection string out of the one
+   place that already holds it -- step 13's answer to "two places holding one
+   secret", now automated -- and `::add-mask::` keeps it out of the log.
+3. `./efbundle` applies migrations. No `docker run` wrapper: that exists in step
+   13 because the bundle is a linux-x64 binary on a Windows machine, and a
+   `ubuntu-latest` runner is the platform it was built for. `chmod +x` still
+   applies -- a zip carries no executable bit wherever it is unpacked.
+4. `az containerapp update --image ...:sha-<github.sha>` makes the revision, and
+   then the job asks Azure what image the app is running and requests
+   `/api/transactions` over the public URL. A deployment that reports success
+   while the site is down is the failure slice 3 exists to remove.
+
+### Two things the workflow settles that this file could not
+
+**Concurrency.** The workflow-level `concurrency` block cancelled in-progress
+runs, and a run cancelled between "migrations applied" and "revision replaced"
+is worse than one that waits. #38 suggests a separate group on the deploy job;
+that does not work, because cancellation happens to the whole run and takes
+every job with it. What does work is `cancel-in-progress:
+${{ github.event_name == 'pull_request' }}` -- pull requests keep the old
+behaviour, and pushes to `main` queue instead, since a concurrency group without
+cancellation makes the second run wait for the first.
+
+**The firewall, which is still a question.** Step 13 left it open: the rule is
+the 0.0.0.0 "all Azure services" one from step 5, and whether a GitHub-hosted
+runner's outbound address falls inside it is not something that could be
+answered from here. GitHub's hosted runners are Azure virtual machines, so it is
+likely -- and likely is not measured. **The first run on `main` is the
+measurement.**
+
+If it fails, it fails in the `Apply migrations` step with a timeout or a
+`no pg_hba.conf entry` from Npgsql, **before** anything is deployed -- which is
+the migrate-first order paying for itself. The fix is a rule created and removed
+by the job, which the OIDC login already makes possible:
+
+```
+ip=$(curl -sS https://api.ipify.org)
+az postgres flexible-server firewall-rule create -g rg-landmoney -n psql-landmoney-pl --rule-name ci-$GITHUB_RUN_ID --start-ip-address "$ip" --end-ip-address "$ip"
+```
+
+with the matching `firewall-rule delete` in a step carrying `if: always()`, or
+the rules accumulate one per deployment for ever.
+
+### Rolling back
+
+Nothing new, and worth writing beside the automation rather than remembering it
+during an incident. `update` deactivates the previous revision instead of
+deleting it:
+
+```
+az containerapp revision list -g rg-landmoney -n landmoney --all -o table
+az containerapp update -g rg-landmoney -n landmoney --image ghcr.io/landcovschi/landmoney:sha-<the previous 40 characters>
+```
+
+The image tag is the whole reason this is possible, and the reason #24 refused
+to deploy `latest`: a revision pinned to a moving tag cannot say what it is
+running, and rolling one back means first working out what `latest` used to be.
+
+A schema that moved with it is the case this does not cover. Re-deploying an
+older image does not un-apply a migration, and nothing here generates a down
+migration -- while every migration only adds, an older image against a newer
+schema is exactly the safe direction, and the day one drops a column that stops
+being true.
 
 ## Tearing it all down
 
