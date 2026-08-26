@@ -1,36 +1,107 @@
 /* Tokens and page-wide defaults. Everything specific to the form and the list
    is in App.css.
 
-   The palette is the Vite scaffolder's, kept rather than replaced: it already
-   answers prefers-color-scheme, and inventing a second set of purples would
-   have been the least useful hour of #6. The names that the demo page used and
-   this screen does not -- --code-bg, --social-bg -- are gone; --surface,
-   --muted and the two --danger tokens are new. */
+   Built with plain CSS and custom properties, decided in #51. Tailwind and a
+   component kit (MUI, Radix, shadcn/ui) were the alternatives and both lost on
+   the same argument: they pay for themselves across dozens of components, and
+   this client has four. The interesting decisions here are the three scales
+   below and the states in App.css, and none of them get easier by importing
+   somebody else's vocabulary for them. Revisit when there is a second screen.
+
+   Two layers, and the split is the point:
+
+   - The *scales* -- space, type, radius, motion -- are facts about the layout
+     and do not change between themes.
+   - The *palette* is named for meaning rather than for colour: surface, border,
+     text, danger. Which is what makes the dark theme at the bottom of this file
+     a change to sixteen values instead of a rewrite. A token called --purple
+     would have to be renamed the day it stops being purple; --accent does not.
+
+   No web font. system-ui is already the face the reader's OS uses everywhere
+   else, it costs no request and it cannot flash unstyled text on a cold
+   container start. A hosted font would be a runtime dependency on a third party
+   for a screen whose typography problem is scale and rhythm, not shape. */
 
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --muted: #8b8494;
-  --bg: #fff;
-  --surface: #faf9fb;
-  --border: #e5e4e7;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --danger: #b3261e;
-  --danger-bg: rgba(179, 38, 30, 0.08);
-  --danger-border: rgba(179, 38, 30, 0.35);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  /* --- scales, theme-independent ---------------------------------------- */
+
+  /* Multiples of 4px. Every margin, gap and padding in this client is one of
+     these eight, so vertical rhythm is a property of the scale rather than
+     something re-decided per rule. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+
+  /* Five steps, and deliberately no more. A screen with one heading level, a
+     body size and a small size for labels and metadata does not need nine. */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: 2rem;
+
+  --leading-tight: 1.2;
+  --leading-normal: 1.5;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-pill: 999px;
+
+  /* One duration and one easing, so nothing on the screen moves at a speed
+     nothing else moves at. */
+  --motion: 140ms;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
 
-  /* Tabular figures. Without this the digits in the amount column have
-     different widths, so the decimal points do not line up and a column of
-     money is harder to scan than it needs to be. */
+  /* Used for the amount column. The face matters less than the digits being
+     the same width, which is what font-variant-numeric asks for separately --
+     a proportional font with tabular figures would do just as well, and most
+     system faces have them. This is the belt to that pair of braces. */
   --mono: ui-monospace, Consolas, monospace;
 
-  font: 16px/1.5 var(--sans);
+  /* --- palette, light ---------------------------------------------------- */
+
+  /* The page is the darker of the two and the cards sit on top of it in white.
+     That is the opposite of the arrangement this file had before #51, where
+     the page was white and the one card was tinted -- and it is what makes a
+     card read as a raised thing rather than as a stain. */
+  --bg: #f7f7f6;
+  --surface: #ffffff;
+  --surface-sunken: #f0f0ef;
+
+  --border: #e3e3e0;
+  --border-strong: #c9c9c4;
+
+  --text: #3f3f46;
+  --text-strong: #18181b;
+  --text-muted: #64646d;
+
+  /* Teal, replacing the Vite scaffolder's purple that this file carried since
+     #6 with a note admitting it was inherited rather than chosen. #51 is where
+     it gets chosen. It is dark enough at 5.5:1 on white to be a button
+     background with white text on it and a focus ring at the same time, which
+     the purple was not -- #aa3bff on white is 3.6:1, so it could be a border
+     and never a label. */
+  --accent: #0f766e;
+  --accent-strong: #115e56;
+  --accent-contrast: #ffffff;
+  --accent-soft: #e4f2f0;
+
+  --danger: #b3261e;
+  --danger-soft: #fdeceb;
+  --danger-border: #f0b9b5;
+
+  --shadow-sm: 0 1px 2px rgba(24, 24, 27, 0.06);
+  --shadow-md:
+    0 1px 3px rgba(24, 24, 27, 0.08), 0 8px 24px -8px rgba(24, 24, 27, 0.12);
+
+  font: var(--text-md) / var(--leading-normal) var(--sans);
   color-scheme: light dark;
   color: var(--text);
   background: var(--bg);
@@ -40,22 +111,45 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* --- palette, dark -------------------------------------------------------- */
+
+/* There is a dark theme and there is no switch for one, which #51 asked to be
+   explicit about either way. A switch needs a control on a screen that has no
+   settings, a third state ("follow the system") before it is honest, and
+   somewhere to persist the choice. prefers-color-scheme is the answer the
+   reader has already given their OS, so it is the one worth honouring first;
+   the switch becomes worth building when there is a settings screen to put it
+   on. Note that only the palette is restated here -- if a rule below or in
+   App.css names a colour that is not a token, the dark theme is already wrong
+   and this block cannot fix it. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --muted: #6f7681;
-    --bg: #16171d;
-    --surface: #1f2028;
-    --border: #2e303a;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
+    --bg: #121316;
+    --surface: #1b1d21;
+    --surface-sunken: #16181b;
+
+    --border: #2b2e34;
+    --border-strong: #3d424a;
+
+    --text: #b9bec7;
+    --text-strong: #f2f4f7;
+    --text-muted: #858c97;
+
+    /* In the light theme the accent is a background with white on it; here it
+       is the foreground, so the pair swaps rather than the one value being
+       darkened. #0f766e on #1b1d21 is 1.7:1 and unreadable. */
+    --accent: #2dd4bf;
+    --accent-strong: #5eead4;
+    --accent-contrast: #06201d;
+    --accent-soft: rgba(45, 212, 191, 0.12);
+
     --danger: #f2b8b5;
-    --danger-bg: rgba(242, 184, 181, 0.1);
+    --danger-soft: rgba(242, 184, 181, 0.1);
     --danger-border: rgba(242, 184, 181, 0.35);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md:
+      0 1px 3px rgba(0, 0, 0, 0.5), 0 8px 24px -8px rgba(0, 0, 0, 0.6);
   }
 }
 
@@ -65,19 +159,24 @@ body {
 
 h1,
 h2 {
-  color: var(--text-h);
+  color: var(--text-strong);
   font-weight: 500;
+  line-height: var(--leading-tight);
   margin: 0;
 }
 
 h1 {
-  font-size: 32px;
-  letter-spacing: -0.8px;
+  font-size: var(--text-xl);
+
+  /* Large text set at its default tracking looks loose. The correction is
+     negative and proportional to the size, which is why it is in em and why
+     the h2 below gets a smaller one rather than the same one. */
+  letter-spacing: -0.025em;
 }
 
 h2 {
-  font-size: 20px;
-  letter-spacing: -0.2px;
+  font-size: var(--text-lg);
+  letter-spacing: -0.01em;
 }
 
 p {
@@ -91,4 +190,34 @@ select,
 button {
   font: inherit;
   color: inherit;
+}
+
+/* One focus ring, defined once, for everything that can take focus. The
+   browser's own is not bad -- it is simply whatever that browser decided, so
+   it differs between them and it disappears against a border of a similar
+   colour. This one is the accent at two pixels with a soft halo behind it, so
+   it reads on the page background, on a card and on a filled button alike.
+
+   :focus-visible rather than :focus, so the ring appears for the keyboard and
+   not for a mouse click into an input. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+/* Everything that moves on this screen moves because a rule below asked it to,
+   and every one of those rules is decoration -- a hover lift, a colour fade, a
+   spinner. Someone who has told their OS they do not want that gets the same
+   screen without it. The values are 0.01ms rather than 0 so an animation still
+   fires the events a listener might be waiting for; there are none here yet. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

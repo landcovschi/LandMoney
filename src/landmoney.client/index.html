@@ -4,6 +4,25 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!--
+      The colour a phone browser paints its own toolbar with, so the chrome
+      above the page stops being white over a dark page. It is the only thing on
+      this screen that cannot read a custom property, which is why --bg is
+      written out twice here and nowhere else; both values are the --bg of the
+      matching block in index.css and have to be changed with it.
+    -->
+    <meta
+      name="theme-color"
+      content="#f7f7f6"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#121316"
+      media="(prefers-color-scheme: dark)"
+    />
+
     <title>LandMoney</title>
   </head>
   <body>
