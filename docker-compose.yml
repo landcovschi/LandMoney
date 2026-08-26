@@ -3,6 +3,24 @@
 # The pgvector/pgvector image is plain Postgres plus the vector-search
 # extension. Chosen now so that slice 5 does not force recreating the volume
 # later; until then the extension simply sits there unused.
+#
+# **Two ways to bring this up, added in #39.**
+#
+#   docker compose up -d                  postgres + categorizer
+#   docker compose --profile full up -d   ... and the .NET app as well
+#
+# The default is the everyday loop: the two things the application talks to,
+# with the application itself run from the host by `dotnet run`, which is where
+# the debugger and the fast rebuild are. The categorizer is published on
+# 127.0.0.1:8000, which is what appsettings.json points at, so nothing has to be
+# configured for that.
+#
+# The `full` profile is the whole stack in containers, and it is what #39's
+# acceptance test needs -- it is the only arrangement in which the app reaches
+# the categorizer **by service name** rather than through a published port. A
+# service with `profiles:` is skipped entirely unless its profile is named, so
+# the default `up` does not build the .NET image and the everyday loop costs
+# what it always did.
 
 services:
   postgres:
@@ -27,6 +45,98 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
+
+  # The Python categorizer -- #39. The rules baseline of #25 behind one endpoint.
+  categorizer:
+    build:
+      # The context is the service's own folder, not the repository root, which
+      # is the opposite of the app below. Right for the opposite reason: the
+      # .NET image has to reach src/landmoney.client, and nothing here reaches
+      # outside src/categorizer. `evals/` is deliberately not in this context --
+      # the scorer imports the service, never the other way round.
+      context: ./src/categorizer
+    container_name: landmoney-categorizer
+    restart: unless-stopped
+    ports:
+      # Published so the host's `dotnet run` can reach it, and bound to
+      # 127.0.0.1 for the same reason postgres is. The app *container* does not
+      # use this port at all -- it goes over the compose network by name.
+      - "127.0.0.1:${CATEGORIZER_PORT:-8000}:8000"
+    healthcheck:
+      # Declared in the Dockerfile; repeated here only for the timings, because
+      # `depends_on: condition: service_healthy` below is what reads them. The
+      # image has no curl, wget or nc -- python:3.13-slim is as bare as the
+      # aspnet one -- so the check is the interpreter that is already there.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  # The .NET application, behind the `full` profile -- see the header.
+  app:
+    profiles: ["full"]
+    build:
+      # The repository root, because the Dockerfile's node stage builds the
+      # client out of src/landmoney.client and writes it into the server
+      # project's wwwroot. That coupling is #20's written-down price, and this
+      # is the second place it is charged.
+      context: .
+    container_name: landmoney-app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    environment:
+      # Two underscores. One makes a key nobody reads -- README.md says so about
+      # the deployed app, and it is the same provider here.
+      #
+      # Host=postgres: the service name, resolved by the compose network's DNS.
+      # 127.0.0.1:5433 is what the *host* uses; inside this container 127.0.0.1
+      # is the container itself.
+      #
+      # SslMode=Disable, which the deployed app must never have. Here both ends
+      # are on a private bridge network on one machine and there is no
+      # certificate to validate; the deployed connection string carries
+      # SslMode=Require and is a Container Apps secret. That difference is the
+      # cost CLAUDE.md names for having two Postgres instances -- "it works
+      # locally" and "it works deployed" stopped being the same sentence in #34.
+      ConnectionStrings__Default: >-
+        Host=postgres;Port=5432;Database=${POSTGRES_DB:-landmoney};Username=${POSTGRES_USER:-landmoney};Password=${POSTGRES_PASSWORD:-landmoney_local_only};SslMode=Disable;Timeout=15;CommandTimeout=30
+
+      # **The line #39 is about.** `categorizer` is the service name above;
+      # `localhost` here would be this container, where nothing is listening.
+      # It is the first place in this project where the two words differ.
+      Categorizer__BaseUrl: http://categorizer:8000
+
+      # Explicit although Production is already the default with nothing set --
+      # the same reasoning as the deployed app, where it gates
+      # UseExceptionHandler, UseHsts, UseHttpsRedirection and
+      # UseForwardedHeaders. Running the image locally is only worth anything if
+      # it takes the same branch the deployed one does.
+      #
+      # Expect one warning per start that the deployed app does not produce:
+      # "Failed to determine the https port for redirect". There is no ingress
+      # here to send X-Forwarded-Proto, so UseHttpsRedirection is back to being
+      # a no-op by degradation rather than by design -- exactly the state
+      # CLAUDE.md describes for the image before #36.
+      ASPNETCORE_ENVIRONMENT: Production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      categorizer:
+        # Not strictly required -- the app starts perfectly well without the
+        # categorizer and stores transactions with no category, which is the
+        # fallback #39 asks for and the thing its acceptance test checks by
+        # stopping this service. It is here so that a fresh `up` does not
+        # produce a first transaction that is uncategorised for a reason nobody
+        # would think to look for.
+        condition: service_healthy
+
+    # No healthcheck on this service, and it is not an oversight. The aspnet
+    # runtime image has none of curl, wget, nc or ping -- measured in #23 -- so
+    # a check would mean an apt layer in the image that ships, to serve a
+    # dependency nothing has: nothing waits on the app. Container Apps ignores a
+    # Dockerfile healthcheck anyway and probes over HTTP from outside.
 
 volumes:
   pgdata:

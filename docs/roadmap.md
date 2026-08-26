@@ -661,10 +661,46 @@ again by itself after 7 days.
        score anything else**: there is no substring meaning "fits nothing", so
        any abstaining substring baseline has a hard ceiling of 90.9% across
        eleven categories, which is 9.1 of the 39.2 points missing here
-3. [ ] A Python service (FastAPI) that categorises a transaction. Called by the
+3. [x] A Python service (FastAPI) that categorises a transaction. Called by the
        .NET app over HTTP, with a timeout and a fallback to the rules -- #39,
        which carries the rules from step 2 inside it so the baseline and the
        service stay the same code and the score keeps meaning something
+
+       **Landed 2026-08-26** as `src/categorizer/`: a `uv` project, FastAPI,
+       `POST /categorize` and `GET /health`, 14 tests. `categories.py` and
+       `rules.py` moved out of `evals/` without a character changing, and the
+       scorer reaches them by putting `src/categorizer/src` on `sys.path` --
+       **the baseline re-ran at exactly 60.8% macro recall and 62.2% accuracy**,
+       which is the whole point of the move being a move rather than a copy
+
+       The response is `{category, source}` and `source` exists although only
+       one producer can write it. That field is the one thing in this issue that
+       cannot be added later: a row categorised before the column existed can
+       never say where it came from. **The .NET side does not store it yet**, on
+       the argument that everything written today is `rules` by construction, so
+       the column has to arrive in the same change as the model adapter of step
+       4 and before it. Written down under "Open decisions with a deadline" in
+       `CLAUDE.md`, because that is the only place a deadline survives
+
+       Abstention crosses the wire as `category: null`, never as the `unknown`
+       sentinel -- serving that string would put a twelfth value into the
+       application's `category` column, which is the failure the closed
+       vocabulary exists to prevent. `score.py` still sees the sentinel, so the
+       number is untouched
+
+       **Measured rather than assumed, and it changed the shape of the
+       fallback:** stopping the categorizer does not fail fast. `docker compose
+       stop categorizer` left the SYN unanswered rather than refused, so the
+       .NET client took the *timeout* path, not `HttpRequestException` -- every
+       save costs the full timeout while the service is down. That is the
+       argument for the 2 seconds in `appsettings.json` being small: it is not
+       the latency of a working call, it is the latency of a broken one, on the
+       path where the user's transaction is being written
+
+       Not in CI, deliberately: nothing builds or tests `src/categorizer/` on a
+       pull request yet, so `build` can be green over a broken service. It is
+       already a slice 5 item ("Evals run in CI on every PR") and it is the
+       natural home for both halves of the Python tree at once
 4. [ ] An Anthropic adapter behind a port, plus a fake with canned responses so
        tests never hit the network and never cost money
 5. [ ] Run the evals. Did the model beat the baseline? Record the number

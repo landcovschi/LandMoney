@@ -47,7 +47,16 @@ public class Transaction
     // Deliberately a plain string, not a Category entity with a foreign key.
     // A model predicts this value in slice 4 and the vocabulary is not known yet.
     // Nullable because "not categorised yet" is a real state until then.
-    [MaxLength(100)]
+    /// <summary>How long a category may be. Public because CategorizerClient checks against it.</summary>
+    // A const rather than the literal in the attribute, added in #39. The
+    // categorizer is a separate process with its own vocabulary, so an answer
+    // longer than the column is a thing that can happen -- and it would throw in
+    // SaveChangesAsync, losing the user's transaction to a failed guess about it.
+    // CategorizerClient refuses such an answer, and reads the limit from here so
+    // the two cannot drift. Same shape as CreateTransactionRequest.MaxDaysAhead.
+    public const int CategoryMaxLength = 100;
+
+    [MaxLength(CategoryMaxLength)]
     public string? Category { get; set; }
 
     // When the row was recorded, which is a different fact from when the money was

@@ -5,6 +5,11 @@ anything not in here, so a misspelt label is an error rather than a twelfth
 category quietly joining the vocabulary -- which is the failure that makes a
 metric stop meaning anything.
 
+Moved out of `evals/` in #39, unchanged. Two things read it now: the
+scorer, and `contracts.py`, which builds the API's response enum from
+`CATEGORIES` rather than restating the list. A twelfth category is therefore one
+edit here plus one in `docs/evals.md`, and never a string typed into a schema.
+
 The reasoning behind the eleven, the boundary rules for the awkward rows, and
 what was left out is in `docs/evals.md`. Do not add a category without adding
 it there too: a vocabulary decided halfway through labelling is not closed.

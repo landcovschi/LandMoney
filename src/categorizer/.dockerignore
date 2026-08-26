@@ -1,0 +1,22 @@
+# The build context is src/categorizer, so this file only has to think about
+# what is in here -- unlike the root .dockerignore, which guards a whole
+# repository.
+#
+# The pattern rules are Docker's, not git's: no-slash means the root of the
+# context and `*` does not cross a `/`, which is the difference that cost a leak
+# to learn in #23. Hence `**/` on everything that could appear at depth.
+
+# .venv is the one with teeth. It is built on Windows, its scripts carry
+# absolute Windows paths, and the image builds its own at /app/.venv -- so a
+# copy of this one is not merely useless, it would shadow the real thing at the
+# same path.
+.venv/
+
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+tests/
+**/.env
+**/.env.*

@@ -10,9 +10,13 @@ Exit code 0 means a number was produced. Exit code 1 means one was not -- an
 unreadable file, a label outside the vocabulary, or an empty set. A scorer that
 prints 0.0% when it could not score anything is worse than one that refuses.
 
-Stdlib only, on purpose: a CSV and a dict of substrings need nothing, and the
-`uv` project that CLAUDE.md plans for the categorizer can arrive with the
-categorizer in #39 rather than one issue early.
+Stdlib only, on purpose, and it stayed that way after #39 moved the rules into
+`src/categorizer/`. That move is why the `sys.path` line below exists: the
+scorer and the service now run the same `predict`, so this number is a statement
+about what the API answers rather than about a copy of it. Reaching the package
+by path rather than by installing it keeps `python evals/score.py` a command
+that needs no `uv`, no virtual environment and no network -- which is the
+property that let #25 exist before any of that did.
 """
 
 import argparse
@@ -26,8 +30,20 @@ from typing import Callable, Iterable
 
 import csv
 
-from categories import CATEGORIES, KNOWN, MIN_ROWS_PER_CATEGORY
-from rules import RULES, predict as predict_by_rules
+# The categorizer package is not installed -- `evals/` has no dependencies and no
+# virtual environment -- so its import root is put on sys.path by hand. One
+# folder, named once, here and in test_score.py.
+#
+# It has to happen before the imports below it, which is why this block sits
+# among them instead of at the top with the rest: the `from categorizer...`
+# lines are executed in order, and the path has to exist by the time they run.
+# A formatter that sorts imports will move them and break this; there is no
+# formatter configured for `evals/`, and that is now a reason rather than an
+# omission.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "categorizer" / "src"))
+
+from categorizer.categories import CATEGORIES, KNOWN, MIN_ROWS_PER_CATEGORY
+from categorizer.rules import RULES, predict as predict_by_rules
 
 # The eval set's columns, in order. Checked exactly rather than by lookup, so a
 # renamed or reordered column is an error instead of a silent column of None.

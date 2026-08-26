@@ -1,8 +1,8 @@
 # LandMoney
 
 Personal spending tracker. An ASP.NET Core Web API on top of Postgres with a
-React and TypeScript client, deployed to Azure, and a Python service for
-transaction categorisation arriving later. The client is built into the API's
+React and TypeScript client, deployed to Azure, and a Python service that
+suggests a category for each transaction. The client is built into the API's
 `wwwroot` and served by it: one origin, one image, one deployment.
 
 It is a real application -- meant to be used, not demonstrated -- but the
@@ -15,6 +15,9 @@ reason it exists is a move from .NET development into AI engineering. See
 - Node 24 LTS, for the client
 - Docker Desktop
 - Azure CLI (from slice 3 onwards)
+- `uv`, for the categorizer -- and nothing else Python. It fetches the
+  interpreter named in `src/categorizer/.python-version` itself, so a machine
+  with no Python at all needs no second install
 
 ## Getting started
 
@@ -24,6 +27,11 @@ docker compose up -d
 dotnet tool restore
 dotnet ef database update --project src\LandMoney.Web
 ```
+
+`docker compose up -d` brings up **Postgres and the categorizer** -- the two
+things the application talks to. The app itself is not in that set on purpose:
+it is run from the host, where the debugger and the fast rebuild are. See
+"Running the whole stack in containers" below for the other way.
 
 The connection string lives in user-secrets and is not in any committed file;
 `Program.cs` fails at startup with the command to set it if it is missing.
@@ -43,6 +51,41 @@ that skips it gets a 404 at `/`, because there is genuinely nothing to serve.
 For working on the client itself, run the Vite dev server beside the API and use
 its port instead; `src/landmoney.client/README.md` has the details.
 
+## The categorizer
+
+A FastAPI service holding the rules baseline of #25 -- one endpoint in, one
+category out, and **no model call, by rule**: it exists to be the number a model
+has to beat. `src/categorizer/README.md` is how to run and test it on its own.
+
+Nothing has to be done to use it. `docker compose up -d` starts it and publishes
+it on `127.0.0.1:8000`, which is the default in `appsettings.json`, so a
+transaction posted to a host-run API comes back categorised.
+
+If it is not running, transactions are still saved -- with `category: null`.
+That is the whole design rather than a graceful accident: the transaction is the
+user's data and the category is a guess about it, so the guess is never allowed
+to cost the row. Expect each save to take the full two-second timeout while the
+service is down; a stopped container does not refuse connections, it swallows
+them.
+
+## Running the whole stack in containers
+
+```powershell
+docker compose --profile full up -d --build
+```
+
+That adds the .NET app, on `http://127.0.0.1:8080`, and it is the only
+arrangement in which the app reaches the categorizer **by service name**
+(`http://categorizer:8000`) rather than through a published port -- inside the
+compose network `localhost` is the app's own container, where nothing is
+listening. It is worth doing after changing anything about the image or that
+hop, and it is not the everyday loop: the default `up` does not build the .NET
+image at all.
+
+The schema is still the host's job. The app does not migrate itself (see below),
+and compose has no step that does, so `dotnet ef database update` from the host
+is what puts it there -- it reaches the same database over the published 5433.
+
 ## Where the configuration lives
 
 There is no connection string in this repository and there is not meant to be
@@ -52,7 +95,14 @@ application is running, and the application never asks which:
 | Running                     | `ConnectionStrings:Default` comes from                     |
 | --------------------------- | ---------------------------------------------------------- |
 | On this machine             | User-secrets (`dotnet user-secrets set`)                    |
+| In the `full` compose profile | `docker-compose.yml`, built from the same `.env` Postgres uses |
 | In the deployed container   | A **Container Apps secret**, referenced by an env var       |
+
+`Categorizer:BaseUrl` is the opposite case and is worth the contrast: it names a
+service and carries no credential, so it sits in the committed `appsettings.json`
+with a default of `http://localhost:8000` and is overridden by an environment
+variable (`Categorizer__BaseUrl`) only inside compose. A value being
+configuration is not the same as a value being a secret.
 
 `Program.cs` reads `GetConnectionString("Default")` and throws at startup naming
 the user-secrets command if it is missing. That message is right on a developer

@@ -3,9 +3,10 @@
     python evals/test_score.py
 
 Run as a script rather than through `python -m unittest` from the repository
-root, because `score.py` imports `categories` and `rules` as top-level modules
-and it is the script's own folder that lands on `sys.path`. That is the price of
-having no package and no `uv` project yet, and it is one line of README.
+root, because `score` is imported as a top-level module and it is the script's
+own folder that lands on `sys.path`. That is the price of `evals/` having no
+package of its own, and it is one line of README. (#39 gave the *rules* a
+package and left this half alone on purpose -- see the import block below.)
 
 stdlib `unittest`, not pytest, for the same reason the rest of `evals/` is
 stdlib: nothing here needs a dependency, and the categorizer's toolchain can
@@ -23,9 +24,14 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from categories import CATEGORIES, KNOWN, NO_PREDICTION
-from rules import RULES, predict
-from score import COLUMNS, EvalSetError, Row, load, score
+# score.py puts src/categorizer/src on sys.path as a side effect of being
+# imported, and these two lines rely on that having happened. Deliberately not
+# repeated here: two copies of a path is two places to be wrong, and the import
+# below fails loudly and immediately if the arrangement ever changes.
+from score import COLUMNS, EvalSetError, Row, load, score  # noqa: I001 -- must come first
+
+from categorizer.categories import CATEGORIES, KNOWN, NO_PREDICTION
+from categorizer.rules import RULES, predict
 
 
 def row(category: str, description: str = "irrelevant") -> Row:

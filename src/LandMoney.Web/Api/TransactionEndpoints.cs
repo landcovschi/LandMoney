@@ -1,3 +1,4 @@
+using LandMoney.Web.Categorizing;
 using LandMoney.Web.Data;
 using LandMoney.Web.Models;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -57,6 +58,7 @@ public static class TransactionEndpoints
     private static async Task<Created<TransactionResponse>> CreateAsync(
         CreateTransactionRequest request,
         AppDbContext db,
+        CategorizerClient categorizer,
         CancellationToken cancellationToken)
     {
         var transaction = new Transaction
@@ -82,11 +84,34 @@ public static class TransactionEndpoints
 
             Description = request.Description,
 
-            // Category is left null on purpose: "not categorised yet" is a real
-            // state until the model in slice 4 fills it, and the request type
-            // does not offer the field at all, so a client cannot pre-empt it.
+            // Category is still not set here, and the request type still does not
+            // offer the field, so a client cannot pre-empt it. It is filled in
+            // below instead of at the initializer because the value comes from
+            // another process and may not arrive.
             // CreatedAt is left to the entity's initializer.
         };
+
+        // #39. The category is a guess about the user's data and the transaction
+        // is the user's data, so this line may not be allowed to cost the row:
+        // CategorizerClient turns every failure -- unreachable, slow, a body it
+        // cannot read -- into null, and null is the state Category has been
+        // designed for since #1. Nothing here needs a try/catch, and adding one
+        // would only catch the exceptions that class deliberately lets past,
+        // which is the caller's own cancellation.
+        //
+        // Before SaveChangesAsync rather than after, so the row is written once.
+        // What lost: saving first and updating the row when the answer comes
+        // back, which survives this process dying mid-call and costs two writes,
+        // a second code path and a window in which the API has answered 201 with
+        // a category the database does not have yet. The failure it protects
+        // against is one where the user's transaction is lost, and the tight
+        // timeout in Program.cs already bounds that window to two seconds.
+        //
+        // transaction.Currency, not request.Currency: the handler uppercases it
+        // above, and the categorizer should be shown what is about to be stored
+        // rather than what was typed.
+        transaction.Category = await categorizer.SuggestCategoryAsync(
+            transaction.Description, transaction.Amount, transaction.Currency, cancellationToken);
 
         db.Transactions.Add(transaction);
         await db.SaveChangesAsync(cancellationToken);
