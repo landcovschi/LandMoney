@@ -966,6 +966,29 @@ The short form does a Graph lookup to work out what kind of principal the id
 names, and an account without directory read permission gets a failure about the
 assignee that reads like a bad id. Passing both facts skips the lookup.
 
+**Run the `--scope` commands from PowerShell, not Git Bash**, and this is the
+third outing of one lesson rather than a new one. Git Bash rewrites an argument
+that looks like a Unix path into a Windows path before the program sees it, so
+`--scope "/subscriptions/<sub>/resourceGroups/rg-landmoney"` arrives at ARM as
+something under the Git installation directory, and ARM answers with the only
+thing it can:
+
+```
+ERROR: (MissingSubscription) The request did not have a subscription or a valid
+tenant level resource provider.
+```
+
+An error about a subscription, for a cause that is the shell. It cost two runs
+here before the tell was noticed: `az role assignment list --resource-group
+rg-landmoney` works while `az role assignment list --scope
+"/subscriptions/.../resourceGroups/rg-landmoney"` does not. Same call, same
+permissions, same account -- the only difference is one argument shaped like a
+path. `MSYS_NO_PATHCONV=1` in front of the command fixes it and confirms the
+diagnosis; PowerShell never had the problem. Step 13 records the same rewrite
+turning `docker run -w /w` into `the working directory 'W:/' is invalid`, and
+#53 recorded `curl` being an alias for `Invoke-WebRequest` in the other
+direction. Every runbook line here is PowerShell for that reason.
+
 Narrower scopes were considered and lost. The container app alone is not enough:
 reading the connection string back needs
 `Microsoft.App/containerApps/listSecrets/action`, which no built-in reader role

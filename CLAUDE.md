@@ -1145,6 +1145,16 @@ Use `git -C <path>`, `--project`, `-f` and the equivalents instead of changing
 directory. Skip the `echo` banners. Accept more tool calls in exchange for
 each one being recognisable.
 
+**An argument that looks like a Unix path goes through PowerShell, not Git
+Bash.** Bash rewrites it into a Windows path before the program sees it, and
+every instance so far failed as an error about something else entirely:
+`az role assignment create --scope "/subscriptions/..."` answered
+`MissingSubscription` (#38), `docker run -w /w` answered
+`the working directory 'W:/' is invalid` (#37). `MSYS_NO_PATHCONV=1` in front
+fixes it and is the way to confirm the diagnosis in one command; the PowerShell
+tool never had the problem. Twice is a coincidence, three times with #53's
+`curl.exe` is a rule.
+
 ## Open decisions with a deadline
 
 Recorded here because a comment on a merged pull request is not somewhere
