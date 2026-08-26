@@ -941,6 +941,151 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   `42703: column "migration_id" does not exist`. Dropping that empty
   bookkeeping table lets EF recreate it. A fresh volume never sees this.
 
+- **The categorizer: a Python service, FastAPI, `uv`, in `src/categorizer/` --
+  decided 2026-08-26** (#39). One endpoint, `POST /categorize`: a description, an
+  amount and a currency in, `{category, source}` out. `GET /health` beside it.
+  46 MB image, two stages, non-root uid 1654 to match the .NET one.
+
+  **`categories.py` and `rules.py` moved here out of `evals/` without a character
+  changing**, and that move is the substance of the issue rather than a tidy-up.
+  A service scored through a *copy* of its own logic reports a number about the
+  copy; with one file, the 60.8% macro recall of #25 is a statement about what the
+  API answers. Re-run after the move and it is still exactly 60.8% / 62.2% on 45
+  rows, which is how the move is known to have been a move.
+
+  **`evals/score.py` reaches the package by `sys.path`, not by installing it.**
+  One line, commented, naming `src/categorizer/src`. That keeps
+  `python evals/score.py` a command needing no `uv`, no virtual environment and no
+  network -- the property that let #25 exist before any of this did. What lost:
+  folding `evals/` into the uv project and running it as `uv run evals/score.py`,
+  which gives tidier imports and puts a toolchain requirement on the half of slice
+  4 that deliberately has none. The cost of the route taken is that the import
+  block in `score.py` must not be re-sorted by a formatter -- the path has to be
+  set before the `from categorizer...` lines execute -- and there is no formatter
+  configured for `evals/`, which is now a reason rather than an omission.
+
+  **The response carries `source`, and it is the one thing here that cannot be
+  added afterwards.** `rules` today, `model` later. A row categorised before that
+  field existed can never say where it came from, so the field exists before there
+  is a second producer. `Source.MODEL` is declared with nothing producing it, on
+  purpose. **The .NET side does not store it** -- see "Open decisions with a
+  deadline", which is where the argument and the deadline for that live.
+
+  **Abstention crosses the wire as `category: null`, never as `unknown`.**
+  `rules.predict` returns that sentinel and `categories.py` keeps it outside the
+  vocabulary so the scorer always counts it as a miss; serving the string would
+  put a twelfth value into `transactions.category`, which is the exact failure a
+  closed vocabulary exists to prevent. The sentinel stops at the HTTP boundary and
+  nowhere earlier, so `score.py` still sees it and the number is untouched. What
+  that costs: over HTTP, "the rules abstained" and "the service was down" both
+  reach .NET as null, and only the first carries a `source` nobody stores.
+
+  **The endpoint handler is `def`, not `async def`, and the .NET instinct is
+  wrong here.** `rules.predict` is a synchronous substring scan with no I/O;
+  declaring it `async` would run it on the event loop and block every other
+  request for its duration, where a plain `def` is dispatched to a worker thread
+  by Starlette. In C# `async` is the safe default -- in FastAPI it is a promise
+  not to block, and this function cannot keep it.
+
+  **`Protocol` is the seam, and it is deliberately not `@runtime_checkable`.**
+  `Predictor` takes the whole request and returns the whole response, so an
+  implementation names its own `source` rather than being labelled by
+  configuration from another file. `@runtime_checkable` would allow `isinstance`,
+  and it checks only that the *names* exist -- not the signatures -- so it passes
+  an object whose `predict` takes different arguments. A runtime check weaker than
+  the static one is worse than none. The fake in `tests/` inherits nothing, which
+  is what proves the structural typing.
+
+  **src layout: `src/categorizer/src/categorizer/`.** The doubled name is
+  deliberate. A flat layout lets `import categorizer` succeed from the project
+  root without the package being installed, so a test can pass against source the
+  built wheel does not contain -- and the eval scorer's path insert would point at
+  a folder that is both "the project" and "the import root".
+
+  **`httpx2`, not `httpx`, for `TestClient`** -- and this is #22's and #24's
+  check-the-current-major lesson in a third ecosystem. From memory it is `httpx`;
+  that installs, the tests pass, and Starlette 1.6 prints
+  `StarletteDeprecationWarning: Using httpx with starlette.testclient is
+  deprecated; install httpx2 instead` on every run. The library said so itself,
+  which is the cheap version of the lesson -- the GitHub Action majors had nothing
+  that would. **`uvicorn[standard]` lost** on the mirror-image argument: uvloop and
+  httptools in exchange for a heavier image and a native dependency with no
+  Windows wheel, for milliseconds this service does not spend.
+
+  **`docker-compose.yml` gained two services and a profile.** `docker compose up
+  -d` is now postgres **plus categorizer** -- the two things the application talks
+  to, with the app still run from the host. `docker compose --profile full up -d`
+  adds the app, and is the only arrangement in which the app reaches the
+  categorizer **by service name**; a service with `profiles:` is skipped entirely
+  unless named, so the everyday loop does not build the .NET image. The
+  categorizer's build context is `./src/categorizer` and the app's is the
+  repository root -- opposite calls for the opposite reason, the .NET image having
+  to reach `src/landmoney.client` while nothing in the categorizer reaches outside
+  its own folder. **`evals/` is not in that context and must never need to be:**
+  the scorer imports the service, never the other way round.
+
+  **The healthcheck is the interpreter, because `python:3.13-slim` is as bare as
+  the aspnet image** -- no curl, wget or nc, measured. Unlike the aspnet one it
+  ships something that can do the job, so `python -c "import urllib.request;
+  urllib.request.urlopen(...)"` costs no extra layer. This is the first healthcheck
+  in the repository that anything reads: `depends_on: condition: service_healthy`
+  on the app. The root Dockerfile still has none, and the reason above is
+  unchanged -- Container Apps ignores it and probes from outside.
+
+  **`PYTHONUNBUFFERED=1` is not tidiness.** Python buffers stdout when it is a
+  pipe rather than a terminal, which is exactly what Docker gives it, so without
+  it the last lines before a crash -- the ones saying why -- are lost. The .NET
+  image needs no equivalent because `ILogger` writes through.
+
+  **On the .NET side: a typed client, a two-second timeout, and null on every
+  failure.** `AddHttpClient<CategorizerClient>`, so the handler underneath is
+  pooled and rotated -- the middle ground between a client per request (socket
+  exhaustion) and one static client (a DNS answer cached for ever, which under
+  compose is live: recreating the categorizer gives it a new address; verified by
+  restarting it and watching categorisation resume with no app restart).
+
+  **Two seconds, and the number is chosen against the *broken* case rather than
+  the working one.** Measured 2026-08-26: `docker compose stop categorizer` does
+  **not** fail fast. The SYN went unanswered rather than refused, so the client
+  took the timeout path and not `HttpRequestException` -- so while the service is
+  down, every save costs the full timeout, on the path where the user's
+  transaction is being written. Anything generous would be paid per save by
+  someone who never asked for a category. It is also far below the client's own
+  `REQUEST_TIMEOUT_MS` of 10 s, so this can never be what makes the browser give
+  up.
+
+  **`catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)`
+  is the whole subtlety.** `HttpClient` implements `Timeout` by cancelling, so the
+  timeout and the caller's own cancellation surface as the same exception type.
+  The `when` clause is what tells them apart -- and the half that matters more is
+  the one it lets through: swallowing a real cancellation would carry on and save
+  a transaction for a request whose caller has already gone.
+
+  **The length guard is not about the network and is the one that protects the
+  promise.** `Transaction.Category` is `MaxLength(100)`; a service answering
+  something longer would throw in `SaveChangesAsync` and lose the user's
+  transaction to a failed guess about it. `Transaction.CategoryMaxLength` is now a
+  `const` so the check and the attribute cannot drift.
+
+  **Categorise before `SaveChangesAsync`**, one write. What lost: saving first and
+  updating the row when the answer arrives -- it survives the process dying
+  mid-call, and costs two writes, a second code path, and a window where the API
+  has answered 201 with a category the database does not have. The tight timeout
+  already bounds the window it would protect.
+
+  **21 xUnit tests, and they need no server** -- `HttpMessageHandler` is the seam
+  the way `IEndpointFilter` was in #21, so "timeout" takes 50 ms and "unreachable"
+  needs nothing to be unreachable. What that leaves untested is said out loud in
+  the file: that the client is registered at all, that its base address and
+  timeout come from configuration, and that the endpoint calls it. Those were
+  checked by hand against the running compose stack, which is #39's acceptance
+  test.
+
+  **Nothing builds or tests `src/categorizer/` in CI**, so `build` can be green
+  over a broken service. Left alone deliberately -- #39 did not ask, and slice 5
+  already carries "Evals run in CI on every PR", which is the natural home for
+  both halves of the Python tree at once.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as
@@ -1187,10 +1332,35 @@ tool never had the problem. Twice is a coincidence, three times with #53's
 Recorded here because a comment on a merged pull request is not somewhere
 anyone will look again.
 
-Nothing is open right now. The two that were here -- the schema naming and the
-day boundary -- were settled on 2026-08-18 in #13 and #17, and both records live
-in "The stack, and what was rejected" above. The heading stays so the next one
-has somewhere to go.
+**`transactions.category_source` -- opened 2026-08-26 (#39), due before the
+model adapter (#39's step 4) writes its first row.**
+
+The categorizer answers `{category, source}` and `source` is `rules` today. The
+.NET side reads it, logs it and **does not store it**. There is no column.
+
+Why that is safe now: nothing else can produce a category. `CLAUDE.md` forbids a
+model call until a baseline is scored, so "written before the model adapter
+existed" is a complete and correct answer for every row in the table -- the
+information is recoverable from the date. Adding a column for a value that has
+one possible setting would be schema for its own sake, and #39's checklist did
+not ask for one.
+
+Why it has a deadline rather than being closed: the moment a second producer
+exists, that reasoning stops holding **retroactively for the rows written in
+between**. There is no query and no migration that can recover which of two
+things wrote a category once both are running -- the fact was never recorded.
+This is the same argument that put `source` in the HTTP response before there
+was anything but rules to report, and it is the one part of #39 that cannot be
+fixed afterwards.
+
+So: **the column, the migration and the write must land in the same change as
+the model adapter, and before it is switched on** -- not in the change after it,
+and not "when we start comparing". The comparison is the thing that needs the
+data, and by then it is too late to collect it.
+
+The two that used to be here -- the schema naming and the day boundary -- were
+settled on 2026-08-18 in #13 and #17, and both records live in "The stack, and
+what was rejected" above.
 
 ## Keeping context between sessions
 

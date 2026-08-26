@@ -1,0 +1,71 @@
+# The categorizer service -- #39.
+#
+# The C# parallel, since this is the first uv project in the repository:
+# pyproject.toml is the .csproj, `uv.lock` is packages.lock.json, `uv sync` is
+# `dotnet restore`, and `uv run` is `dotnet run` with the restore folded in.
+# The difference worth knowing up front is that uv also owns the *interpreter*:
+# `.python-version` makes it fetch and use one, where .NET expects the SDK to
+# have been installed by something else.
+
+[project]
+name = "categorizer"
+version = "0.1.0"
+description = "Rules-based transaction categorizer -- the baseline every model has to beat"
+readme = "README.md"
+
+# The floor, matching CLAUDE.md. `.python-version` beside this file names the
+# concrete interpreter developed against, exactly the way global.json names an
+# SDK band while the code targets net10.0: one says what the code needs, the
+# other says what this machine and the image actually run.
+requires-python = ">=3.12"
+
+dependencies = [
+    # Pinned by uv.lock, not by these ranges -- the ranges say what is
+    # compatible, the lock says what was resolved. Same split as a PackageReference
+    # version against packages.lock.json.
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+]
+
+[dependency-groups]
+# The equivalent of a test .csproj's PackageReferences: present for `uv sync`,
+# absent from the image, because the Dockerfile passes --no-dev.
+dev = [
+    "pytest>=8.3",
+    # Not a test framework -- it is what fastapi.testclient.TestClient is built
+    # on. Without it the import fails with a message about the HTTP library
+    # rather than about the test.
+    #
+    # httpx2, not httpx, and this is #22's and #24's "check the current major"
+    # lesson arriving in a third ecosystem. From memory it is `httpx`; that
+    # installs, the tests pass, and Starlette 1.6 prints
+    # `StarletteDeprecationWarning: Using httpx with starlette.testclient is
+    # deprecated; install httpx2 instead` on every run. The library said so
+    # itself, which is the cheap version of the lesson -- the GitHub Action
+    # majors had nothing that would.
+    "httpx2>=2.12",
+]
+
+# uvicorn[standard] lost, and it is the obvious upgrade to reach for later:
+# uvloop and httptools in exchange for a heavier image and a native dependency
+# that has no Windows wheel, so the lock would carry a platform marker for a
+# speed-up this service cannot spend. One substring scan over 109 rules is not
+# where the milliseconds are; the network hop is. Revisit if the model adapter
+# ever makes this endpoint slow enough to measure.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# src layout: the import root is exactly this folder and nothing else. A flat
+# layout would let `import categorizer` succeed from the project root without
+# the package being installed at all, so a test could pass against source that
+# the built wheel does not contain -- and `evals/score.py`'s sys.path insert
+# would then point at a folder that is both "the project" and "the import root".
+# The price is the doubled name in src/categorizer/src/categorizer, which is
+# cosmetic.
+packages = ["src/categorizer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

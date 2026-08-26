@@ -7,8 +7,20 @@ categories and the boundary rules for the awkward rows, what the metric is and
 what it does not capture, and why the baseline abstains instead of guessing.
 This file is only how to run it and how to label.
 
-Nothing here has a dependency. Python 3.12 or newer, stdlib only; the `uv`
-project CLAUDE.md plans arrives with the categorizer service in #39.
+Nothing here has a dependency. Python 3.12 or newer, stdlib only -- and that
+stayed true after #39, which is the point of the `sys.path` line at the top of
+`score.py`.
+
+**The rules are no longer in this folder.** `categories.py` and `rules.py` moved
+to `src/categorizer/src/categorizer/` in #39 and did not change a character.
+`score.py` reaches them by putting that folder on `sys.path` rather than by
+installing the package, so `python evals/score.py` still needs no `uv`, no
+virtual environment and no network. What the move buys: **the scorer and the
+deployed service run the same `predict`**, so 60.8% is a statement about what
+the API answers rather than about a copy of it that can drift.
+
+The consequence to know before editing a rule: it now moves the baseline **and**
+the deployed answer at once.
 
 ## Run it
 
@@ -103,3 +115,11 @@ BOM is handled.
 the Anthropic adapter of slice 4 is another, and the day it exists that function
 is what puts the two numbers side by side. Nothing in `score.py` knows about
 rules beyond the default it passes in `main`.
+
+There is now a **second** seam, and they are deliberately not the same one.
+`Predictor` in `src/categorizer/src/categorizer/predictor.py` is what the
+*service* plugs a model into: it takes the whole request, because a model can
+use the amount and the currency where substring matching cannot, and it returns
+the `source` so a predictor names itself rather than being labelled by
+configuration. This one stays `str -> str` because the metric is about the
+description; widening it would change what the 60.8% was measured on.

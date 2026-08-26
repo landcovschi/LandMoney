@@ -55,6 +55,24 @@ artifacts/
 # overwritten at best and shadow the Linux ones at worst.
 **/node_modules/
 
+# --- Python, arrived with the categorizer in #39 ---
+#
+# The .NET image never copies src/categorizer -- the categorizer has its own
+# Dockerfile and its own context, ./src/categorizer -- but the *context* is sent
+# to the daemon and hashed regardless of what any COPY names. .venv is the one
+# that matters: it is tens of megabytes, it is rebuilt by every `uv sync`, and
+# it is a Windows virtual environment whose scripts carry absolute paths, so
+# there is no circumstance in which a Linux build wants it.
+#
+# `**/` on all of them for the reason at the top of this file: without it these
+# would mean the repository root only, and every one of them lives at depth.
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+
 # --- The client's build output, and the reason this line exists ---
 # wwwroot is git-ignored, so it is invisible in a diff, and it is populated on
 # this machine right now. Without this line the SDK stage starts with the last

@@ -4,6 +4,14 @@ Whatever this scores is the number every model has to beat. It is often
 embarrassingly hard to beat, and that is the exercise rather than a failure of
 it.
 
+**This file moved out of `evals/` in #39 and did not change a character
+otherwise.** That is the whole point of the move: the scorer and the service now
+run the same `predict`, so the 60.8% macro recall of #25 is a statement about
+what the API answers rather than about a copy of it that drifts. `evals/score.py`
+reaches it by putting `src/categorizer/src` on `sys.path`; the service imports it
+like any other module. Editing a rule here now moves the baseline **and** the
+deployed answer at once, which is correct and is worth knowing before doing it.
+
 **Written before a single row was labelled**, which is the strongest available
 answer to the trap #25 names: rules tuned against the rows they are scored on
 have been taught the answers. When the set is labelled, this file is scored as
@@ -20,7 +28,7 @@ after.
 
 from typing import Final
 
-from categories import NO_PREDICTION
+from categorizer.categories import NO_PREDICTION
 
 # Ordered most specific to least. **The order is part of the baseline**, not an
 # implementation detail: `coffee` matches a supermarket bag of beans and a cup

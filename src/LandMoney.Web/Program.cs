@@ -1,4 +1,5 @@
 ﻿using LandMoney.Web.Api;            // MapTransactionEndpoints
+using LandMoney.Web.Categorizing;  // CategorizerClient
 using LandMoney.Web.Data;          // AppDbContext
 using Microsoft.AspNetCore.HttpOverrides; // ForwardedHeaders
 using Microsoft.EntityFrameworkCore; // UseNpgsql
@@ -105,6 +106,60 @@ builder.Services.AddDbContext<AppDbContext>(options => options
 // than its model, and fail at the first query instead of at startup. Nothing
 // checks this, deliberately -- a version check here would be the same startup
 // coupling in a smaller coat.
+
+// --- The Python categorizer -- #39 -------------------------------------------
+//
+// AddHttpClient registers CategorizerClient itself as well as its HttpClient, so
+// the endpoint asks for the typed client and never sees an HttpClient. What the
+// factory is really for is the handler underneath: it is pooled and rotated on a
+// two-minute lifetime, which is the middle ground between a client per request
+// (socket exhaustion) and one static client for the life of the process (a DNS
+// answer cached for ever). Under compose the second is the live one -- recreating
+// the categorizer container gives it a new address.
+//
+// BaseUrl comes from configuration and has a default in appsettings.json, so
+// there is nothing to set for `dotnet run` on this machine: the default is
+// http://localhost:8000, which is where docker-compose publishes the service. In
+// compose the app container overrides it with Categorizer__BaseUrl=http://categorizer:8000
+// -- the service name, because inside that network `localhost` is the app's own
+// container and nothing is listening there. It is the first place in this project
+// where the two words mean different things.
+//
+// Unlike ConnectionStrings:Default this is not thrown for when missing, and the
+// difference is deliberate: a missing connection string means the application
+// cannot do its job, while a missing categorizer means it does its job without a
+// guess attached. Falling back here would hide a typo, though, so a value that is
+// present and unusable still fails at startup, where the message can name it.
+var categorizerBaseUrl = builder.Configuration["Categorizer:BaseUrl"]
+    ?? throw new InvalidOperationException(
+        "Categorizer:BaseUrl is not set. appsettings.json carries the default; "
+        + "override it with the environment variable Categorizer__BaseUrl.");
+
+if (!Uri.TryCreate(categorizerBaseUrl, UriKind.Absolute, out var categorizerUri))
+{
+    throw new InvalidOperationException(
+        $"Categorizer:BaseUrl is '{categorizerBaseUrl}', which is not an absolute URI. "
+        + "It needs a scheme: http://categorizer:8000, not categorizer:8000.");
+}
+
+// Two seconds, and the number is the interesting part rather than the line. The
+// work behind the endpoint is a scan of 109 substrings, so anything over a few
+// milliseconds is the network or a service in trouble; this is the ceiling on how
+// long a user waits for a guess they did not ask for, on the path where their
+// transaction is being saved. CLAUDE.md's rule is that every network client gets
+// a timeout, because without one an outage becomes a hang -- and a hang on the
+// create path would mean losing the transaction to a failed guess about it, which
+// is exactly what #39 forbids.
+//
+// It is deliberately far below the client's own REQUEST_TIMEOUT_MS of 10 s, so
+// this can never be the thing that makes the browser give up.
+builder.Services
+    .AddHttpClient<CategorizerClient>(client =>
+    {
+        client.BaseAddress = categorizerUri;
+        client.Timeout = TimeSpan.FromSeconds(
+            builder.Configuration.GetValue("Categorizer:TimeoutSeconds", 2d));
+    });
 
 var app = builder.Build();
 
