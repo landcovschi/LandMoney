@@ -6,7 +6,7 @@ it.
 
 **This file moved out of `evals/` in #39 and did not change a character
 otherwise.** That is the whole point of the move: the scorer and the service now
-run the same `predict`, so the 60.8% macro recall of #25 is a statement about
+run the same `predict`, so the macro recall printed by the scorer is a statement about
 what the API answers rather than about a copy of it that drifts. `evals/score.py`
 reaches it by putting `src/categorizer/src` on `sys.path`; the service imports it
 like any other module. Editing a rule here now moves the baseline **and** the

@@ -615,6 +615,20 @@ again by itself after 7 days.
        consequences. **This ticks the day real rows replace them**, which is an
        edit to two CSV files and a re-run: nothing in `evals/` knows where a row
        came from
+
+       **A second set landed 2026-08-26 in #47 and this box is still empty.**
+       53 labelled rows and 10 held out, and the owner again asked for them to
+       be written rather than supplied, so the one defect #47 exists to remove
+       survives it. What did change is worth having and is not the same thing:
+       the descriptions are typed rather than composed -- lower case, real
+       Chisinau merchant names, a typo carried over verbatim from the deployed
+       database -- and the currency mix is Moldovan. What did not: the label
+       distribution, because the three-rows-per-category floor and a realistic
+       shape cannot both hold at 53 rows; and the language, which is now a
+       standing decision rather than an oversight after a Russian and Romanian
+       first pass was rejected under `CLAUDE.md`'s English rule. That last one
+       preserves the single most likely way this baseline reads optimistic.
+       `docs/evals.md` section 6 has the full account
 2. [x] **A rules baseline.** String matching on the description. Score it.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat
@@ -647,6 +661,16 @@ again by itself after 7 days.
        everything in this repository is. Descriptions typed in Russian or
        Romanian score close to zero, and that is a finding to record rather than
        patch around -- it is the strongest argument the model half will get
+
+       **Re-scored 2026-08-26 against the second set: macro recall 56.1%,
+       accuracy 56.6% on 53 rows** -- the number that stands. Down 4.7 points,
+       which #47 predicted and called the point of the exercise; read it as the
+       same baseline re-measured against harder rows rather than as the baseline
+       getting worse, since these are two sets and not two runs. The structure
+       is unchanged: **22 of 23 misses are abstentions**, the one confident
+       error is `parking fine` -> `transport` again, and `other` still scores
+       0%. The new merchant names widen the abstention gap exactly as an English
+       substring list would predict
 
        **Scored 2026-08-25: macro recall 60.8%, accuracy 62.2% on 45 rows.**
        That is the number to beat, and it is measured against the synthetic set

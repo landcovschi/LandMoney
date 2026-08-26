@@ -258,7 +258,9 @@ accuracy       62.2%   (28 of 45)
 MACRO RECALL   60.8%   <-- the number
 ```
 
-**60.8% is what every model has to beat.**
+**60.8% was what every model had to beat**, until the set was replaced on
+2026-08-26. Section 6 has the number that stands; this one is kept because it
+is what the misses below are about.
 
 Three things the per-row misses say, all of them about the baseline rather than
 about the set.
@@ -275,3 +277,101 @@ about the set.
   not exist. Across eleven categories that is a hard ceiling of 90.9% on any
   abstaining substring baseline here, and it accounts for 9.1 of the 39.2 points
   this one is missing.
+
+## 6. The second set, and the number that stands
+
+Written 2026-08-26 for #47, which asked for the rows of section 5 to be replaced
+with real spending.
+
+**They are still not real spending.** The owner instructed Claude to produce
+them rather than supply history, the same instruction that produced the first
+set, so the central defect #47 exists to remove is still there and **#47 stays
+open.** What follows is an honest account of what did change, because a second
+synthetic set that pretends to be the fix is worse than the first one.
+
+### Where the rows came from
+
+53 labelled rows and 10 held out, written by Claude on 2026-08-26.
+
+The one source of evidence about how the owner really types was the deployed
+database, which held four rows and three of them were deploy smoke tests:
+
+```
+2026-08-26   7.20 EUR  Coffee after a green deploy
+2026-08-25 200.00 EUR  cofee
+2026-08-25  12.50 EUR  First transaction entered in Azure
+2026-08-25  12.00 EUR  Makaronu (Cyrillic in the original)
+```
+
+Four rows cannot found an eval set. They are enough to show *how* a description
+gets typed -- lower case, no punctuation, a typo left in -- and that shape is
+what the new rows copy.
+
+### What changed, and it is less than #47 asked for
+
+- **Descriptions are as typed rather than as written up.** Lower case, no
+  trailing punctuation, and `cofee` carried over verbatim from the database
+  against `coffee beans 1kg`. The first set's `Latte and a croissant` and
+  `Bakery, bread and buns` are the voice of somebody composing an example.
+- **Merchant names are the real ones**: `linella`, `kaufland`, `fidesco`, `nr1`,
+  `la placinte`, `starnet`, `felicia pharmacy`, where the first set had
+  `Supermarket`, `Bakery` and `Market`.
+- **The currency mix is Moldovan** -- 49 MDL, 3 EUR, 1 USD -- rather than spread
+  for variety.
+- **Eight rows more**, 53 against 45, and the counts tilt toward the categories
+  a person actually meets weekly: `groceries` 8 and `eating-out` 7 against
+  `fees`, `gifts` and `other` at the floor of 3.
+
+### What did not change, and one thing that got worse
+
+1. **The label distribution is still chosen, not observed.** #47 requires at
+   least three rows in every category and `score.py` warns below that, so the
+   set cannot be tilted to a realistic shape without breaking the rule that
+   makes the macro average readable. This is a genuine conflict between the
+   metric and realism, and the metric wins while the set is this small.
+2. **The labeller and the measured thing still share an author.** The owner
+   reviewed the labels, which is worth something and is not the same thing.
+3. **Every description is still English, and this is now a decision rather than
+   an oversight.** A first pass wrote them in Russian and Romanian -- which is
+   how they would really be typed, and which is exactly what section 3 predicts
+   would send the baseline close to zero. The owner ruled that everything in the
+   repository is English, per `CLAUDE.md`. So the single most likely way this
+   baseline reads optimistic is now deliberately preserved, and the day it is
+   tested is the day that rule is relaxed for `evals/*.csv` alone.
+
+That third point is the one to weigh: in English, at 53 rows, a plausible
+personal-finance set converges on the set it replaces. Seven descriptions
+survive from the first set unchanged -- `haircut`, `dry cleaning`, `blood
+tests`, `oil change`, `parking fine`, `flowers`, `netflix` -- not by oversight
+but because there is no other way to write them.
+
+### The number
+
+Rules as they stand, no rule edited after seeing a miss, `score.py` run once
+after labelling was finished:
+
+```
+accuracy       56.6%   (30 of 53)
+MACRO RECALL   56.1%   <-- the number
+```
+
+**56.1% is what every model has to beat.**
+
+It moved down 4.7 points, which #47 predicted and called the point of the
+exercise rather than a failure of it. Read that drop carefully, though: section
+2 point 5 puts the noise floor at about 3 points on a set this size, and these
+are **two different sets** rather than two runs over one, so the honest reading
+is "the same baseline, re-measured against harder rows", not "the baseline got
+4.7 points worse".
+
+The structure of the misses is unchanged, which is the useful part:
+
+- **22 of the 23 misses are abstentions**, against 16 of 17 before. Substring
+  matching still fails here by not covering rather than by being wrong, and the
+  new merchant names (`linella`, `fidesco`, `nr1`) widen the gap exactly as
+  expected -- an English substring list has never heard of them.
+- **The one confident error is `parking fine` -> `transport` again**, `parking`
+  still sitting above `fine`. The collision was preserved on purpose when the
+  rows were written, and the rule is still left alone.
+- **`other` still scores 0% and still structurally cannot score anything else**,
+  so the 90.9% hard ceiling on any abstaining substring baseline is unchanged.

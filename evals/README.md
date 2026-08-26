@@ -16,8 +16,8 @@ to `src/categorizer/src/categorizer/` in #39 and did not change a character.
 `score.py` reaches them by putting that folder on `sys.path` rather than by
 installing the package, so `python evals/score.py` still needs no `uv`, no
 virtual environment and no network. What the move buys: **the scorer and the
-deployed service run the same `predict`**, so 60.8% is a statement about what
-the API answers rather than about a copy of it that can drift.
+deployed service run the same `predict`**, so the baseline number is a statement
+about what the API answers rather than about a copy of it that can drift.
 
 The consequence to know before editing a rule: it now moves the baseline **and**
 the deployed answer at once.
@@ -45,18 +45,30 @@ no package yet.
 
 ## The state of this today
 
-`transactions.csv` holds **45 labelled rows and none of them are real spending**,
-and `holdout.csv` holds 8 more with the category column empty. #25 asks for
-transactions out of the owner's own history; PR #44 left the files empty rather
-than invent them, and on 2026-08-25 the owner asked for them to be written
-instead. The baseline scores **60.8% macro recall** against them.
+`transactions.csv` holds **53 labelled rows and none of them are real spending**,
+and `holdout.csv` holds 10 more with the category column empty. The baseline
+scores **56.1% macro recall** against them.
 
-Read that number with `docs/evals.md` section 5 open, which is where the four
-things it does not mean are written down. The short version: the label
-distribution was chosen rather than observed, the descriptions are English, and
-the labels were produced by the same kind of thing slice 4 is going to score
-against them. Replacing these rows with real ones is a change to two CSV files
-and nothing else -- the loader, the metric and the rules do not know where a row
+**#47 is still open**, and this is the second set to leave it open. #25 asked for
+transactions out of the owner's own history; PR #44 left the files empty rather
+than invent them; on 2026-08-25 the owner asked for rows to be written instead,
+and on 2026-08-26 asked for them to be written again rather than supplied. The
+rows were rewritten to be typed rather than composed -- lower case, real
+merchant names, a typo carried over from the deployed database, an MDL-dominant
+currency mix -- and that is a real improvement over the first set and is not
+what #47 asks for.
+
+Read the number with `docs/evals.md` **section 6** open, which is where what
+changed and what did not is written down. The short version: the label
+distribution is still chosen rather than observed, because the three-rows-per-
+category floor and a realistic shape cannot both hold at this size; the labels
+were still produced by the same kind of thing slice 4 will be scored against;
+and the descriptions are still English, which is now a standing decision rather
+than an oversight and is the single most likely way this baseline reads
+optimistic.
+
+Replacing these rows with real ones is still a change to two CSV files and
+nothing else -- the loader, the metric and the rules do not know where a row
 came from.
 
 Everything around the data -- the vocabulary, the metric, the baseline, the
@@ -122,4 +134,4 @@ There is now a **second** seam, and they are deliberately not the same one.
 use the amount and the currency where substring matching cannot, and it returns
 the `source` so a predictor names itself rather than being labelled by
 configuration. This one stays `str -> str` because the metric is about the
-description; widening it would change what the 60.8% was measured on.
+description; widening it would change what the baseline was measured on.
