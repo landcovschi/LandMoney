@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json;
 using LandMoney.Web.Categorizing;
@@ -68,17 +68,29 @@ public class CategorizerClientTests
             Content = new StringContent(body, Encoding.UTF8, "application/json"),
         });
 
-    private static Task<string?> Ask(CategorizerClient client, CancellationToken cancellationToken = default)
+    private static Task<CategorySuggestion?> Ask(CategorizerClient client, CancellationToken cancellationToken = default)
         => client.SuggestCategoryAsync("Dinner at the pizza place", 42.50m, "EUR", cancellationToken);
 
     // --- the two normal answers ----------------------------------------------
 
     [Fact]
-    public async Task A_categorised_answer_comes_back_as_the_category()
+    public async Task A_categorised_answer_comes_back_as_the_category_and_its_source()
     {
         var client = ClientThat((_, _) => Json("""{"category":"eating-out","source":"rules"}"""));
 
-        Assert.Equal("eating-out", await Ask(client));
+        Assert.Equal(new CategorySuggestion("eating-out", "rules"), await Ask(client));
+    }
+
+    [Fact]
+    public async Task The_source_is_whatever_answered_and_not_a_name_this_side_chose()
+    {
+        // #59's rule that the truth about which code ran must not live in a
+        // different file from the code that ran. Nothing here knows the word
+        // "model" -- it arrives from the process that produced the answer, which
+        // is why switching the predictor on the Python side needs no change here.
+        var client = ClientThat((_, _) => Json("""{"category":"eating-out","source":"model"}"""));
+
+        Assert.Equal(new CategorySuggestion("eating-out", "model"), await Ask(client));
     }
 
     [Fact]
@@ -172,7 +184,65 @@ public class CategorizerClientTests
         var exact = new string('x', Transaction.CategoryMaxLength);
         var client = ClientThat((_, _) => Json($$"""{"category":"{{exact}}","source":"rules"}"""));
 
-        Assert.Equal(exact, await Ask(client));
+        Assert.Equal(new CategorySuggestion(exact, "rules"), await Ask(client));
+    }
+
+    // --- an answer that cannot say who produced it -- #59 ---------------------
+
+    [Theory]
+    [InlineData("""{"category":"eating-out"}""")]          // the field is absent
+    [InlineData("""{"category":"eating-out","source":null}""")]
+    [InlineData("""{"category":"eating-out","source":""}""")]
+    public async Task A_category_whose_source_is_not_named_is_refused(string body)
+    {
+        // The guard that looks like over-caution and is not.
+        // transactions.category_source exists because provenance cannot be
+        // reconstructed after the fact, so storing this row would re-open the hole
+        // the column was added to close -- one row at a time, invisibly, and only
+        // for the rows written while the service was misbehaving. Refusing costs
+        // one guess.
+        //
+        // Only reachable if the service breaks its own contract: contracts.py
+        // declares `source` non-optional.
+        var client = ClientThat((_, _) => Json(body));
+
+        Assert.Null(await Ask(client));
+    }
+
+    [Fact]
+    public async Task A_source_longer_than_the_column_is_refused()
+    {
+        // The same failure the overlong category has, against the narrower column:
+        // stored, it throws in SaveChangesAsync and takes the user's transaction
+        // with it. One character over, so the test fails if the comparison is ever
+        // written as >=.
+        var overlong = new string('x', Transaction.CategorySourceMaxLength + 1);
+        var client = ClientThat((_, _) =>
+            Json($$"""{"category":"eating-out","source":"{{overlong}}"}"""));
+
+        Assert.Null(await Ask(client));
+    }
+
+    [Fact]
+    public async Task A_source_exactly_as_long_as_the_column_is_kept()
+    {
+        var exact = new string('x', Transaction.CategorySourceMaxLength);
+        var client = ClientThat((_, _) => Json($$"""{"category":"eating-out","source":"{{exact}}"}"""));
+
+        Assert.Equal(new CategorySuggestion("eating-out", exact), await Ask(client));
+    }
+
+    [Fact]
+    public async Task An_abstention_that_names_a_source_is_still_just_null()
+    {
+        // `{category: null, source: "model"}` is what the adapter answers when the
+        // model declines, and there is nothing to store: a source with no category
+        // would be a row claiming a producer for a value that does not exist. The
+        // absence lives in the `?` on the return type rather than in two fields the
+        // caller has to check against each other.
+        var client = ClientThat((_, _) => Json("""{"category":null,"source":"model"}"""));
+
+        Assert.Null(await Ask(client));
     }
 
     // --- no categorizer at all --------------------------------------------------

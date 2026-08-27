@@ -745,8 +745,46 @@ again by itself after 7 days.
        Inside `build` rather than in a job of its own, because `build` is the
        required check and a new job protects nothing until the ruleset names
        it
-4. [ ] An Anthropic adapter behind a port, plus a fake with canned responses so
+4. [x] An Anthropic adapter behind a port, plus a fake with canned responses so
        tests never hit the network and never cost money
+
+       **Landed 2026-08-28** in #59, and the half that had to come first did:
+       `transactions.category_source` -- the column, the migration and the write
+       path -- is in the same change and ahead of the adapter, which closes the
+       one entry "Open decisions with a deadline" has ever held. Existing rows
+       were **backfilled to `rules`**, argued rather than done quietly, on the
+       grounds that it is provably true and not merely defensible. Checked
+       against the running database: 2 of 21 rows backfilled, 19 untouched, and
+       zero rows where a category exists without a source or the reverse
+
+       **The seam cost nothing, which is what #39 built it for.**
+       `AnthropicPredictor` names `Predictor` nowhere -- structural typing, so no
+       import and no base class -- and `get_predictor` was the one line that
+       changed, exactly as `main.py`'s comment predicted a Protocol would buy
+
+       **The decision the issue actually turned on was the timeout**, and it
+       became two: 2 s to connect, 8 s overall. #39's two seconds was chosen
+       against the *broken* case, and a model does not fit in it; splitting the
+       clocks gives the two failures two budgets rather than making them share
+       one. Measured: **142 ms** with the categorizer up and a category stored,
+       **2043 ms** with it stopped and no category -- so #39's fast-failure
+       property survives unchanged while a live model gets six more seconds
+
+       Two things were wrong before they were measured, and both are in
+       `CLAUDE.md`. `BaseUrl` at `http://localhost:8000` made the new budget
+       *worse* than the old one -- the dead `::1` attempt ate the whole two
+       seconds and a save took the full eight and stored nothing, against 156 ms
+       once the key held `127.0.0.1`. And `ConnectTimeout` expires as a
+       cancellation rather than as `HttpRequestException`, so the timeout log
+       named the eight-second limit for a call that gave up at 2.15 s
+
+       **What is not verified, and it is the honest limit:** no request has ever
+       been accepted by the API, because there is no key on this machine. A
+       deliberately broken key was run end to end -- a real 401, a logged
+       traceback, `200 {"category": null, "source": "model"}`, which is #59's
+       acceptance test -- and the request shape was checked against the SDK's own
+       types. Whether the model is any good at this is step 5's question and it
+       needs a key
 5. [ ] Run the evals. Did the model beat the baseline? Record the number
 
 **Done when:** the improvement over the baseline can be quoted as a number, and

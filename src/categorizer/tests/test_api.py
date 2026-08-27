@@ -22,7 +22,8 @@ from fastapi.testclient import TestClient
 
 from categorizer.categories import CATEGORIES, NO_PREDICTION
 from categorizer.contracts import CategorizeRequest, CategorizeResponse, Category, Source
-from categorizer.main import app, get_predictor
+from categorizer.main import app, build_predictor, get_predictor
+from categorizer.predictor import RulesPredictor
 from categorizer.rules import RULES, predict as predict_by_rules
 
 
@@ -149,6 +150,55 @@ def test_the_predictor_can_be_replaced_without_touching_the_endpoint():
     finally:
         # A leaked override changes every test that runs after this one, in file
         # order, which is the worst kind of failure to read.
+        app.dependency_overrides.clear()
+
+
+# --- which predictor is behind the port -- #59 -------------------------------
+
+
+def test_nothing_configured_is_the_rules():
+    """The default has to stay the baseline: `docker compose up`, a fresh clone and
+    every CI run set nothing, and none of them should spend money."""
+    assert isinstance(build_predictor({}), RulesPredictor)
+
+
+@pytest.mark.parametrize("value", ["rules", "RULES", " rules ", "", "   "])
+def test_the_rules_are_the_answer_to_blank_and_to_their_own_name(value: str):
+    """Blank included deliberately: `${CATEGORIZER_PREDICTOR:-}` in a compose file
+    and a Container Apps variable set to nothing both arrive as an empty string, and
+    neither means "refuse to start"."""
+    assert isinstance(build_predictor({"CATEGORIZER_PREDICTOR": value}), RulesPredictor)
+
+
+@pytest.mark.parametrize("value", ["modle", "anthropic", "claude", "opus", "true"])
+def test_an_unrecognised_predictor_refuses_to_start(value: str):
+    """**The most valuable test in this file**, because of which way the mistake
+    points.
+
+    A typo that fell back to the rules would serve the baseline while the deployment
+    believed a model was running, and #60 would record that number as a model
+    result. Nothing would report it -- the service is healthy, the answers are
+    plausible, the score is simply the old one. A container that will not start says
+    so in one line.
+    """
+    with pytest.raises(ValueError, match="CATEGORIZER_PREDICTOR"):
+        build_predictor({"CATEGORIZER_PREDICTOR": value})
+
+
+def test_a_canned_model_answer_reaches_the_client_unchanged():
+    """The seam end to end: a predictor naming itself `model` is served as `model`.
+
+    Canned, through `dependency_overrides`, so this costs nothing and needs no key --
+    and it is what the .NET side reads to write `transactions.category_source`.
+    """
+    app.dependency_overrides[get_predictor] = FakePredictor
+    try:
+        with TestClient(app) as client:
+            assert post(client, "anything at all").json() == {
+                "category": "other",
+                "source": "model",
+            }
+    finally:
         app.dependency_overrides.clear()
 
 

@@ -184,17 +184,40 @@ else if (!Uri.TryCreate(categorizerBaseUrl, UriKind.Absolute, out categorizerUri
         + "It needs a scheme: http://categorizer:8000, not categorizer:8000.");
 }
 
-// Two seconds, and the number is the interesting part rather than the line. The
-// work behind the endpoint is a scan of 109 substrings, so anything over a few
-// milliseconds is the network or a service in trouble; this is the ceiling on how
-// long a user waits for a guess they did not ask for, on the path where their
-// transaction is being saved. CLAUDE.md's rule is that every network client gets
-// a timeout, because without one an outage becomes a hang -- and a hang on the
-// create path would mean losing the transaction to a failed guess about it, which
-// is exactly what #39 forbids.
+// **Two numbers since #59, and this is the decision that issue actually turned
+// on.** #39 gave the whole call two seconds, and the number was chosen against the
+// *broken* case rather than the working one: `docker compose stop categorizer`
+// leaves the SYN unanswered rather than refused, so while the service is down
+// every save pays the full timeout on the path where the user's transaction is
+// being written. A scan of 109 substrings needs milliseconds, so two seconds cost
+// nothing when the service was up.
 //
-// It is deliberately far below the client's own REQUEST_TIMEOUT_MS of 10 s, so
-// this can never be the thing that makes the browser give up.
+// A model call does not fit in two seconds, and the three routes #59 lists are all
+// worse than they look. Keeping 2 s makes the deployed behaviour "rules or
+// nothing" without saying so -- the failure that hides itself. Raising the single
+// number re-prices the outage the 2 s was chosen for: eight seconds per save,
+// every save, while the service is down. Categorising after the save is the
+// architecturally honest answer, reverses #39's explicit "before SaveChangesAsync"
+// decision, and needs somewhere to put follow-up work; it is its own issue.
+//
+// So the two failures are given two budgets, because they were only ever one
+// number by accident:
+//
+//   ConnectTimeout   how long to wait for a service that is not there   2 s
+//   Timeout          how long to wait for one that is thinking          8 s
+//
+// That keeps #39's measured property exactly -- a stopped categorizer still fails
+// in two seconds, because that failure is a connection that never completes -- and
+// spends the extra six only on a service that answered the SYN and is working.
+// Both stay below the client's own REQUEST_TIMEOUT_MS of 10 s, so neither can be
+// what makes the browser give up.
+//
+// What it does not cover, said out loud: a service that accepts the connection and
+// then hangs costs the full eight seconds. That is the trade, and it is the right
+// way round -- accepting a connection is evidence something is alive.
+//
+// Both are configuration rather than constants, so #60 can measure the model's
+// real latency and move them without a code change.
 builder.Services
     .AddHttpClient<CategorizerClient>(client =>
     {
@@ -208,7 +231,36 @@ builder.Services
         }
 
         client.Timeout = TimeSpan.FromSeconds(
-            builder.Configuration.GetValue("Categorizer:TimeoutSeconds", 2d));
+            builder.Configuration.GetValue("Categorizer:TimeoutSeconds", 8d));
+    })
+    // ConfigurePrimaryHttpMessageHandler replaces the primary handler, and the
+    // default already is a SocketsHttpHandler -- so this is the same handler with
+    // one property set, not a different transport. The factory keeps rotating it on
+    // its two-minute lifetime either way, which is the DNS behaviour the typed
+    // client was registered for.
+    //
+    // ConnectTimeout applies to establishing a connection, so a pooled one skips it
+    // entirely; it is paid on the first call and again after the service dies and
+    // the pooled connection with it, which is exactly when it is wanted.
+    //
+    // **Its expiry surfaces as a cancellation, not as HttpRequestException**, which
+    // is the opposite of what was written here first and was corrected by measuring
+    // it: a save against an unreachable categorizer gave up after 2.15 s on
+    // CategorizerClient's `OperationCanceledException` branch. So both clocks land
+    // on the same catch, and that branch logs how long it actually waited rather
+    // than naming one of the two limits and being wrong half the time.
+    //
+    // **The other measurement, and it cost the default in appsettings.json:** with
+    // BaseUrl at `http://localhost:8000` this budget made things strictly worse. The
+    // name resolves to `::1` first on Windows, nothing listens there, Docker Desktop
+    // swallows the attempt rather than refusing it, and the dead attempt eats the
+    // whole two seconds before the IPv4 fallback -- a save took the full eight
+    // seconds and stored no category, against 156 ms once the key held an address.
+    // The fix is the address, not a larger number here.
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        ConnectTimeout = TimeSpan.FromSeconds(
+            builder.Configuration.GetValue("Categorizer:ConnectTimeoutSeconds", 2d)),
     });
 
 // #52. Everything about which provider, and what happens when there is none, is

@@ -1,4 +1,4 @@
-using LandMoney.Web.Categorizing;
+﻿using LandMoney.Web.Categorizing;
 using LandMoney.Web.Data;
 using LandMoney.Web.Models;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -110,8 +110,17 @@ public static class TransactionEndpoints
         // transaction.Currency, not request.Currency: the handler uppercases it
         // above, and the categorizer should be shown what is about to be stored
         // rather than what was typed.
-        transaction.Category = await categorizer.SuggestCategoryAsync(
+        //
+        // #59: the category and the name of what produced it are set together, from
+        // one nullable value, so the two columns cannot disagree. Writing them from
+        // two separate calls -- or defaulting the source to "rules" here -- is what
+        // the single record exists to prevent: a row saying `model` because
+        // configuration said so rather than because a model answered.
+        var suggestion = await categorizer.SuggestCategoryAsync(
             transaction.Description, transaction.Amount, transaction.Currency, cancellationToken);
+
+        transaction.Category = suggestion?.Category;
+        transaction.CategorySource = suggestion?.Source;
 
         db.Transactions.Add(transaction);
         await db.SaveChangesAsync(cancellationToken);

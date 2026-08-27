@@ -90,6 +90,44 @@ public class Transaction
     [MaxLength(CategoryMaxLength)]
     public string? Category { get; set; }
 
+    /// <summary>How long a category source may be. Public because the tests assert against it.</summary>
+    // 20 rather than 100, and the difference is the point: Category holds whatever
+    // vocabulary the categorizer has, and this holds a value from a list this
+    // application owns -- `rules`, `model`, and `human` when #F lands. A wide
+    // column would invite a sentence.
+    public const int CategorySourceMaxLength = 20;
+
+    /// <summary>Which producer wrote <see cref="Category"/>: `rules`, `model`, later `human`.</summary>
+    // The open decision with a deadline from CLAUDE.md, closed here because #59
+    // puts a second producer behind the categorizer's port. Until now every
+    // category in this table came from the rules by construction -- nothing else
+    // could write one -- so the provenance was recoverable from the date. The
+    // moment a model can answer, that stops holding **retroactively for the rows
+    // written in between**, and no migration can recover a fact that was never
+    // recorded. Which is why this column had to arrive in the same change as the
+    // adapter and before it was switched on, rather than "when we start
+    // comparing": the comparison is the thing that needs the data.
+    //
+    // Nullable, for the same reason OwnerId is: the column arrives on a table that
+    // already holds rows. The migration backfills the rows that *have* a category
+    // to `rules`, which is provably true rather than merely defensible -- the
+    // request contract has never offered the field, CategorizerClient is the only
+    // writer, and CLAUDE.md forbade a model call until a baseline was scored. Rows
+    // with no category keep a null source, because "nothing wrote a category" has
+    // no producer to name.
+    //
+    // Not an enum, and not a lookup table. An enum here would be a C# type mapped
+    // to a database value, so adding `human` in #F becomes a schema conversation
+    // rather than a string; and the honest reason a lookup table is wrong is that
+    // this column records what happened, not what is allowed. The set is closed
+    // where it matters -- CategorizerClient refuses a source it cannot store, and
+    // the endpoint names `rules`/`model` nowhere: the value is whatever the
+    // implementation that answered called itself, which is #59's rule that the
+    // truth about which code ran must not live in a different file from the code
+    // that ran.
+    [MaxLength(CategorySourceMaxLength)]
+    public string? CategorySource { get; set; }
+
     // When the row was recorded, which is a different fact from when the money was
     // spent. Set here rather than by a database default so the value is visible
     // without a round trip; the cost is that the application clock is

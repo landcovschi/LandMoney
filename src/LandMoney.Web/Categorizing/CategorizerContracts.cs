@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace LandMoney.Web.Categorizing;
 
@@ -22,13 +22,19 @@ internal sealed record CategorizeRequest(string Description, decimal Amount, str
 // the Python type's docstring for why the "unknown" sentinel stops at that
 // boundary rather than being served.
 //
-// Source is read and logged and deliberately not stored. Everything this
-// application can write today came from the rules, because CLAUDE.md forbids a
-// model call until a baseline is scored, so "written before the model adapter
-// existed" is a complete answer for every row now in the table. The column has
-// to arrive in the same change as the model and before it -- recorded under
-// "Open decisions with a deadline" in CLAUDE.md, because that is the one thing
-// here that cannot be fixed afterwards.
+// Source was read, logged and not stored until #59; it is now written to
+// transactions.category_source, which is the open decision with a deadline from
+// CLAUDE.md being closed in the same change that put a model behind the port.
+// Until then every category in the table came from the rules by construction, so
+// the provenance was recoverable from the date -- and that stops being true
+// retroactively the moment a second producer runs.
+//
+// Still `string?` on the wire although the Python side declares a non-optional
+// `Source` enum, and that is not laziness. This record describes what may arrive
+// from another process, not what that process promises: a body missing the field
+// deserialises here rather than throwing, and CategorizerClient decides what to do
+// about it. It refuses the whole answer -- see there for why a category whose
+// producer cannot be named is exactly what the column above exists to prevent.
 //
 // JsonPropertyName on both, although JsonSerializerDefaults.Web would match
 // these case-insensitively anyway. The attribute is what makes the mapping

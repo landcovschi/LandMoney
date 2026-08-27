@@ -20,6 +20,19 @@ readme = "README.md"
 requires-python = ">=3.12"
 
 dependencies = [
+    # #59, the model behind the port. Version 1.x deliberately, and the major is
+    # load-bearing rather than habit: `anthropic` 1.0 moved the SDK from httpx to
+    # **httpx2** and dropped Python 3.9. httpx2 is the same swap the dev group made
+    # for `TestClient` in #39, so the two halves of this project now agree on one
+    # HTTP library instead of pulling in both -- and an `anthropic.Timeout` is an
+    # `httpx2.Timeout`, so a `httpx.Timeout` handed to the client is rejected at
+    # request time rather than at import.
+    #
+    # The one dependency #59 needs, and it earns its place the way the others do:
+    # the alternative is POSTing to /v1/messages by hand, which means owning
+    # retries, streaming, error typing and the beta headers for a saving of one
+    # package.
+    "anthropic>=1.0",
     # Pinned by uv.lock, not by these ranges -- the ranges say what is
     # compatible, the lock says what was resolved. Same split as a PackageReference
     # version against packages.lock.json.
