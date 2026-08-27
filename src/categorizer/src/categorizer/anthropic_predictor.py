@@ -94,6 +94,21 @@ class AnthropicPredictor:
         self._max_tokens = max_tokens
         self._effort = effort
 
+    # Read-only, and they exist for #60 rather than for this class. A score is
+    # only reproducible if what produced it is written down beside it, and the
+    # alternative -- having `evals/score.py` re-read CATEGORIZER_MODEL and the
+    # defaults itself -- is a second copy of `from_env`'s resolution, which is
+    # the one place a scorer could report a model it did not run. Nothing here
+    # is settable: the adapter is configured once, at construction.
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @property
+    def effort(self) -> str:
+        return self._effort
+
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "AnthropicPredictor":
         """Build the real client. The one place a network-capable object is made.

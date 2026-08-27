@@ -36,12 +36,16 @@ from score import (  # noqa: I001 -- must come first
     BASELINE,
     COLUMNS,
     DEFAULT_SET,
+    PREDICTORS,
     CategoryScore,
     EvalSetError,
     Report,
     Row,
+    build_predictor,
     check,
     load,
+    render_confusion,
+    render_misses,
     score,
 )
 
@@ -62,7 +66,8 @@ def row(category: str, description: str = "irrelevant") -> Row:
 
 
 def always(answer: str):
-    return lambda _description: answer
+    """A predictor. Takes the whole Row since #60 -- see `score`'s docstring."""
+    return lambda _row: answer
 
 
 class MetricTests(unittest.TestCase):
@@ -94,7 +99,7 @@ class MetricTests(unittest.TestCase):
     def test_perfect_predictions_score_one_hundred(self):
         # An oracle: the description is the label, and the predictor returns it.
         rows = [row(c, description=c) for c in CATEGORIES]
-        report = score(rows, lambda description: description)
+        report = score(rows, lambda r: r.description)
 
         self.assertEqual(report.macro_recall, 1.0)
         self.assertEqual(report.accuracy, 1.0)
@@ -145,6 +150,58 @@ class MetricTests(unittest.TestCase):
 
         self.assertEqual(report.confusions[("eating-out", "groceries")], 2)
         self.assertEqual(report.confusions[("transport", "groceries")], 1)
+
+    def test_the_abstention_rate_counts_refusals_and_not_wrong_answers(self):
+        """#60: the distinction the metric cannot make, made beside it.
+
+        Two systems with identical macro recall, one of which declines and one of
+        which answers confidently and wrongly. `abstention_rate` is the only thing
+        in the report that tells them apart, which is why it is reported at all.
+        """
+        rows = [row("groceries"), row("transport")]
+
+        abstaining = score(rows, always(NO_PREDICTION))
+        confidently_wrong = score(rows, always("fees"))
+
+        self.assertEqual(abstaining.macro_recall, confidently_wrong.macro_recall)
+        self.assertEqual(abstaining.abstention_rate, 1.0)
+        self.assertEqual(abstaining.confident_errors, 0)
+        self.assertEqual(confidently_wrong.abstention_rate, 0.0)
+        self.assertEqual(confidently_wrong.confident_errors, 2)
+
+    def test_correct_plus_abstentions_plus_confident_errors_is_every_row(self):
+        """The three add up, which is what makes reading two of them enough.
+
+        `abstentions` is derived from the confusion counter rather than counted,
+        so this is the assertion that the derivation is exact rather than nearly
+        right -- it fails the moment an abstention can be scored as correct.
+        """
+        rows = [row("groceries"), row("groceries"), row("transport"), row("fees")]
+        report = score(
+            rows,
+            lambda r: {
+                "groceries": "groceries",
+                "transport": NO_PREDICTION,
+                "fees": "housing",
+            }[r.category],
+        )
+
+        self.assertEqual(report.correct, 2)
+        self.assertEqual(report.abstentions, 1)
+        self.assertEqual(report.confident_errors, 1)
+        self.assertEqual(
+            report.correct + report.abstentions + report.confident_errors, report.total
+        )
+
+    def test_a_miss_carries_the_row_it_missed(self):
+        """Not the count -- the row. #60 asks which rows, and `other` by name."""
+        rows = [row("other", description="parcel by post"), row("gifts")]
+        report = score(rows, always(NO_PREDICTION))
+
+        self.assertEqual(len(report.misses), 2)
+        missed = {m.row.category: m for m in report.misses}
+        self.assertEqual(missed["other"].row.description, "parcel by post")
+        self.assertTrue(missed["other"].abstained)
 
 
 class RuleTests(unittest.TestCase):
@@ -324,6 +381,7 @@ class BaselineTests(unittest.TestCase):
         """A baseline file. The defaults describe `self.report((2, 1))`."""
         recorded = {
             "set": "transactions.csv",
+            "predictor": "rules",
             "rows": 2,
             "accuracy": 0.5,
             "macro_recall": 0.5,
@@ -351,11 +409,17 @@ class BaselineTests(unittest.TestCase):
             confusions=Counter(),
         )
 
-    def check(self, report: Report, baseline: Path, name: str = "transactions.csv"):
+    def check(
+        self,
+        report: Report,
+        baseline: Path,
+        name: str = "transactions.csv",
+        predictor: str = "rules",
+    ):
         """Run the comparison, returning its exit code and what it said."""
         stderr = io.StringIO()
         with redirect_stderr(stderr):
-            code = check(report, Path(name), baseline)
+            code = check(report, Path(name), baseline, predictor)
         return code, stderr.getvalue()
 
     def test_a_report_that_reproduces_the_baseline_passes(self):
@@ -451,6 +515,40 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("macro_recall", said)
 
+    def test_a_model_run_is_not_compared_against_the_rules_baseline(self):
+        """#60's guard, and the reason it is exit 1 rather than exit 2.
+
+        The whole point of the issue is that the two predictors score
+        differently. Comparing one against the other's recorded number would
+        report the improvement as drift, in a message telling whoever read it to
+        update the baseline -- which would overwrite the rules number with the
+        model's and destroy the only thing there is to compare against.
+        """
+        code, said = self.check(self.report((2, 2)), self.baseline(), predictor="model")
+
+        self.assertEqual(code, 1)
+        self.assertIn("nothing to compare", said)
+
+    def test_a_baseline_that_does_not_say_which_predictor_is_exit_1(self):
+        """A number with no predictor beside it is not a baseline, it is a number."""
+        recorded = self.baseline()
+        recorded.write_text(
+            json.dumps(
+                {"set": "transactions.csv", "rows": 2, "accuracy": 0.5, "macro_recall": 0.5}
+            ),
+            encoding="utf-8",
+        )
+
+        code, said = self.check(self.report((2, 1)), recorded)
+
+        self.assertEqual(code, 1)
+        self.assertIn("predictor", said)
+
+    def test_the_shipped_baseline_names_a_predictor_that_exists(self):
+        recorded = json.loads(BASELINE.read_text(encoding="utf-8"))
+
+        self.assertIn(recorded["predictor"], PREDICTORS)
+
     def test_the_shipped_baseline_describes_the_default_eval_set(self):
         """Not the number -- the file it claims to be about.
 
@@ -461,6 +559,100 @@ class BaselineTests(unittest.TestCase):
         recorded = json.loads(BASELINE.read_text(encoding="utf-8"))
 
         self.assertEqual(recorded["set"], DEFAULT_SET.name)
+
+
+class PredictorTests(unittest.TestCase):
+    """`build_predictor`, and the one property that makes #60's widening safe."""
+
+    def build(self, name: str):
+        predictor, label = build_predictor(name, {}, total=0)
+        return predictor, label
+
+    def test_the_rules_predictor_reads_the_description_and_nothing_else(self):
+        """Why widening the seam to a whole Row could not move the baseline.
+
+        `score` used to hand over a description; it now hands over the row,
+        because the model is shown the amount and the currency. That is only safe
+        if the rules ignore everything the description does not carry -- asserted
+        here rather than argued, and asserted again on every pull request by
+        `--check` reproducing 56.1%.
+        """
+        predictor, _ = self.build("rules")
+        cheap = Row(
+            line=1,
+            occurred_at=date(2026, 8, 28),
+            amount=Decimal("4.50"),
+            currency="MDL",
+            description="pharmacy",
+            category="health",
+        )
+        expensive = Row(
+            line=2,
+            occurred_at=date(2019, 1, 1),
+            amount=Decimal("450.00"),
+            currency="USD",
+            description="pharmacy",
+            category="health",
+        )
+
+        self.assertEqual(predictor(cheap), predict("pharmacy"))
+        self.assertEqual(predictor(cheap), predictor(expensive))
+
+    def test_the_label_names_where_the_rules_actually_live(self):
+        """The header used to say `evals/rules.py`, which #39 moved.
+
+        A label typed into the renderer describes whichever predictor existed
+        when it was typed. This one is built beside the predictor it describes,
+        and the assertion is that the path in it is real.
+        """
+        _, label = self.build("rules")
+
+        self.assertIn(str(len(RULES)), label)
+        self.assertTrue(
+            (Path(__file__).resolve().parents[1] / label.rsplit(", ", 1)[1]).exists()
+        )
+
+
+class RenderingTests(unittest.TestCase):
+    """The two things #60 asks for beside the percentage."""
+
+    def report(self) -> Report:
+        rows = [row("groceries"), row("groceries"), row("other", "parcel by post")]
+        return score(
+            rows,
+            lambda r: "groceries" if r.category == "groceries" else NO_PREDICTION,
+        )
+
+    def test_the_matrix_has_a_column_for_every_category_plus_the_abstention(self):
+        """A fixed shape, so two runs can be read side by side.
+
+        Columns derived from the answers would give each predictor a different
+        table, which is the one thing a comparison cannot have.
+        """
+        header = render_confusion(self.report()).splitlines()[4]
+
+        for name in CATEGORIES:
+            self.assertIn(name[:3], header)
+        self.assertIn(NO_PREDICTION[:3], header)
+
+    def test_the_matrix_puts_correct_answers_on_the_diagonal(self):
+        matrix = render_confusion(self.report())
+        groceries = next(
+            line for line in matrix.splitlines() if line.startswith("groceries")
+        )
+        other = next(line for line in matrix.splitlines() if line.startswith("other"))
+
+        # Two correct in the groceries column, and nothing anywhere else.
+        self.assertEqual(groceries.split()[1:], ["2"] + ["."] * 11)
+        # Nothing anywhere in the vocabulary, and the one row in the abstention.
+        self.assertEqual(other.split()[1:], ["."] * 11 + ["1"])
+
+    def test_the_misses_listing_names_the_description(self):
+        listing = render_misses(self.report())
+
+        self.assertIn("parcel by post", listing)
+        self.assertIn("other", listing)
+        self.assertIn(NO_PREDICTION, listing)
 
 
 if __name__ == "__main__":

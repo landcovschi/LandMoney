@@ -36,13 +36,37 @@ python evals/score.py --check
 python evals/test_score.py
 ```
 
-All three work from the repository root, and only from there -- `score.py` finds
+```bash
+uv run --project src/categorizer python evals/score.py --predictor model --confusion --misses
+```
+
+The first three work from the repository root, and only from there -- `score.py` finds
 the categorizer package by a path relative to its own file, and `test_score.py`
 imports `score` from its own folder. `score.py` prints a per-category table, the
 accuracy and the macro recall, and exits 0 when it produced a number and 1 when
 it could not -- an unreadable file, a label outside the vocabulary, or a set
 with no rows. A scorer that answers 0.0% when it scored nothing is worse than
 one that refuses.
+
+The fourth is #60 and is the only command here that is not free. `--predictor
+model` sends **one API call per row** and nothing caches, so a run over
+`transactions.csv` is 53 calls; it needs `ANTHROPIC_API_KEY` in the environment,
+and it borrows the categorizer's virtual environment because the `anthropic`
+package lives there. Everything else in this folder stays stdlib-only, which is
+what `--predictor rules` -- the default -- still proves on every CI run.
+
+**It refuses rather than scoring low when calls fail.** `AnthropicPredictor`
+never raises: every failure is a null category, which is what protects a user's
+transaction on the .NET side and which here is indistinguishable from the model
+declining a row. So the scorer counts the adapter's ERROR records and exits 1
+without printing anything if there are any -- a missing key stops it before the
+first call rather than producing a 0% that reads like a bad model. A warning
+about an unusable *answer* is a real miss and stays in the number.
+
+`--confusion` prints the full matrix and `--misses` prints every missed row with
+its description. Both are for reading a result: the metric charges the same for
+an abstention and a confident error, and #60 asks for those to be reported apart
+from the percentage. The line under the score does the same job in one number.
 
 ## The baseline, and when it may move
 
@@ -52,7 +76,13 @@ request -- #58 -- and it is the difference between running the scorer and
 checking it: printing a number is the whole of what exit code 0 promises, so a
 step that merely runs `score.py` stays green while the answer drifts.
 
-`baseline.json` is the **only** place the number is asserted. Nothing in
+`baseline.json` is the **only** place the number is asserted, and since #60 it
+also records **which predictor** produced it. `--check` refuses to compare a
+model run against it -- exit 1, "nothing to compare", the same refusal a run
+against the holdout gets. Without that guard the improvement the whole slice
+exists to produce would be reported as drift, in a message inviting whoever read
+it to overwrite the rules number with the model's.
+ Nothing in
 `test_score.py` knows today's score: the tests there cover the comparison
 against hand-built reports, so a rule reordered by mistake turns CI red on the
 number rather than red on a test somebody then edits until it is green.
@@ -166,15 +196,28 @@ BOM is handled.
 
 ## Where the model plugs in
 
-`score.score(rows, predictor)` takes any `str -> str`. `rules.predict` is one;
-the Anthropic adapter of slice 4 is another, and the day it exists that function
-is what puts the two numbers side by side. Nothing in `score.py` knows about
-rules beyond the default it passes in `main`.
+`score.score(rows, predictor)` takes any `Row -> str`, and `build_predictor`
+turns `--predictor rules` or `--predictor model` into one. Nothing in `score.py`
+knows about either implementation beyond that function.
 
-There is now a **second** seam, and they are deliberately not the same one.
+**It used to take a `str -> str`, and #60 widened it.** This file argued against
+that on the grounds that "the metric is about the description", and that argument
+lost to a stronger one: the model is *shown* the amount and the currency --
+`prompt.py` says so, because a 4.50 and a 450 at the same merchant are not the
+same purchase -- so a scorer that could only hand over a description would be
+measuring a different predictor from the one the service runs. That is the drift
+#39 moved `rules.py` out of this folder to prevent, and it is invisible: the
+number would simply have been lower.
+
+The widening could not move the baseline, because the rules read nothing but the
+description. That is a test (`test_the_rules_predictor_reads_the_description_and_
+nothing_else`) and it is also what `--check` asserts on every pull request: 56.1%
+reproduced across the change, or the change was wrong.
+
+The **second** seam is still a different one and still deliberately so.
 `Predictor` in `src/categorizer/src/categorizer/predictor.py` is what the
-*service* plugs a model into: it takes the whole request, because a model can
-use the amount and the currency where substring matching cannot, and it returns
-the `source` so a predictor names itself rather than being labelled by
-configuration. This one stays `str -> str` because the metric is about the
-description; widening it would change what the baseline was measured on.
+*service* plugs a model into: it takes the whole request and returns the
+`source`, so a predictor names itself rather than being labelled by
+configuration. `build_predictor` adapts one to the other in six lines -- and the
+only thing it translates is the abstention, which crosses HTTP as `null` and has
+to be the `unknown` sentinel again by the time the metric sees it.

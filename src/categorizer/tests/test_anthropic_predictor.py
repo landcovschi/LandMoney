@@ -245,6 +245,21 @@ def test_a_failure_and_a_decline_are_not_distinguishable_from_outside():
     assert declined.categorize(a_transaction()) == failed.categorize(a_transaction())
 
 
+def test_the_predictor_reports_what_it_was_built_with():
+    """The two properties #60 added, and they are not decoration.
+
+    `evals/score.py` prints the model and the effort in the header above the
+    score, because a number with no record of what produced it is not
+    reproducible. The alternative was for the scorer to re-read CATEGORIZER_MODEL
+    and these defaults itself, which is a second copy of `from_env` and the one
+    way a report could name a model that did not answer.
+    """
+    predictor = AnthropicPredictor(StubClient(), model="claude-sonnet-5", effort="high")
+
+    assert predictor.model == "claude-sonnet-5"
+    assert predictor.effort == "high"
+
+
 # --- what goes out ------------------------------------------------------------
 
 
