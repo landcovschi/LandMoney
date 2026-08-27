@@ -18,8 +18,12 @@ which is the whole argument for macro recall over accuracy, asserted on a
 hand-built example rather than believed.
 """
 
+import io
+import json
 import tempfile
 import unittest
+from collections import Counter
+from contextlib import redirect_stderr
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -28,7 +32,18 @@ from pathlib import Path
 # imported, and these two lines rely on that having happened. Deliberately not
 # repeated here: two copies of a path is two places to be wrong, and the import
 # below fails loudly and immediately if the arrangement ever changes.
-from score import COLUMNS, EvalSetError, Row, load, score  # noqa: I001 -- must come first
+from score import (  # noqa: I001 -- must come first
+    BASELINE,
+    COLUMNS,
+    DEFAULT_SET,
+    CategoryScore,
+    EvalSetError,
+    Report,
+    Row,
+    check,
+    load,
+    score,
+)
 
 from categorizer.categories import CATEGORIES, KNOWN, NO_PREDICTION
 from categorizer.rules import RULES, predict
@@ -293,6 +308,159 @@ class LoaderTests(unittest.TestCase):
     def test_a_header_only_file_loads_as_no_rows(self):
         """Which is what the eval set is today. main() turns this into exit 1."""
         self.assertEqual(load(self.csv()), [])
+
+
+class BaselineTests(unittest.TestCase):
+    """The `--check` comparison of #58, against hand-built reports only.
+
+    Deliberately nothing in here asserts today's real number. That comparison is
+    `python evals/score.py --check`, and it belongs there rather than in a test:
+    a rule reordered by mistake has to turn CI red *on the number*, in a step
+    whose message names the one file to update, rather than red on a test that
+    somebody then edits until it is green again.
+    """
+
+    def baseline(self, **fields) -> Path:
+        """A baseline file. The defaults describe `self.report((2, 1))`."""
+        recorded = {
+            "set": "transactions.csv",
+            "rows": 2,
+            "accuracy": 0.5,
+            "macro_recall": 0.5,
+        }
+        recorded.update(fields)
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        json.dump(recorded, handle)
+        handle.close()
+        path = Path(handle.name)
+        self.addCleanup(path.unlink)
+        return path
+
+    def report(self, *categories: tuple[int, int]) -> Report:
+        """A Report over (rows, correct) pairs, one per category. The names do not matter."""
+        scores = tuple(
+            CategoryScore(name=name, rows=rows, correct=correct)
+            for name, (rows, correct) in zip(CATEGORIES, categories)
+        )
+        return Report(
+            total=sum(c.rows for c in scores),
+            correct=sum(c.correct for c in scores),
+            per_category=scores,
+            confusions=Counter(),
+        )
+
+    def check(self, report: Report, baseline: Path, name: str = "transactions.csv"):
+        """Run the comparison, returning its exit code and what it said."""
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            code = check(report, Path(name), baseline)
+        return code, stderr.getvalue()
+
+    def test_a_report_that_reproduces_the_baseline_passes(self):
+        code, _ = self.check(self.report((2, 1)), self.baseline())
+
+        self.assertEqual(code, 0)
+
+    def test_a_number_that_moved_is_exit_2(self):
+        code, said = self.check(self.report((2, 2)), self.baseline())
+
+        self.assertEqual(code, 2)
+        self.assertIn("100.0%", said)
+
+    def test_the_two_numbers_are_compared_separately(self):
+        """Accuracy and macro recall disagree by design, so one may move alone.
+
+        Four rows in one category all correct and one row in another wrong is
+        80% accuracy and 50% macro; three of four and one of one is 80% accuracy
+        and 87.5% macro. So each of them can be the only one that moved, and a
+        check that compared one number would be silent about the other.
+        """
+        macro_moved, about_macro = self.check(
+            self.report((4, 4), (1, 0)),
+            self.baseline(rows=5, accuracy=0.8, macro_recall=0.8),
+        )
+        accuracy_moved, about_accuracy = self.check(
+            self.report((4, 3), (1, 1)),
+            self.baseline(rows=5, accuracy=0.9, macro_recall=0.875),
+        )
+
+        self.assertEqual(macro_moved, 2)
+        self.assertIn("macro_recall", about_macro)
+        self.assertNotIn("accuracy", about_macro)
+
+        self.assertEqual(accuracy_moved, 2)
+        self.assertIn("accuracy", about_accuracy)
+        self.assertNotIn("macro_recall", about_accuracy)
+
+    def test_a_row_count_that_moved_is_reported_even_when_the_numbers_did_not(self):
+        """A CSV that gained rows and scored the same is a changed eval set.
+
+        Legitimate, and not the same event as a rule that broke -- which is why
+        it is checked at all, and why it is named separately in the message.
+        """
+        code, said = self.check(self.report((4, 2)), self.baseline())
+
+        self.assertEqual(code, 2)
+        self.assertIn("rows", said)
+
+    def test_the_comparison_is_the_number_as_printed_and_not_the_float(self):
+        """One decimal place of a percentage, which is what is written down.
+
+        50.04% reproduces a recorded 50.0%; 50.1% does not. Comparing the floats
+        would make an invisible rounding difference a red build, and comparing
+        anything coarser would let a row's worth of drift through.
+        """
+        recorded = self.baseline(rows=10_000)
+
+        unchanged, _ = self.check(self.report((10_000, 5_004)), recorded)
+        moved, _ = self.check(self.report((10_000, 5_010)), recorded)
+
+        self.assertEqual(unchanged, 0)
+        self.assertEqual(moved, 2)
+
+    def test_a_baseline_recorded_against_another_set_is_refused_rather_than_compared(self):
+        """--set holdout.csv must not be scored against transactions.csv's number."""
+        code, said = self.check(self.report((2, 1)), self.baseline(), name="holdout.csv")
+
+        self.assertEqual(code, 1)
+        self.assertIn("nothing to compare", said)
+
+    def test_a_baseline_that_cannot_be_read_is_exit_1_and_not_exit_2(self):
+        """The distinction the three exit codes exist for.
+
+        A deleted or malformed baseline is a broken check, not a moved number,
+        and whoever reads the red step reacts to the two differently.
+        """
+        malformed = self.baseline()
+        malformed.write_text("{not json", encoding="utf-8")
+
+        missing, _ = self.check(self.report((2, 1)), Path("no-such-baseline.json"))
+        unreadable, _ = self.check(self.report((2, 1)), malformed)
+
+        self.assertEqual(missing, 1)
+        self.assertEqual(unreadable, 1)
+
+    def test_a_baseline_missing_a_number_is_exit_1(self):
+        recorded = self.baseline()
+        recorded.write_text(json.dumps({"set": "transactions.csv"}), encoding="utf-8")
+
+        code, said = self.check(self.report((2, 1)), recorded)
+
+        self.assertEqual(code, 1)
+        self.assertIn("macro_recall", said)
+
+    def test_the_shipped_baseline_describes_the_default_eval_set(self):
+        """Not the number -- the file it claims to be about.
+
+        A name that matches nothing makes every run exit 1 rather than 2, so it
+        fails as a broken check instead of as drift; cheap to assert here, and
+        it is the one thing about the shipped file that is not data.
+        """
+        recorded = json.loads(BASELINE.read_text(encoding="utf-8"))
+
+        self.assertEqual(recorded["set"], DEFAULT_SET.name)
 
 
 if __name__ == "__main__":

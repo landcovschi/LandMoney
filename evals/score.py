@@ -6,9 +6,18 @@ The number is macro-averaged recall. Accuracy, a per-category table and the
 most common confusions are printed beside it for diagnosis; the metric, and
 what it does not capture, is written down in `docs/evals.md`.
 
+    python evals/score.py --check
+
+`--check` compares what this run scored against `baseline.json` beside it, which
+is what CI runs -- #58. Without it a CI step that merely runs the scorer is green
+while the number drifts, because printing a number is all it takes to exit 0.
+
 Exit code 0 means a number was produced. Exit code 1 means one was not -- an
 unreadable file, a label outside the vocabulary, or an empty set. A scorer that
 prints 0.0% when it could not score anything is worse than one that refuses.
+Exit code 2 is `--check` finding a number it did not expect: the run worked, and
+the answer moved. Three codes rather than two, because "the scorer is broken" and
+"the baseline moved" want different reactions from whoever reads the red step.
 
 Stdlib only, on purpose, and it stayed that way after #39 moved the rules into
 `src/categorizer/`. That move is why the `sys.path` line below exists: the
@@ -29,6 +38,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 import csv
+import json
 
 # The categorizer package is not installed -- `evals/` has no dependencies and no
 # virtual environment -- so its import root is put on sys.path by hand. One
@@ -50,6 +60,22 @@ from categorizer.rules import RULES, predict as predict_by_rules
 COLUMNS = ("occurred_at", "amount", "currency", "description", "category")
 
 DEFAULT_SET = Path(__file__).parent / "transactions.csv"
+
+# The recorded score, and the one place to change when it is meant to move --
+# which is a change to the CSVs or to a rule, made on purpose, and never a
+# number copied out of a red CI step to make it green.
+BASELINE = Path(__file__).parent / "baseline.json"
+
+# Both numbers are compared as `render` prints them: one decimal place of a
+# percentage, which is how they are written down here, in evals/README.md and in
+# CLAUDE.md. Comparing the floats instead would fail on a rounding difference
+# nobody can see, and comparing anything coarser would let a row's worth of drift
+# through -- one row of 53 is 1.9 points.
+BASELINE_PLACES = "{:.1%}"
+
+# What `check` insists baseline.json carries. The `note` and `recorded` keys in
+# the file are for whoever opens it and are not read here.
+REQUIRED_BASELINE_KEYS = ("set", "rows", "accuracy", "macro_recall")
 
 # Mirrors numeric(18,2) on the Postgres column and DecimalScaleAttribute on the
 # .NET side. The eval set is meant to be rows the application could have stored.
@@ -311,8 +337,79 @@ def render(report: Report, path: Path) -> str:
     return "\n".join(lines)
 
 
+def check(report: Report, path: Path, baseline_path: Path = BASELINE) -> int:
+    """Compare a report against the recorded baseline. 0 when it reproduces it, 2 when not.
+
+    This is the half of #58 that the CI step could not have on its own: a step
+    that only runs the scorer passes while the answer moves, because producing a
+    number is the whole of what exit code 0 promises.
+
+    It compares the row count as well as the two percentages, so a CSV that
+    gained rows is reported as an eval set that changed rather than as a rule
+    that broke. Both are legitimate reasons for the number to move; they are
+    just not the same reason, and the failure message is where the difference
+    has to be visible.
+    """
+    try:
+        recorded = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"Cannot read the baseline at {baseline_path}: {error}", file=sys.stderr)
+        return 1
+
+    missing = [key for key in REQUIRED_BASELINE_KEYS if key not in recorded]
+    if missing:
+        print(
+            f"{baseline_path} is missing {', '.join(missing)}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if recorded["set"] != path.name:
+        # Only the default set has a recorded number. --check against the
+        # holdout, or against a set someone is drafting, would otherwise compare
+        # one file's answer with another file's expectation and call it drift.
+        print(
+            f"The baseline was recorded against {recorded['set']!r}, and this run "
+            f"scored {path.name!r}. There is nothing to compare.",
+            file=sys.stderr,
+        )
+        return 1
+
+    problems: list[str] = []
+    if recorded["rows"] != report.total:
+        problems.append(f"rows: {report.total}, recorded {recorded['rows']}")
+    for key, actual in (("accuracy", report.accuracy), ("macro_recall", report.macro_recall)):
+        if BASELINE_PLACES.format(actual) != BASELINE_PLACES.format(recorded[key]):
+            problems.append(
+                f"{key}: {BASELINE_PLACES.format(actual)}, "
+                f"recorded {BASELINE_PLACES.format(recorded[key])}"
+            )
+
+    if not problems:
+        return 0
+
+    print(
+        f"The score does not reproduce {baseline_path.name}:",
+        *(f"  - {problem}" for problem in problems),
+        "",
+        "A rule, the vocabulary or a CSV changed. If that was the point, update",
+        "the number in the same change -- it is asserted in exactly one place:",
+        f"  {baseline_path}",
+        "and evals/README.md says what makes moving it legitimate. If it was not",
+        "the point, this is the drift the check exists to catch.",
+        sep="\n",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="also compare the score against baseline.json, and exit 2 if it moved",
+    )
     parser.add_argument(
         "--set",
         dest="path",
@@ -339,7 +436,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    print(render(score(rows, predict_by_rules), args.path))
+    report = score(rows, predict_by_rules)
+    # Printed before the comparison either way: a red step whose output is only
+    # "the number moved" sends whoever reads it back to run the scorer by hand,
+    # and the per-category table is the thing that says which rule did it.
+    print(render(report, args.path))
+    if args.check:
+        return check(report, args.path)
     return 0
 
 

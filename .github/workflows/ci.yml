@@ -128,6 +128,99 @@ jobs:
         run: dotnet test LandMoney.slnx --no-build -c Release
 
       # -----------------------------------------------------------------------
+      # The Python half -- #58.
+      #
+      # Until this, nothing on a pull request touched src/categorizer/ or
+      # evals/ at all, so `build` was green over a service that does not
+      # import, tests that do not pass, and a baseline that had silently moved.
+      # #39 said so out loud and left it.
+      #
+      # Inside `build` rather than in a job of its own, and that is the whole of
+      # what makes it protect anything. `build` is the required check named by
+      # the ruleset on main; a new job is not required until the ruleset is
+      # edited, and -- measured on #42 -- a job skipped by `if:` reports
+      # `skipped`, which GitHub counts as satisfying a required check.
+      #
+      # And never a `paths:` filter to skip it on a documentation-only change:
+      # a workflow that does not start never reports, and a required check that
+      # never reports blocks the merge for ever at "Expected -- Waiting for
+      # status to be reported", fixable only by editing the ruleset.
+      # -----------------------------------------------------------------------
+
+      # No version anywhere in this file. `working-directory` points the action
+      # at the uv project, and uv reads .python-version there and fetches that
+      # interpreter itself -- which is the one thing uv does that .NET's SDK and
+      # Node's runtime expect somebody else to have done. Restating 3.13 here
+      # would be a second place to change, and the failure of forgetting is a
+      # CI run that tests a Python nobody develops against.
+      #
+      # `working-directory` on an action's `with:` is not the same input as
+      # `working-directory` on a `run:` step -- setup-uv happens to have one,
+      # which is why it can be given at all. The `run` steps below still need
+      # their own, and `setup-node` above still takes a path from the repository
+      # root, because it has no such input.
+      #
+      # v10.0.1 as of 2026-08-28, checked against the releases API rather than
+      # written from memory: #22 and #24 each earned that the hard way, and this
+      # action had never been checked here at all.
+      #
+      # The exact version and not `@v10`, which is not a mistake to correct
+      # later: **setup-uv publishes no moving major tag**. It did up to v7 --
+      # `v7.6`, `v7.5` and a bare `v7` are all there -- and stopped, so v8, v9
+      # and v10 exist only as full versions. Written as `@v10` this fails before
+      # any step runs, with `Unable to resolve action astral-sh/setup-uv@v10,
+      # unable to find version v10`, which is a clear message and cost a red run
+      # to see. The price of the pin is that a patch does not arrive by itself;
+      # every other action in this file floats on its major.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          working-directory: src/categorizer
+
+      # --locked is `npm ci` and not `npm install`: it fails when uv.lock does
+      # not already agree with pyproject.toml, where a bare `uv sync` would
+      # quietly rewrite the lock and make the run depend on when it last
+      # happened.
+      - name: Install categorizer dependencies
+        working-directory: src/categorizer
+        run: uv sync --locked
+
+      # --no-sync because the step above has just done it. Without it `uv run`
+      # re-resolves, which is not wrong, only a second answer to a question
+      # already asked -- and it would resolve without --locked.
+      #
+      # pytest exits 5 when it collected nothing, so a tests folder that has
+      # been deleted or moved out from under testpaths is red here rather than
+      # green with nothing run.
+      - name: Test the categorizer
+        working-directory: src/categorizer
+        run: uv run --no-sync pytest
+
+      # No working-directory, and it is load-bearing: score.py finds the
+      # categorizer package by a path relative to its own file, and test_score.py
+      # imports `score` as a top-level module from its own folder. Run from
+      # anywhere else this fails as an ImportError that reads like a missing
+      # dependency, which is the one thing evals/ deliberately does not have.
+      #
+      # The runner's own python, not uv's, on purpose: `evals/` is stdlib-only
+      # and needs no virtual environment, and this is the only place that
+      # property is ever checked. Running it inside the categorizer's venv would
+      # make an accidental `import fastapi` in there pass.
+      - name: Test the scorer
+        run: python evals/test_score.py
+
+      # The point of #58, and the reason this is not simply `python
+      # evals/score.py`: the scorer exits 0 when it produced a number, so a step
+      # that only runs it is green while the number drifts. --check compares the
+      # run against evals/baseline.json and exits 2 when it moved.
+      #
+      # The eval CSVs are data, and editing them legitimately moves the number.
+      # That is a change to baseline.json in the same commit -- one obvious
+      # place, which is what makes this a check rather than an obstacle.
+      - name: The baseline must not have moved
+        run: python evals/score.py --check
+
+      # -----------------------------------------------------------------------
       # The migration bundle -- #37.
       #
       # This is how the schema reaches the deployed database: a single
