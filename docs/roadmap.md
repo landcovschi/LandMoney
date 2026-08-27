@@ -787,6 +787,31 @@ again by itself after 7 days.
        needs a key
 5. [ ] Run the evals. Did the model beat the baseline? Record the number
 
+       **The scorer half landed 2026-08-28** in #75, and the box stays empty
+       because no model call has been made: there is no key on this machine, and
+       provisioning one is #76. `score.py --predictor {rules,model}` puts both
+       numbers through one scorer over the same rows, and reports the things the
+       metric cannot -- the abstention rate, the confident-error count, the full
+       confusion matrix and every missed row
+
+       **The seam widened from `str -> str` to `Row -> str`**, against what
+       `evals/README.md` argued, because the model is shown the amount and the
+       currency and a scorer that could only pass a description would measure a
+       different predictor from the one the service runs -- #39's drift, in the
+       direction where nothing reports it and the number is merely lower. The
+       rules read nothing else, so it could not move the baseline: 56.1% and
+       56.6% over 53 rows reproduced across the change, asserted by `--check`
+       rather than argued
+
+       **A run that fails prints no number at all**, which is the guard worth
+       keeping. `AnthropicPredictor` never raises -- every failure is a null
+       category, which is what protects a user's transaction on the .NET side --
+       so a failed call is indistinguishable from an abstention, and a keyless
+       run would have scored about 0% and read as a model that is bad at the
+       job. The scorer counts the adapter's ERROR records and refuses; measured
+       with no key, it stops before the first call rather than making 53 doomed
+       ones
+
 **Done when:** the improvement over the baseline can be quoted as a number, and
 the thing that produced the number can be shown.
 
