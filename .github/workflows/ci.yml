@@ -160,11 +160,20 @@ jobs:
       # their own, and `setup-node` above still takes a path from the repository
       # root, because it has no such input.
       #
-      # v10 as of 2026-08-28, checked against the releases API rather than
+      # v10.0.1 as of 2026-08-28, checked against the releases API rather than
       # written from memory: #22 and #24 each earned that the hard way, and this
       # action had never been checked here at all.
+      #
+      # The exact version and not `@v10`, which is not a mistake to correct
+      # later: **setup-uv publishes no moving major tag**. It did up to v7 --
+      # `v7.6`, `v7.5` and a bare `v7` are all there -- and stopped, so v8, v9
+      # and v10 exist only as full versions. Written as `@v10` this fails before
+      # any step runs, with `Unable to resolve action astral-sh/setup-uv@v10,
+      # unable to find version v10`, which is a clear message and cost a red run
+      # to see. The price of the pin is that a patch does not arrive by itself;
+      # every other action in this file floats on its major.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           working-directory: src/categorizer
 

@@ -349,9 +349,19 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   and `setup-dotnet` expect to have been done for them. Note that
   `working-directory` is an *input of this action* rather than the step key of
   the same name; `setup-node` has no such input, which is why `node-version-file`
-  beside it is still a path from the repository root. **`setup-uv` is at v10**,
-  read off the releases API on the day rather than written from memory -- the
-  third time that rule has paid, after #22 and #24.
+  beside it is still a path from the repository root.
+
+  **`setup-uv` is pinned to `v10.0.1`, and it is the one action here that cannot
+  float on its major.** The version was read off the releases API on the day
+  rather than written from memory -- the third time that rule has paid, after #22
+  and #24 -- and then `@v10` failed the run before a single step executed:
+  `Unable to resolve action astral-sh/setup-uv@v10, unable to find version v10`.
+  **This action publishes no moving major tag.** It did up to v7 -- `v7`, `v7.6`
+  and `v7.5` are all there -- and stopped; v8, v9 and v10 exist only as full
+  versions. So #22's and #24's lesson needs a second half: check the current
+  major, *and* check that the major is a tag at all. What the pin costs is that a
+  patch no longer arrives by itself, which every other action in `ci.yml` gets
+  for free.
 
   **`evals/` runs on the runner's own python, deliberately not through uv.** It
   is stdlib-only by decision, and CI is the only place that property is ever
