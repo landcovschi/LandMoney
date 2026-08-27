@@ -328,6 +328,71 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   `setup-dotnet`'s `cache: true` requires a `packages.lock.json`, which this
   repository does not have, so it is not a flag to flip.
 
+  **The Python tree joined `build` on 2026-08-28** (#58): `setup-uv`,
+  `uv sync --locked`, the categorizer's pytest suite, the scorer's own tests,
+  and `python evals/score.py --check`. Until then nothing on a pull request
+  touched `src/categorizer/` or `evals/` at all, so `build` was green over a
+  service that does not import and a baseline that had silently moved -- which
+  #39 said out loud and left.
+
+  **Inside `build`, not a job of its own, and that is the whole of what makes it
+  protect anything.** `build` is the required check the ruleset names. A second
+  job is not required until the ruleset is edited, and -- measured on #42 -- a
+  job skipped by `if:` reports `skipped`, which GitHub counts as satisfying a
+  required check. The same paragraph's other half still holds: never a `paths:`
+  filter, or a documentation-only pull request starts no workflow and blocks for
+  ever at "Expected -- Waiting for status to be reported".
+
+  **No Python version appears in the workflow.** `setup-uv` takes a
+  `working-directory` of `src/categorizer`, and uv reads `.python-version` there
+  and fetches that interpreter itself -- the one thing uv does that `setup-node`
+  and `setup-dotnet` expect to have been done for them. Note that
+  `working-directory` is an *input of this action* rather than the step key of
+  the same name; `setup-node` has no such input, which is why `node-version-file`
+  beside it is still a path from the repository root. **`setup-uv` is at v10**,
+  read off the releases API on the day rather than written from memory -- the
+  third time that rule has paid, after #22 and #24.
+
+  **`evals/` runs on the runner's own python, deliberately not through uv.** It
+  is stdlib-only by decision, and CI is the only place that property is ever
+  checked; running it inside the categorizer's virtual environment would let an
+  accidental `import fastapi` in there pass. Neither eval step may take a
+  `working-directory`: `score.py` finds the categorizer package by a path
+  relative to its own file, and the failure of getting that wrong is an
+  ImportError that reads like a missing dependency.
+
+  **`--check` is the point of the issue, and it is new behaviour in `score.py`
+  rather than a step in the workflow.** The scorer exits 0 when it produced a
+  number, so a step that only runs it stays green while the number drifts.
+  `--check` compares the run against **`evals/baseline.json`** -- the one place
+  the number is asserted -- and exits **2**, which is deliberately not the 1 that
+  means the scorer could not score: "the baseline moved" and "the check is
+  broken" want different reactions from whoever reads the red step. Both
+  percentages are compared **as `render` prints them**, to one decimal place,
+  because that is how they are written down; one row of 53 is 1.9 points, so
+  nothing a rule can do hides inside the rounding. The row count is compared
+  too, so a CSV that gained rows reports as a changed eval set rather than as a
+  broken rule -- the eval CSVs are data, and moving the number on purpose is a
+  one-file edit made in the same commit.
+
+  **Nothing in `test_score.py` asserts today's real number**, and that is a
+  choice rather than an omission: its nine new tests cover the comparison against
+  hand-built reports, so a rule reordered by mistake turns CI red on the number,
+  in a step whose message names the file to update, instead of red on a test that
+  somebody then edits until it is green. Checked by mutation the way #21 checked
+  its suite -- seven mutations of `check`, each reverted from a copy of the file,
+  all seven caught.
+
+  **The number today is 56.1% macro recall and 56.6% accuracy over 53 rows.**
+  The 60.8% / 62.2% recorded for #39 above is the **45-row** set of that day and
+  is history rather than the figure CI asserts; #58's own text quotes it, and it
+  had already been superseded by the rewritten rows behind #47.
+
+  **No Python linter runs, because `pyproject.toml` configures none.** #58 asked
+  for "the linter, whatever `pyproject.toml` already configures", and the honest
+  answer is that there is nothing to run: adding ruff is a new dependency, and
+  new dependencies are discussed rather than slipped in beside a CI change.
+
   **A third job, `deploy`, decided 2026-08-26** (#38), and it is a transcription
   of steps 12 and 13 of `docs/deploy-azure.md` rather than anything new:
   download the `efbundle` artifact from this same run, `azure/login`, read the

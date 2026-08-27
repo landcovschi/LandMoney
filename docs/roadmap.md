@@ -736,6 +736,15 @@ again by itself after 7 days.
        pull request yet, so `build` can be green over a broken service. It is
        already a slice 5 item ("Evals run in CI on every PR") and it is the
        natural home for both halves of the Python tree at once
+
+       **Closed on 2026-08-28 in #58**, and both halves did arrive together.
+       `ci.yml`'s `build` job now syncs the uv project, runs the service's
+       pytest suite, runs the scorer's own tests, and -- the part that is not
+       merely running a command -- **compares** the score against
+       `evals/baseline.json`, which is the one place the number is asserted.
+       Inside `build` rather than in a job of its own, because `build` is the
+       required check and a new job protects nothing until the ruleset names
+       it
 4. [ ] An Anthropic adapter behind a port, plus a fake with canned responses so
        tests never hit the network and never cost money
 5. [ ] Run the evals. Did the model beat the baseline? Record the number
@@ -749,7 +758,12 @@ the thing that produced the number can be shown.
 - [ ] pgvector: find similar past transactions
 - [ ] Token and cost accounting per request
 - [ ] Graceful degradation: the AI service is down, the app still works
-- [ ] Evals run in CI on every PR
+- [x] Evals run in CI on every PR -- #58, 2026-08-28. `python evals/score.py
+      --check` compares the run against `evals/baseline.json` and exits 2 when
+      the number moved, so a step that is green means the baseline is the
+      recorded one rather than merely that a number was printed. The
+      categorizer's own tests came with it: nothing had touched the Python tree
+      on a pull request until then
 
 ## Deliberately not doing
 

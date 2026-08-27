@@ -1,0 +1,8 @@
+{
+  "note": "The recorded score of the rules baseline. `python evals/score.py --check` fails when the run does not reproduce it, and this file is the one place to update when it is meant to have moved. evals/README.md says when that is.",
+  "recorded": "2026-08-28",
+  "set": "transactions.csv",
+  "rows": 53,
+  "accuracy": 0.566,
+  "macro_recall": 0.561
+}

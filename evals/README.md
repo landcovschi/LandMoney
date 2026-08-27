@@ -29,14 +29,54 @@ python evals/score.py
 ```
 
 ```bash
+python evals/score.py --check
+```
+
+```bash
 python evals/test_score.py
 ```
 
-Both work from the repository root. `score.py` prints a per-category table, the
+All three work from the repository root, and only from there -- `score.py` finds
+the categorizer package by a path relative to its own file, and `test_score.py`
+imports `score` from its own folder. `score.py` prints a per-category table, the
 accuracy and the macro recall, and exits 0 when it produced a number and 1 when
 it could not -- an unreadable file, a label outside the vocabulary, or a set
 with no rows. A scorer that answers 0.0% when it scored nothing is worse than
 one that refuses.
+
+## The baseline, and when it may move
+
+`--check` compares the run against **`baseline.json`** and exits **2** when the
+number is not the one recorded there. That is what CI runs on every pull
+request -- #58 -- and it is the difference between running the scorer and
+checking it: printing a number is the whole of what exit code 0 promises, so a
+step that merely runs `score.py` stays green while the answer drifts.
+
+`baseline.json` is the **only** place the number is asserted. Nothing in
+`test_score.py` knows today's score: the tests there cover the comparison
+against hand-built reports, so a rule reordered by mistake turns CI red on the
+number rather than red on a test somebody then edits until it is green.
+
+The number is meant to move when, and only when, a change makes it move on
+purpose:
+
+- a rule added, removed or reordered in
+  `src/categorizer/src/categorizer/rules.py`,
+- a change to the vocabulary or to a boundary rule in `docs/evals.md`,
+- **a change to `transactions.csv`** -- the CSVs are data, and rows added,
+  removed or relabelled legitimately move the score. The row count is recorded
+  beside the two percentages so this is reported as an eval set that changed
+  rather than as a rule that broke.
+
+In all three cases `baseline.json` is updated **in the same change**, and the
+new number belongs in the pull request that moved it. What it is not for is
+copying a number out of a red CI step to make it green: that is the drift the
+check exists to catch, and the per-category table printed above the failure is
+what says which rule did it.
+
+Both percentages are compared as they are printed -- one decimal place -- which
+is how they are written down here and in `CLAUDE.md`. One row of 53 is 1.9
+points, so nothing a rule can do hides inside that rounding.
 
 `test_score.py` is run as a script rather than through `python -m unittest`,
 because `score.py` imports `categories` and `rules` as top-level modules and it
@@ -47,7 +87,8 @@ no package yet.
 
 `transactions.csv` holds **53 labelled rows and none of them are real spending**,
 and `holdout.csv` holds 10 more with the category column empty. The baseline
-scores **56.1% macro recall** against them.
+scores **56.1% macro recall** and 56.6% accuracy against them -- which is what
+`baseline.json` records and what CI asserts.
 
 **#47 is still open**, and this is the second set to leave it open. #25 asked for
 transactions out of the owner's own history; PR #44 left the files empty rather
@@ -72,7 +113,9 @@ nothing else -- the loader, the metric and the rules do not know where a row
 came from.
 
 Everything around the data -- the vocabulary, the metric, the baseline, the
-scorer and its 26 tests -- was written on 2026-08-24, before any of it.
+scorer and its tests -- was written on 2026-08-24, before any of it. The
+nine that check the baseline comparison arrived with #58 on 2026-08-28;
+the other 26 did not change.
 
 ## How to label
 
