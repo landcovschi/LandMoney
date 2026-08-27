@@ -1487,6 +1487,156 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   already carries "Evals run in CI on every PR", which is the natural home for
   both halves of the Python tree at once.
 
+- **The model behind the port: `AnthropicPredictor`, Claude Opus 5, structured
+  output, in `src/categorizer/src/categorizer/` -- decided 2026-08-28** (#59).
+  `anthropic_predictor.py` is the adapter, `prompt.py` is what the model is told,
+  and `CATEGORIZER_PREDICTOR` picks which implementation `get_predictor` returns.
+  One new dependency, `anthropic>=1.0`; the image went from 191 MB to 203 MB.
+
+  **The seam cost nothing, which is the point of #39 having built it first.** The
+  adapter names `Predictor` nowhere -- it neither imports nor inherits the port --
+  and `get_predictor` was the one line that changed, exactly as `main.py`'s comment
+  predicted. That is `Protocol` being structural where a C# `interface` would have
+  required `: IPredictor` here and a reference to the module defining it.
+
+  **The version major is load-bearing, for the fourth time after #22, #24 and
+  #39.** `anthropic` 1.0 moved the SDK off `httpx` and onto **`httpx2`**, which is
+  the same swap the dev group already made for `TestClient`, so both halves of this
+  project now agree on one HTTP library instead of pulling in two. An
+  `anthropic.Timeout` *is* an `httpx2.Timeout`, and one from the `httpx` package is
+  refused at request time rather than at import.
+
+  **`claude-opus-5` with adaptive thinking left on and `effort: "low"`.** The
+  effort is the lever, not the thinking switch: `thinking: {"type": "disabled"}` on
+  Opus 5 has two documented failure modes -- a tool call written into visible text,
+  and `<thinking>` tags leaking into the response -- and lowering effort buys the
+  same latency without them. `max_tokens` is 2048 rather than the ~256 a
+  classification suggests, because thinking tokens count against that ceiling and
+  the answer is one word inside a constrained object.
+
+  **Abstention is instructed, not merely permitted**, and the reason is the metric.
+  A model forbidden to decline converts an abstention into a confident error, and
+  macro recall charges the same for both while the .NET side stores the wrong one.
+  It is also what makes the comparison fair: the rules abstain on 22 of their 23
+  misses, so a model that may not abstain is being scored on a different task. The
+  sentinel is `unknown` -- `rules.py`'s, reused rather than reinvented, so one word
+  means one thing for both predictors and `categories.py` keeps it outside the
+  vocabulary either way.
+
+  **The response schema is `output_config.format`, and the adapter validates the
+  answer anyway.** The enum is `CATEGORIES` plus the sentinel, enforced by the API,
+  so a twelfth category is nearly unreachable through this route -- and the check in
+  `_answer_from` is not redundant, because that constraint is a property of one
+  route to one API while the check is a property of the adapter. It is also what
+  turns `Category("takeaway")` from a 500 into a clean null, which is what #59 asks
+  for.
+
+  **Normalisation applies to the answer and to nothing else**, which is #59's first
+  trap and #39's caught mutation in a new coat. `Groceries`, ` groceries ` and
+  `GROCERIES` all become `groceries`; the *description* reaches the model exactly as
+  it arrived, because tidying it here would improve this predictor and silently move
+  the baseline it is measured against. There is a test that asserts the typed string
+  arrives verbatim. A synonym is not mapped either: `food` is not a category, it is
+  an abstention, and a synonym table here would be the adapter answering a question
+  the model was asked.
+
+  The `MaxLength(100)` trap answers itself, and it is worth knowing why: membership
+  in a closed vocabulary whose longest member is thirteen characters is a far
+  tighter constraint than a length check, so nothing over thirteen can leave the
+  adapter and it can never be the thing that discovers the column's width.
+
+  **The adapter catches `Exception`, deliberately, where `CategorizerClient` lists
+  exactly three.** The two are not inconsistent: anything raised here becomes a 500
+  that the .NET client already turns into null, so narrowing it would protect no
+  transaction and would only move the failure one process later, spend the round
+  trip, and put the traceback in the wrong service's log. `logger.exception` keeps
+  the traceback, which is the only thing distinguishing a bug in the adapter from
+  the model being unavailable. There is no equivalent of the `when` clause because
+  nothing here takes a cancellation token.
+
+  **An unrecognised `CATEGORIZER_PREDICTOR` stops the process**, which is the
+  opposite of how `Categorizer:BaseUrl` is treated on the .NET side, and the
+  difference is which way the mistake points. There, an absent value had one
+  unavoidable cause (`efbundle`) and the failure was a dead deploy. Here `modle`
+  would serve the **rules** while the deployment believed a model was running, and
+  #60 would record the baseline's number under the model's name with nothing
+  reporting it. Blank reads as unset rather than as an error, because
+  `${CATEGORIZER_PREDICTOR:-}` and an empty Container Apps variable both arrive as
+  an empty string and neither means "refuse to start".
+
+  **A missing key does *not* stop it, and that was assumed wrongly first.**
+  `anthropic.Anthropic()` with no credential anywhere constructs cleanly and defers
+  the failure to the first request -- so a deployment that selected the model and
+  forgot the key starts, serves 200s, and answers `category: null` for ever, which
+  is indistinguishable from a model that declines every row. One `logger.error` at
+  startup is what turns "silently free" into "findable"; it is not a raise, for the
+  same reason `Categorizer:BaseUrl` is not one.
+
+  **Verified against a real 401**, since there is no key on this machine: a
+  deliberately broken `ANTHROPIC_API_KEY` produced `anthropic.AuthenticationError`,
+  a logged traceback, and `200 {"category": null, "source": "model"}`. That is the
+  acceptance test #59 names, and it is the only part of the model path that could be
+  exercised without spending money. **What remains unverified, said out loud: no
+  request has ever been accepted by the API.** The request shape was checked against
+  the SDK's own types instead -- `OutputConfigParam` has exactly `effort` and
+  `format`, `JSONOutputFormatParam` exactly `type` and `schema` -- which proves the
+  parameters exist and are typed as sent, and does not prove the model answers well.
+  That is #60's job and it needs a key.
+
+  **The fake is a fake *client*, not a fake predictor**, and both exist. The
+  endpoint's seam is `dependency_overrides` and was already tested in #39; the
+  awkward cases #59 lists -- an answer outside the vocabulary, an empty answer, a
+  very long answer, an exception from the client -- are adapter-internal and
+  unreachable through that seam. So `AnthropicPredictor` takes its client as a
+  constructor argument, which makes "this test cannot reach the network" structural
+  rather than remembered: a test that forgot to pass a stub would fail to construct.
+  67 Python tests, none of which opens a socket, and the whole suite runs with the
+  SDK uninstalled because the import is inside `from_env`.
+
+- **Two timeouts on the categorizer client, 2 s to connect and 8 s overall --
+  decided 2026-08-28** (#59), and this is the decision that issue actually turned
+  on. #39 gave the whole call two seconds and chose the number against the *broken*
+  case: a stopped categorizer leaves the SYN unanswered rather than refusing it, so
+  every save paid the full timeout while the service was down.
+
+  A model call does not fit in two seconds, and #59's three routes are all worse
+  than they look. Keeping 2 s makes the deployed behaviour "rules or nothing"
+  without saying so. Raising the single number re-prices the outage the 2 s existed
+  for -- eight seconds per save, every save, while the service is down. Categorising
+  *after* the save is architecturally honest, reverses #39's explicit "before
+  `SaveChangesAsync`" decision, and needs somewhere to put follow-up work; it is its
+  own issue. Splitting them gives the two different failures two budgets, which is
+  all they ever needed: `SocketsHttpHandler.ConnectTimeout` for "not there",
+  `HttpClient.Timeout` for "thinking".
+
+  **Measured, because the first version of this was wrong twice.** Categorizer up:
+  142 ms and a category. Categorizer stopped: **2043 ms**, a 201, and no category --
+  so #39's property survives exactly. Both stay under the browser client's
+  `REQUEST_TIMEOUT_MS` of 10 s, so neither can be what makes the page give up.
+
+  **What was wrong the first time, and it cost the default in `appsettings.json`:**
+  `BaseUrl` was `http://localhost:8000`, and on Windows that name resolves to `::1`
+  first, where nothing is listening because compose publishes on `127.0.0.1` only --
+  and Docker Desktop swallows the attempt rather than refusing it. The dead IPv6
+  attempt ate the entire connect budget, and a save took **the full eight seconds
+  and stored no category**, against 156 ms once the key held an address. So the new
+  budget made the everyday `dotnet run` loop strictly worse than before it. The fix
+  is the address, not a larger number: `.env.example` has carried that exact warning
+  for the Postgres port since 2026-08-05, one file away, and the design walked into
+  it anyway.
+
+  **The second thing that was wrong: `ConnectTimeout` expiry surfaces as a
+  cancellation, not as `HttpRequestException`.** So both clocks land on
+  `CategorizerClient`'s `OperationCanceledException` branch, and that branch used to
+  log `http.Timeout` -- reporting "did not answer within 00:00:08" for a call that
+  gave up at 2.15 s, which sends the reader to the wrong configuration key. It now
+  logs how long it actually waited. A log line that misnames which limit fired is
+  worse than one that names neither.
+
+  The trade this does not cover, said out loud: a service that accepts the
+  connection and then hangs still costs the full eight seconds. That is the right
+  way round -- accepting a connection is evidence something is alive.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as
@@ -1733,8 +1883,36 @@ tool never had the problem. Twice is a coincidence, three times with #53's
 Recorded here because a comment on a merged pull request is not somewhere
 anyone will look again.
 
-**`transactions.category_source` -- opened 2026-08-26 (#39), due before the
-model adapter (#39's step 4) writes its first row.**
+**There are none open today.** The one that was here was closed on 2026-08-28 in
+#59, on time -- the account below is kept because the *shape* of the argument is
+the reusable part, and because a section that has only ever held one entry reads
+like a section nobody uses.
+
+**`transactions.category_source` -- opened 2026-08-26 (#39), closed 2026-08-28
+(#59), in the change that put a model behind the port and before it was switched
+on.**
+
+The column, the migration and the write path all landed in #59, ahead of the
+adapter in the same branch, which is what the deadline asked for in as many
+words. The rows that already existed were **backfilled to `rules`**, and that was
+argued rather than done quietly: it is provably true, not merely defensible --
+`CreateTransactionRequest` has never carried a category field, `CategorizerClient`
+is the only writer, and it had only ever spoken to a service whose one predictor
+was `RulesPredictor`. Leaving them null was the alternative and it lost on saying
+less than the evidence supports, and on making `category_source IS NULL` mean two
+things at once. The `WHERE category IS NOT NULL` clause is what keeps the
+remaining meaning clean: **a source exists exactly when a category does**, which
+was checked against the running database rather than reasoned about -- 2 rows
+backfilled of 21, 19 untouched, zero violations of that invariant.
+
+What it does *not* record, and this is the honest limit of the whole exercise:
+the 21 rows predating the column still say `rules` because they must have been,
+not because anything observed it. The deadline was never about those rows. It was
+about the rows that would have been written *after* a model started answering and
+*before* anyone thought to add the column, and there are none, because the column
+came first.
+
+The original entry, kept for the argument rather than the status:
 
 The categorizer answers `{category, source}` and `source` is `rules` today. The
 .NET side reads it, logs it and **does not store it**. There is no column.
@@ -1758,6 +1936,8 @@ So: **the column, the migration and the write must land in the same change as
 the model adapter, and before it is switched on** -- not in the change after it,
 and not "when we start comparing". The comparison is the thing that needs the
 data, and by then it is too late to collect it.
+
+*(Done, #59, 2026-08-28. See the note above this block.)*
 
 The two that used to be here -- the schema naming and the day boundary -- were
 settled on 2026-08-18 in #13 and #17, and both records live in "The stack, and

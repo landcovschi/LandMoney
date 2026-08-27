@@ -1,8 +1,19 @@
+﻿using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
 using LandMoney.Web.Models;
 
 namespace LandMoney.Web.Categorizing;
+
+/// <summary>A category, and the name of whatever produced it.</summary>
+// Not in CategorizerContracts.cs with the other two records, and the split is the
+// point: those describe bytes on a wire and may be shaped by a service this
+// application does not own, while this is what *this* application decided to
+// believe. Both fields are non-nullable here because a suggestion that cannot name
+// its producer is refused rather than represented -- so the absence lives in the
+// `?` on the return type, in one place, instead of in two fields the caller has to
+// check separately.
+public sealed record CategorySuggestion(string Category, string Source);
 
 /// <summary>Asks the Python categorizer for a category, and never lets it stop a save.</summary>
 // A typed client -- registered with AddHttpClient&lt;CategorizerClient&gt;, so the
@@ -35,14 +46,14 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
     // about the library's version, and the contract is a fact about the service.
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    /// <summary>The suggested category, or null if there is not one to be had.</summary>
+    /// <summary>The suggestion, or null if there is not one to be had.</summary>
     /// <remarks>
-    /// Null covers three different events and the caller treats them the same: the
-    /// rules abstained, the service answered something unusable, or it was not
-    /// there at all. Only the first is visible in a response, and nothing stores
-    /// which it was.
+    /// Null covers four different events and the caller treats them the same: the
+    /// predictor abstained, the service answered something unusable, it could not
+    /// name what produced the answer, or it was not there at all. Only the first is
+    /// visible in a response, and nothing stores which it was.
     /// </remarks>
-    public async Task<string?> SuggestCategoryAsync(
+    public async Task<CategorySuggestion?> SuggestCategoryAsync(
         string description,
         decimal amount,
         string currency,
@@ -60,6 +71,14 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
         {
             return null;
         }
+
+        // Only read on the timeout path below, and it is there because #59 gave this
+        // client two clocks. Without it the log names `http.Timeout` and is wrong
+        // whenever the *connect* budget was the one that fired -- measured: a save
+        // against an unreachable categorizer gave up after 2.15 s and reported
+        // "did not answer within 00:00:08". A log line that misnames which limit
+        // was hit sends the reader to the wrong configuration key.
+        var started = Stopwatch.GetTimestamp();
 
         try
         {
@@ -104,10 +123,45 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
                 return null;
             }
 
-            logger.LogInformation(
-                "Categorizer suggested {Category} by {Source}.",
-                category, body.Source ?? "an unnamed source");
-            return category;
+            // #59. A category whose producer cannot be named is refused outright,
+            // and this is the guard that most looks like over-caution and is not.
+            // transactions.category_source exists because provenance cannot be
+            // reconstructed afterwards -- so storing a category with an unknown
+            // source would re-open, one row at a time, the exact hole the column
+            // was added to close. Refusing costs one guess; storing costs the
+            // ability to ever say which code wrote that row.
+            //
+            // Note this is reachable only if the service breaks its own contract:
+            // contracts.py declares `source` non-optional and FastAPI will not
+            // serialise a response without it.
+            if (body.Source is not { Length: > 0 } source)
+            {
+                logger.LogWarning(
+                    "Categorizer answered the category {Category} without naming a source; "
+                    + "storing the transaction with no category.",
+                    category);
+                return null;
+            }
+
+            // The same guard as the one above, for the same reason, against a
+            // different column. Kept separate rather than folded into it so the log
+            // line says which of the two was too long.
+            if (source.Length > Transaction.CategorySourceMaxLength)
+            {
+                logger.LogWarning(
+                    "Categorizer named a source of {Length} characters, over the {Max} the column holds; "
+                    + "storing the transaction with no category.",
+                    source.Length, Transaction.CategorySourceMaxLength);
+                return null;
+            }
+
+            // Stored verbatim, neither trimmed nor lower-cased, which is the same
+            // treatment Category gets one guard up. Normalising here would make this
+            // application the author of a value another process chose, and the
+            // vocabulary is already closed at the end that owns it -- `Source` is a
+            // StrEnum in contracts.py, so `Model` cannot leave that service.
+            logger.LogInformation("Categorizer suggested {Category} by {Source}.", category, source);
+            return new CategorySuggestion(category, source);
         }
         // The timeout, and recognising it takes the `when` clause. HttpClient
         // implements Timeout by cancelling the request, so what surfaces is
@@ -119,11 +173,21 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
         // The other half matters more than the message. When the token *is*
         // cancelled the caller has gone, and swallowing that here would carry on
         // and save a transaction for a request that no longer exists.
+        //
+        // **Both clocks arrive here, which is why the elapsed time is logged and
+        // not just the limit.** SocketsHttpHandler.ConnectTimeout implements its
+        // expiry by cancelling too, so a service that is not there and a service
+        // that is thinking too long are the same exception on the same branch --
+        // measured in #59, where the connect budget fired at 2.15 s and the only
+        // number in the message said eight seconds. The elapsed time is what tells
+        // a reader which of Categorizer:ConnectTimeoutSeconds and
+        // Categorizer:TimeoutSeconds to go and look at.
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             logger.LogWarning(
-                "Categorizer did not answer within {Timeout}; storing the transaction with no category.",
-                http.Timeout);
+                "Categorizer did not answer; gave up after {Elapsed} (overall timeout {Timeout}, "
+                + "so a shorter connect timeout fired if that is less). Storing the transaction with no category.",
+                Stopwatch.GetElapsedTime(started), http.Timeout);
             return null;
         }
         // Unreachable, refused, DNS failure, connection reset. The expected one

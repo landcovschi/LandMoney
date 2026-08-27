@@ -9,7 +9,9 @@ plus `ValidationFilter<T>`. `/docs` serves a browsable form for it, which is the
 fastest way to try this by hand.
 """
 
-from typing import Annotated
+import logging
+import os
+from typing import Annotated, Mapping
 
 from fastapi import Depends, FastAPI
 from pydantic import BaseModel
@@ -17,29 +19,82 @@ from pydantic import BaseModel
 from categorizer.contracts import CategorizeRequest, CategorizeResponse
 from categorizer.predictor import Predictor, RulesPredictor
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title="LandMoney categorizer",
     version="0.1.0",
     summary="Suggests a category for one transaction. Rules only -- no model, by rule.",
 )
 
-# One instance, built at import time, because it holds nothing per-request and
-# nothing that can fail: `RULES` is a module-level tuple of strings. The moment a
-# predictor owns a client with a connection pool and a timeout, this becomes a
-# lifespan-managed object instead, and `get_predictor` is the line that changes
-# rather than every call site -- which is what the indirection buys.
-_RULES_PREDICTOR = RulesPredictor()
+def build_predictor(env: Mapping[str, str]) -> Predictor:
+    """Which implementation is behind the port -- #59, and the switch is one word.
+
+    Rules unless told otherwise, so nothing changes for anyone who sets nothing:
+    `docker compose up`, `pytest` and a fresh clone all get the baseline, and the
+    model costs money only when it is asked for by name.
+
+    **An unrecognised value raises, and the process does not start.** That is
+    deliberately the opposite of how `Categorizer:BaseUrl` behaves on the .NET side,
+    where an absent value is a legal state -- and the reason for the difference is
+    which way the mistake points. There, the missing key had one unavoidable cause
+    (`efbundle` runs `Program.cs` with no `appsettings.json`) and the failure was a
+    deploy that died. Here a typo -- `modle`, `Model `, `anthropic` -- would serve
+    the *rules* while the deployment believed a model was running, and #60 would
+    then record a number under the wrong name with nothing anywhere reporting it. A
+    container that will not start says so in one line; a baseline mislabelled as a
+    model result is discovered months later, if at all.
+
+    Takes the environment as an argument rather than reading `os.environ` itself, so
+    a test names the configuration it is testing instead of mutating the process.
+    """
+    wanted = env.get("CATEGORIZER_PREDICTOR", "").strip().lower()
+
+    # Blank reads as unset, and that is worth a line because it disagrees with how
+    # `Authentication:InviteCode` is read on the .NET side, where empty means "fail
+    # closed". The difference is which way each default points: there the safe state
+    # is refusing, here the safe state is the free one. It also removes a foot-gun,
+    # since `${CATEGORIZER_PREDICTOR:-}` in a compose file or a Container Apps
+    # environment variable set to nothing both arrive as an empty string, and
+    # refusing to start over that would be a puzzle rather than a signal.
+    if not wanted or wanted == "rules":
+        return RulesPredictor()
+
+    if wanted == "model":
+        # Imported here, not at module scope, so that the `anthropic` package is
+        # only needed by a process that actually asked for the model -- and so the
+        # rules path keeps starting with nothing installed beyond FastAPI.
+        from categorizer.anthropic_predictor import AnthropicPredictor
+
+        logger.info("Categorising with the model. This costs money per request.")
+        return AnthropicPredictor.from_env(env)
+
+    raise ValueError(
+        f"CATEGORIZER_PREDICTOR is {wanted!r}; it has to be 'rules' or 'model'."
+    )
+
+
+# Built once at import. #39 predicted this would become lifespan-managed the moment
+# a predictor owned a connection pool, and it now does -- the argument is written
+# down here rather than acted on, because the lifespan version costs more than it
+# buys at this size. There is nothing to release that ending the process does not
+# release, this service is one container per predictor, and `TestClient(app)`
+# outside a `with` block never runs a lifespan -- so every existing test would have
+# to change to reach a seam none of them use. It becomes the right answer when
+# something here needs shutting down cleanly, or when the predictor has to change
+# without a restart.
+_PREDICTOR = build_predictor(os.environ)
 
 
 def get_predictor() -> Predictor:
-    """The seam. Overridden in tests, replaced by the model adapter later.
+    """The seam. Overridden in tests; chosen by configuration in production.
 
     FastAPI's `dependency_overrides` swaps this for a fake by identity, so a test
     substitutes a predictor without patching a module or starting a real one --
     the same job a `ServiceCollection` registration does for a .NET integration
     test, minus the container.
     """
-    return _RULES_PREDICTOR
+    return _PREDICTOR
 
 
 class Health(BaseModel):

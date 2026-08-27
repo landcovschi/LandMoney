@@ -80,6 +80,8 @@ src/categorizer/
   rules.py            109 ordered substrings. Moved from evals/, unchanged
   contracts.py        request and response -- records with DataAnnotations
   predictor.py        Protocol (= interface) + the rules implementation
+  prompt.py           what the model is told, and the schema it answers into
+  anthropic_predictor.py   the model behind the same Protocol -- #59
   main.py             FastAPI: POST /categorize, GET /health
 tests/
 ```
@@ -88,3 +90,53 @@ The doubled name in `src/categorizer/src/categorizer` is the src layout, and it
 is deliberate: the import root is exactly one folder, so a test cannot pass
 against source the built wheel does not contain. `pyproject.toml` has the
 argument.
+
+
+## Which predictor answers -- #59
+
+`CATEGORIZER_PREDICTOR` picks it, and the default is the free one:
+
+| value | what answers | costs money |
+| --- | --- | --- |
+| unset, blank, or `rules` | `RulesPredictor` -- 109 substrings | no |
+| `model` | `AnthropicPredictor` -- one Claude call per request | **yes, per request** |
+
+Anything else **stops the process** rather than falling back. That is deliberate
+and it is the one place this service refuses to start: a typo that quietly served
+the rules would let a deployment believe a model was running, and the score
+recorded for it would be the baseline's under a different name. A container that
+will not start says so in one line; a mislabelled number is found months later.
+
+```bash
+CATEGORIZER_PREDICTOR=model uv run uvicorn categorizer.main:app --reload
+```
+
+The key comes from `ANTHROPIC_API_KEY`, which the SDK reads itself -- it is never
+named in an argument and never logged. Locally it belongs in `.env`, which is
+git-ignored and which nothing here may print. **A missing key does not stop the
+process**, measured rather than assumed: `anthropic.Anthropic()` constructs
+without one and fails at the first request, so the service logs one error at
+startup and then answers `category: null` for every row -- #39's fallback, with a
+model behind the port. A *wrong* key behaves the same way, one 401 per request.
+
+Three more knobs, all with defaults in `anthropic_predictor.py` and all there so
+#60 can move them without editing code: `CATEGORIZER_MODEL` (`claude-opus-5`),
+`CATEGORIZER_EFFORT` (`low`), `CATEGORIZER_TIMEOUT_SECONDS` (`6`).
+
+The six seconds is chosen against the **.NET** side rather than this one:
+`CategorizerClient` allows the whole call eight, so a request still running at six
+has already lost its caller. `max_retries=0` for the same arithmetic -- the SDK's
+default of two would let one call reach 18 seconds for an answer nobody is
+waiting for.
+
+### What the adapter may not do
+
+Normalise the **input**. `Groceries` and ` groceries ` become `groceries` on the
+way *out*; the description goes to the model exactly as it arrived. Tidying it up
+here would improve this predictor and silently move the rules baseline it is
+measured against -- the mutation #39 caught by hand, and there is a test for it.
+
+A word outside the eleven is an abstention, not a twelfth category and not a
+mapping: `food` stays `food` and is refused. The prompt's schema constrains the
+answer to the eleven plus `unknown`, and the adapter checks anyway, because the
+schema is a property of one route and the check is a property of the adapter.

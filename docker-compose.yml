@@ -57,6 +57,23 @@ services:
       context: ./src/categorizer
     container_name: landmoney-categorizer
     restart: unless-stopped
+    environment:
+      # **#59, and the default is the point.** `rules` unless asked otherwise, so
+      # the everyday `docker compose up` costs nothing and CI stays free. Set
+      # CATEGORIZER_PREDICTOR=model in `.env` for a session that wants the model;
+      # an unrecognised value stops the container rather than quietly serving the
+      # baseline under the model's name.
+      CATEGORIZER_PREDICTOR: ${CATEGORIZER_PREDICTOR:-rules}
+
+      # Read from `.env`, which is git-ignored and which nothing in this repository
+      # may print. Empty when it is absent, which is correct: the `rules` path never
+      # looks at it, and the `model` path fails its first call and answers with no
+      # category -- the fallback of #39, with a model behind the port.
+      #
+      # Deployed this is a Container Apps secret referenced by name, the same road
+      # the connection string takes (#36) -- not that this service is deployed to
+      # Azure yet; only the .NET app is.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
       # Published so the host's `dotnet run` can reach it, and bound to
       # 127.0.0.1 for the same reason postgres is. The app *container* does not
