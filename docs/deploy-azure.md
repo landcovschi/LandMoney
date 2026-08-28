@@ -29,6 +29,7 @@ inspected.
 | Database        | `landmoney`         | Same name as local, so only host and credentials differ |
 | Environment     | `cae-landmoney`     |                                                         |
 | Container app   | `landmoney`         | First label of the URL                                  |
+| Categorizer app | `landmoney-categorizer` | Internal ingress -- no URL at all, see step 16       |
 
 **Why the database's full host name is `<server>` below and not spelled out**,
 decided in #36. The container app's FQDN is written out everywhere in this
@@ -1312,6 +1313,151 @@ resource. Deliberately not done in #52 -- it is a deployment decision with a bil
 attached rather than part of closing the door -- and it is the first thing to pick
 up afterwards, because a password typed on every visit is what makes people pick
 short ones.
+
+
+## Step 16 -- the categorizer, as its own app
+
+**#61.** Until this, `src/categorizer/` existed in `docker-compose.yml` and
+nowhere else: nothing in Azure built it, pushed it or ran it. What that looked
+like from outside is nothing at all, which is why it went unnoticed -- the
+deployed app resolved `Categorizer:BaseUrl` to the `appsettings.json` default
+`http://127.0.0.1:8000`, found nothing listening, and stored every transaction
+with no category. The feature was not broken; it was absent, and the fallback of
+#39 is what hid it.
+
+### The decision, and what lost
+
+**A separate Container App with internal ingress.** The categorizer is its own
+app in the same environment, `landmoney-categorizer`, reachable only from inside
+`cae-landmoney` and not from the internet. It has its own revisions, its own
+scaling and its own log stream.
+
+**What lost: a second container in the same app.** They would share a revision
+and a lifecycle, `localhost:8000` would keep working with no configuration
+change at all, and there would be one thing to deploy instead of two. It is
+cheaper in moving parts, and it solves the cold start below for free -- uvicorn
+would start in parallel with the .NET process, so by the time the app answered
+its first request the categorizer would already be up.
+
+It lost on what this project is for. `CLAUDE.md` says skill gained beats working
+code where the two conflict, and a sidecar is two processes in a box: the thing
+worth learning here is service-to-service inside a Container Apps environment --
+internal ingress, an internal FQDN, a dependency with its own release. The
+sidecar also couples two releases into one, so a change to the Python service
+would replace the .NET revision and sign everybody out (step 15's Data
+Protection note), which is a real cost rather than a theoretical one.
+
+**`--min-replicas 0`, chosen rather than discovered.** This is #61's first trap.
+The app scales to zero and takes 23.3 s to come back; a categorizer that also
+scales to zero puts a second cold start on the path of a save, and the client
+gives up after 8 s -- 2 s of which is the connect budget (#59). So **the first
+save of a session may be stored with no category**, and every save after it
+categorised. The alternative is `--min-replicas 1`, which keeps one replica warm
+and therefore billed around the clock; it was weighed and declined for a service
+one person uses weekly, against a subscription that already has a 15-20 USD a
+month Postgres bill arriving when the free year ends (#34).
+
+What makes that affordable is that the failure is exactly the one #39 designed
+for: the transaction is saved, `category` is null, and the log says so. It is
+not a lost save.
+
+**Not measured yet:** the categorizer's own cold start. The image is 46 MB
+against the .NET app's 350 MB and uvicorn starts in about a second, so it may
+well fit inside the 8 s budget and make the paragraph above pessimistic. Measure
+it the way the app's was measured -- wait for `replica list` to report zero,
+then time one save -- and write the number here.
+
+### Create it
+
+The image has to exist first: `publish` in `ci.yml` pushes
+`ghcr.io/landcovschi/landmoney-categorizer` on every push to `main`, so this
+step runs once, after #61 merges, using that run's SHA tag.
+
+```
+az containerapp create --resource-group rg-landmoney --name landmoney-categorizer --environment cae-landmoney --image ghcr.io/landcovschi/landmoney-categorizer:sha-<40 characters> --target-port 8000 --ingress internal --min-replicas 0 --max-replicas 1 --cpu 0.25 --memory 0.5Gi --env-vars "CATEGORIZER_PREDICTOR=rules"
+```
+
+- **`--ingress internal`.** No public FQDN, so there is nothing on the internet
+  to find. This matters more than it looks: the endpoint takes unauthenticated
+  POSTs, and once the model of #59 is behind it, an open endpoint is somebody
+  else's Anthropic bill.
+- **`--target-port 8000`**, which is what the Dockerfile's `CMD` binds and what
+  `EXPOSE` declares. #35's first trap applies unchanged -- a wrong target port
+  provisions successfully and then fails every probe.
+- **`--cpu 0.25 --memory 0.5Gi`**, the smallest valid combination; memory has to
+  be twice the vCPU count in GiB. The substring scan the rules baseline performs
+  needs none of it.
+- **`CATEGORIZER_PREDICTOR=rules`, written out although it is also the image's
+  default.** Two reasons. It is what `az containerapp show` can then answer,
+  rather than "nothing is set and the image decides". And the other value costs
+  money: `model` means an `ANTHROPIC_API_KEY` as a Container Apps secret and one
+  Claude call per saved transaction. That is a decision with a bill attached and
+  it is not this step's.
+- **No registry credentials**, for the reason step 10 gives: the package is
+  public. It is a *second* package though, and ghcr.io makes each new one
+  private by default -- so if the revision fails to start with `UNAUTHORIZED`,
+  the fix is the new package's settings on GitHub, not a flag here.
+
+### Point the app at it
+
+The internal FQDN carries the environment's random middle label, so read it back
+rather than typing it:
+
+```
+az containerapp show -g rg-landmoney -n landmoney-categorizer --query "properties.configuration.ingress.fqdn" -o tsv
+az containerapp update -g rg-landmoney -n landmoney --set-env-vars "Categorizer__BaseUrl=http://landmoney-categorizer.internal.<label>.polandcentral.azurecontainerapps.io"
+```
+
+- **`--set-env-vars` adds and updates; `--replace-env-vars` deletes everything
+  else** -- including `ConnectionStrings__Default`, which is a `secretref` and
+  would take the site down. One word apart in the same help text.
+- **`http://`, not `https://`.** Internal ingress serves both, and this hop never
+  leaves the environment. Plain http avoids a certificate to validate on a
+  connection that has no public exposure.
+- **Two underscores**, the same trap step 12 records for the connection string.
+  One makes a key nobody reads, and the symptom is silence: the app falls back to
+  the `appsettings.json` default and stores no categories, which is the state
+  this whole step exists to end.
+- **Why an environment variable rather than a change to `appsettings.json`.** The
+  committed default is what a developer machine needs, and each of the three
+  arrangements wants a different address -- `127.0.0.1:8000` from the host,
+  `http://categorizer:8000` inside compose, the internal FQDN in Azure. Only the
+  last one is per-deployment, so only the last one is set this way.
+
+### How it is checked
+
+**Not with `curl` from here.** Internal ingress means there is no public FQDN, so
+a laptop cannot reach it and neither can a GitHub runner. That is the point of
+the arrangement rather than an inconvenience, and it is why the checks split in
+two.
+
+What `ci.yml` asserts on every deployment, in `Check the categorizer`: the
+revision runs this commit's image, the ingress is still `external: false`, and
+the app's `Categorizer__BaseUrl` is exactly the internal FQDN. Those are the
+three ways this comes undone with nobody noticing.
+
+What is checked by hand, and is #61's acceptance test:
+
+| Check                                                    | Expected                       |
+| -------------------------------------------------------- | ------------------------------ |
+| Save a transaction described `Lidl` on the deployed site  | the row shows a category       |
+| `az containerapp logs show -g rg-landmoney -n landmoney --type console --tail 40` | `Categorizer suggested ... by rules`, not `Categorizer is unreachable` |
+| `az containerapp update -g rg-landmoney -n landmoney-categorizer --min-replicas 0 --max-replicas 0`, then save again | the transaction is saved, with no category |
+
+The third row is the one worth doing rather than assuming: it is #39's fallback,
+which was measured against `docker compose stop` and has never been seen against
+an Azure ingress. `--max-replicas 0` is how a Container App is taken out of
+service without being deleted; put it back with `--max-replicas 1`.
+
+### Rolling it back
+
+The same shape as the app, and independent of it now -- which is the half the
+sidecar would not have given:
+
+```
+az containerapp revision list -g rg-landmoney -n landmoney-categorizer --all -o table
+az containerapp update -g rg-landmoney -n landmoney-categorizer --image ghcr.io/landcovschi/landmoney-categorizer:sha-<an older 40 characters>
+```
 
 
 ## Tearing it all down

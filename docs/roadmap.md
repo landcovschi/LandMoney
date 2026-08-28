@@ -745,6 +745,28 @@ again by itself after 7 days.
        Inside `build` rather than in a job of its own, because `build` is the
        required check and a new job protects nothing until the ruleset names
        it
+
+       **It reached Azure on 2026-08-28** in #61, which is later than it sounds:
+       between #39 and #61 the service ran in `docker-compose.yml` and nowhere
+       else, so the deployed app resolved `Categorizer:BaseUrl` to the
+       `appsettings.json` default, found nothing listening on `127.0.0.1:8000`
+       inside its own container, and stored **every** transaction with no
+       category. Nothing was red the whole time -- the fallback three paragraphs
+       up is precisely what hid it, and that is the general lesson worth taking
+       out of this project: a dependency the application is designed to run
+       without is one whose absence nothing reports
+
+       It is **its own container app with internal ingress**, not a second
+       container in the app's revision. The sidecar was cheaper in every
+       mechanical way and would have made the cold start below disappear; it
+       lost on this being the arrangement worth learning, and on coupling a
+       Python release to a .NET revision that signs everybody out when it is
+       replaced. `--min-replicas 0` was chosen rather than discovered, so **the
+       first save of a session may be stored with no category** -- the app's own
+       cold start is 23.3 s and the client gives up after 8 -- and the
+       categorizer's own cold start is deliberately recorded as not yet measured
+       rather than guessed at
+
 4. [x] An Anthropic adapter behind a port, plus a fake with canned responses so
        tests never hit the network and never cost money
 

@@ -70,9 +70,11 @@ services:
       # looks at it, and the `model` path fails its first call and answers with no
       # category -- the fallback of #39, with a model behind the port.
       #
-      # Deployed this is a Container Apps secret referenced by name, the same road
-      # the connection string takes (#36) -- not that this service is deployed to
-      # Azure yet; only the .NET app is.
+      # Deployed there is no key at all: the categorizer runs in Azure since #61,
+      # as its own container app, and it is pinned to CATEGORIZER_PREDICTOR=rules
+      # there -- the model would be one Claude call per saved transaction. The day
+      # that changes, the key is a Container Apps secret referenced by name, the
+      # same road the connection string takes (#36).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
       # Published so the host's `dotnet run` can reach it, and bound to
