@@ -118,8 +118,15 @@ export function ImportForm({ onImported }: ImportFormProps) {
           a request is made cannot go wrong. The server would answer a 400 about
           an empty file, which is a correct sentence about a mistake the form
           could simply have prevented.
+
+          aria-busy is separate from disabled, and that separation is the point.
+          This is the first button in the application to be disabled for a reason
+          other than a request being in flight, and App.css drew its spinner on
+          every disabled button -- so a freshly loaded page spun forever here. The
+          spinner is keyed on aria-busy now; the comment on that rule has the
+          account.
         */}
-        <button type="submit" disabled={sending || !file}>
+        <button type="submit" disabled={sending || !file} aria-busy={sending}>
           {sending ? 'Importing...' : 'Import'}
         </button>
       </form>

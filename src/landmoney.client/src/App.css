@@ -200,12 +200,31 @@ button:not(.link):active:not(:disabled) {
   box-shadow: none;
 }
 
-/* Submitting, not "broken". cursor: progress rather than not-allowed says the
-   difference: something is happening and it is not this reader's turn. */
+/* Unavailable. not-allowed rather than progress, because this is now the state
+   of a button with nothing to do yet -- Import before a file has been chosen --
+   and it *is* the reader's turn. The busy case takes the cursor back below.
+
+   These two used to be one rule keyed on :disabled, on the true-at-the-time
+   assumption that the only reason any button here was ever disabled was a
+   request in flight. #62 broke it: the Import button is disabled whenever no
+   file is chosen, which is the state on arrival, so a freshly loaded page
+   showed a spinner that never stopped and a cursor claiming something was
+   happening. Reported from the deployed site, which is where it looked worst.
+
+   Keyed on aria-busy now rather than on :disabled, so the rule says what it
+   means. That attribute is the accessibility signal for exactly this, so the
+   painting and the screen reader agree instead of the CSS inferring busy-ness
+   from a different attribute -- and a button can now be unavailable without
+   claiming to be working. */
 button:disabled {
-  cursor: progress;
+  cursor: not-allowed;
   opacity: 0.7;
   transform: none;
+}
+
+/* Submitting, not "broken", and not merely unavailable. */
+button[aria-busy='true'] {
+  cursor: progress;
 }
 
 /* The spinner is the only thing on the screen that says the wait is still
@@ -214,7 +233,7 @@ button:disabled {
    button's own colour, so it needs no token and cannot be wrong in either
    theme, and stopped outright under prefers-reduced-motion by the rule in
    index.css. */
-button:not(.link):disabled::after {
+button:not(.link)[aria-busy='true']::after {
   content: '';
   width: 0.85em;
   height: 0.85em;
