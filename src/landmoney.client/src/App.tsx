@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react'
 import { getMe, logout, type Me } from './api/auth'
-import { createTransaction, listTransactions } from './api/transactions'
+import {
+  createTransaction,
+  listCategories,
+  listTransactions,
+  updateCategory,
+} from './api/transactions'
 import type { NewTransaction } from './api/types'
 import { ImportForm } from './components/ImportForm'
 import { LoginForm } from './components/LoginForm'
@@ -22,6 +27,18 @@ type SessionState =
 function App() {
   const [list, setList] = useState<ListState>({ status: 'loading' })
   const [session, setSession] = useState<SessionState>({ status: 'loading' })
+
+  // #63. The eleven, fetched from the server so this client holds no copy of them.
+  //
+  // No loading or failed state of its own, unlike the two above, and the asymmetry
+  // is deliberate. There is nothing useful to say about this request while it is in
+  // flight -- the list is what the page is for and it is arriving at the same time
+  // -- and there is nothing useful to say if it fails either, because the answer to
+  // "the categories could not be fetched" is the same as the answer to "there are
+  // no categories": show the stored category and offer no way to change it.
+  // CategoryCell does exactly that with an empty array, so the empty state and the
+  // failure state want the same rendering and do not need to be distinguishable.
+  const [categories, setCategories] = useState<readonly string[]>([])
 
   // A counter, incremented to ask for the list again. It is a dependency of the
   // effect below, so changing it re-runs the effect -- which is the boring way
@@ -111,6 +128,32 @@ function App() {
     return () => controller.abort()
   }, [reloads, session.status])
 
+  // #63. Its own effect rather than a second promise inside the one above, and not
+  // because the two could not be awaited together -- they could. It is that this
+  // one must not be a dependency of `reloads`: the list is fetched again after
+  // every create, import and correction, and the eleven categories have not changed
+  // in any of those cases. Folding it in would turn one request per page load into
+  // one per write.
+  useEffect(() => {
+    if (session.status !== 'signedIn') {
+      return
+    }
+
+    const controller = new AbortController()
+
+    listCategories(controller.signal)
+      .then(setCategories)
+
+      // Swallowed, and this is the one place in this file where that is the right
+      // thing to do. A failure here means the dropdown is not offered; the rows,
+      // the amounts and the form all still work, and there is no action for the
+      // reader to take. Reporting it in the list's own error state would replace a
+      // working table with a message about a feature.
+      .catch(() => setCategories([]))
+
+    return () => controller.abort()
+  }, [session.status])
+
   // Deliberately not caught here. The form needs the ApiError itself to put the
   // server's messages beside its own fields, and catching it in this function
   // would leave the form with a rejected promise it never sees.
@@ -144,6 +187,44 @@ function App() {
     // the same fix as the paragraph above, and both become worth it together --
     // not because nobody noticed.
     reload()
+  }
+
+  // #63, and it is deliberately not `reload()`.
+  //
+  // handleCreate above asks the server for the whole list again and argues for it:
+  // the order is (OccurredAt desc, CreatedAt desc), decided on the server, and a
+  // back-dated entry belongs in the middle of the list rather than at the top --
+  // so inserting client-side would mean writing that comparator a second time in
+  // another language. None of that applies here. A correction changes neither sort
+  // key, so the row cannot move, and the response carries the stored row: replacing
+  // it in place is not a guess about where the server would have put it.
+  //
+  // Which is what answers the trap the issue names -- the list drops to "Loading..."
+  // after a write, and a correction is a far worse place for that flicker than a
+  // create. Not because it is uglier, but because a create is followed by an empty
+  // form and a correction is followed by looking at the row to see whether it took.
+  // Blanking the table at that moment answers the question with a spinner.
+  //
+  // Nothing is caught here: CategoryCell needs the rejection to decide what its own
+  // select shows and what to say underneath it, and catching it here would leave
+  // the cell with a promise that resolved after a write that did not happen.
+  async function handleChangeCategory(id: string, category: string | null) {
+    const updated = await updateCategory(id, category)
+
+    setList((current) =>
+      // The status is checked rather than assumed. The list can have gone back to
+      // 'loading' while this request was in flight -- a reload started by the form
+      // or the import -- and writing rows into that state would put a stale table
+      // back on the screen underneath a newer request that is still arriving.
+      current.status === 'ready'
+        ? {
+            status: 'ready',
+            transactions: current.transactions.map((transaction) =>
+              transaction.id === updated.id ? updated : transaction,
+            ),
+          }
+        : current,
+    )
   }
 
   async function handleSignOut() {
@@ -214,7 +295,12 @@ function App() {
           */}
           <ImportForm onImported={reload} />
 
-          <TransactionList state={list} onRetry={reload} />
+          <TransactionList
+            state={list}
+            onRetry={reload}
+            categories={categories}
+            onChangeCategory={handleChangeCategory}
+          />
         </>
       )}
     </main>

@@ -449,6 +449,103 @@ button:not(.link):disabled::after {
   font-weight: 400;
 }
 
+/* --- the correction (#63) -------------------------------------------------- */
+
+/* The category cell stopped being a word and became a control. Wrapping rather
+   than one line: at the table's narrower widths the select and its badge do not
+   both fit beside the description, and a badge pushed out of the cell is worse
+   than one on a second line. */
+.category {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* --border and not the --border-strong that .field select gets, and the argument
+   is the one already written above .tag-empty: a form has four controls and this
+   column has one per row. Twenty-one strong outlines down a page is a grid of
+   boxes, and the thing worth looking at -- which category each row has -- is what
+   they shout over. The stronger border arrives on hover instead, where it is
+   answering somebody who is already pointing at the row. */
+.category-select {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-strong);
+  font-size: var(--text-sm);
+
+  /* Without this the select is as wide as its widest option in most engines, so
+     the column is sized by "subscriptions" whether or not any row has one. */
+  max-width: 100%;
+  transition:
+    border-color var(--motion) var(--ease),
+    opacity var(--motion) var(--ease);
+}
+
+@media (hover: hover) {
+  .category-select:hover:not(:disabled) {
+    border-color: var(--text-muted);
+  }
+}
+
+/* Disabled means a correction is in flight, which lasts a few milliseconds
+   locally and up to a cold start on the deployed app. Faded rather than greyed
+   out with a colour of its own: the value in it is still the one being written
+   and should stay readable. */
+.category-select:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* aria-invalid drives it, the way .field does -- the attribute is already there
+   for the screen reader, so the control cannot look wrong while being announced
+   as fine. */
+.category-select[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+/* The badge that is the whole point of the issue: without it a category a person
+   chose and a category a substring match guessed are the same word on screen.
+
+   Quieter than .tag by default -- an outline and muted text -- because on most
+   rows it says "rules", which is a fact about provenance and not the content of
+   the cell. The category is what the column is for; this sits behind it. */
+.tag-source {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 400;
+  cursor: help;
+}
+
+/* Except for a human one, which is the only one of the three that is settled.
+   Colour is not the only thing carrying it -- the badge prints the word "human"
+   either way -- so this is emphasis rather than the signal itself. */
+.tag-source[data-source='human'] {
+  border-color: var(--accent-soft);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 500;
+}
+
+.category-saving {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* Inside the cell rather than in the banner at the top of the page. A correction
+   that failed is a fact about one row, and the row is where the person is
+   looking; #52 records the same mistake made the other way round, where a message
+   about the password field appeared above the whole form because the server sent
+   a key the form could not match to a control. */
+.category-error {
+  flex-basis: 100%;
+  font-size: var(--text-xs);
+  color: var(--danger);
+}
+
 /* --- the import ---------------------------------------------------------- */
 
 /* Reuses .entry for the card, so the two forms on this page are visibly the same

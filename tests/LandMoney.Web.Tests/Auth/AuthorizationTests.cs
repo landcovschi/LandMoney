@@ -22,8 +22,14 @@ namespace LandMoney.Web.Tests.Auth;
 // it, is a pure function and is covered by RegistrationPolicyTests.
 public class AuthorizationTests
 {
+    // /api/categories is #63's, and it is in this list for a reason that is not
+    // about the eleven words being secret -- they are in a public repository and in
+    // docs/evals.md. It is that it is a group of its own, so it inherits nothing:
+    // MapCategoryEndpoints without a RequireAuthorization beside it in Program.cs
+    // compiles, works, and is public. This is the line that reports that.
     [Theory]
     [InlineData("/api/transactions")]
+    [InlineData("/api/categories")]
     [InlineData("/api/me")]
     public async Task An_anonymous_request_for_data_is_refused_with_401(string path)
     {
@@ -86,6 +92,26 @@ public class AuthorizationTests
             "text/csv");
 
         var response = await client.PostAsync("/api/transactions/import", content);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    // #63. The correction endpoint is inside the group RequireAuthorization is
+    // applied to, and this is the assertion that it stayed there.
+    //
+    // The id is one that cannot exist, and the body is one that would be accepted
+    // if it reached the handler -- so a 404 here would be as bad as a 200: it would
+    // mean an anonymous caller had been told whether somebody else's transaction
+    // exists. Authorization has to answer before the row is looked for.
+    [Fact]
+    public async Task An_anonymous_correction_is_refused()
+    {
+        using var app = TestApp.WithInviteCode();
+        using var client = app.CreateNonFollowingClient();
+
+        var response = await client.PatchAsJsonAsync(
+            $"/api/transactions/{Guid.NewGuid()}",
+            new { category = "groceries" });
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }

@@ -1,5 +1,5 @@
 import { request } from './http'
-import type { ImportResult, NewTransaction, Transaction } from './types'
+import type { CategoryUpdate, ImportResult, NewTransaction, Transaction } from './types'
 
 // ApiError is re-exported rather than moved out of sight: every component that
 // catches one imports it from here, and #52 moving the class to http.ts is not a
@@ -13,6 +13,26 @@ export { ApiError } from './http'
 // treats a trailing slash as optional, which is the only reason this and
 // LandMoney.Web.http can both post to the bare path.
 const TRANSACTIONS_URL = '/api/transactions'
+
+// #63. A group of its own on the server, not /api/transactions/categories: the
+// eleven are not a sub-resource of one transaction, and the day a budget or a
+// filter needs them they would be reading a list out of another feature's URLs.
+const CATEGORIES_URL = '/api/categories'
+
+/** The closed list the correction dropdown is built from. */
+// Fetched rather than written down here, and that is #63's "decide how they stay
+// in step" answered rather than accepted. There were three copies of the eleven --
+// categories.py, the C# array, and a const in this client. This request is what
+// removes the third: the dropdown offers exactly what the server will accept, so
+// a correction cannot be offered and then refused. The two that are left are
+// pinned to each other by CategoriesTests, which reads categories.py.
+//
+// The cost is one round trip per page load for about 120 bytes, and a screen that
+// has to work when it fails -- App.tsx keeps an empty list and CategoryCell falls
+// back to showing the category without a way to change it.
+export function listCategories(signal?: AbortSignal): Promise<string[]> {
+  return request<string[]>(CATEGORIES_URL, { method: 'GET' }, signal)
+}
 
 /** Every transaction, newest first. The server decides the order. */
 export function listTransactions(signal?: AbortSignal): Promise<Transaction[]> {
@@ -39,6 +59,38 @@ export function createTransaction(
   )
 }
 
+/** Corrects one transaction's category and returns the row the server stored. */
+// PATCH with a one-field body, and the returned row is the point: it is what lets
+// the caller put the correction on screen without asking for the whole list again.
+// #63 names that as a trap -- the list drops to "Loading..." after a write, and a
+// correction is a much worse place for that flicker than a create is.
+//
+// The `encodeURIComponent` is not decoration for a value the server generated: the
+// id comes back over HTTP and is a string here, so treating it as one that must be
+// escaped costs nothing and is the habit that holds when the identifier is one
+// day a description.
+export function updateCategory(
+  id: string,
+  category: string | null,
+  signal?: AbortSignal,
+): Promise<Transaction> {
+  const body: CategoryUpdate = { category }
+
+  return request<Transaction>(
+    `${TRANSACTIONS_URL}/${encodeURIComponent(id)}`,
+    {
+      method: 'PATCH',
+
+      // The same header the POST needs, and for the same two reasons: minimal
+      // APIs bind a JSON body only when the request says it is sending one, and
+      // a content type no cross-site form can produce is one of the two CSRF
+      // locks AuthenticationSetup.cs records.
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+    signal,
+  )
+}
 
 /** How long an import may take before the client gives up on it. */
 // Far above the ten seconds every other call gets, and the reason is the shape of

@@ -1,4 +1,5 @@
 import type { Transaction } from '../api/types'
+import { CategoryCell } from './CategoryCell'
 
 /**
  * What the list knows at a given moment.
@@ -20,9 +21,26 @@ export type ListState =
 interface TransactionListProps {
   state: ListState
   onRetry: () => void
+
+  /** The closed list of eleven, from the server. Empty if it could not be fetched. */
+  // Passed down rather than fetched here, so there is one request for it per page
+  // load instead of one per row -- and so the failure of that request is a fact the
+  // application knows rather than something twenty-one components each discover.
+  categories: readonly string[]
+
+  /** Stores a correction. Resolves when the server has it; rejects with the reason. */
+  // The promise is the contract. CategoryCell needs to know when the write
+  // finished, and whether it worked, to decide what its own select shows -- so
+  // this cannot be a fire-and-forget callback.
+  onChangeCategory: (id: string, category: string | null) => Promise<void>
 }
 
-export function TransactionList({ state, onRetry }: TransactionListProps) {
+export function TransactionList({
+  state,
+  onRetry,
+  categories,
+  onChangeCategory,
+}: TransactionListProps) {
   if (state.status === 'loading') {
     return (
       <p className="list-status" role="status">
@@ -131,18 +149,25 @@ export function TransactionList({ state, onRetry }: TransactionListProps) {
 
             <td role="cell">
               {/*
-                A span around the category where the text used to stand on its
-                own, so both halves of the state can be drawn as one token --
-                see .tag in App.css. It carries no role and no aria: it is the
-                same cell with the same text in it, governed by the same
-                scope="col" header, and a screen reader reads it exactly as it
-                did before.
+                #63. The cell was a span holding the stored word; it is now a
+                control, because the list rendered whatever the server had
+                decided and there was no way to disagree with it. A correction
+                made here is a labelled row produced by the one person who can
+                judge it, during ordinary use -- which is the only route to
+                labelled data in this project that is not somebody sitting down
+                to do a chore.
+
+                The per-row state lives inside CategoryCell rather than here.
+                What that buys is written on the component; what it costs is
+                that this list can no longer be read as a pure function of its
+                props, which is why the boundary is a whole component and not a
+                hook called in the middle of a map.
               */}
-              {transaction.category ? (
-                <span className="tag">{transaction.category}</span>
-              ) : (
-                <span className="tag tag-empty">Uncategorised</span>
-              )}
+              <CategoryCell
+                transaction={transaction}
+                categories={categories}
+                onChange={(category) => onChangeCategory(transaction.id, category)}
+              />
             </td>
 
             <td role="cell" className="numeric">

@@ -158,6 +158,18 @@ public sealed record CreateTransactionRequest
 // the client and belongs in #6: new Date("2026-08-19") parses as UTC midnight,
 // so anyone west of UTC renders the day before. The date is already a plain
 // string in the shape a human reads -- display it, do not construct a Date.
+//
+// CategorySource joined it in #63, and it is the field that makes the column
+// earn itself. The value has been written since #59 and read by nobody: a
+// correction and a guess were the same thing on screen, and after a week nothing
+// could tell them apart. It is `string?` and not an enum for the same reason
+// ImportRowProblem.Outcome is a string on the client -- "rules" and "model" are
+// another process's words arriving over HTTP, and a closed C# enum here would be
+// a compile-time promise about what the categorizer sends.
+//
+// The invariant it carries, established in #59 and checked against the running
+// database: a source exists exactly when a category does. Both null together, or
+// neither.
 public sealed record TransactionResponse(
     Guid Id,
     DateOnly OccurredAt,
@@ -165,4 +177,32 @@ public sealed record TransactionResponse(
     string Currency,
     string Description,
     string? Category,
+    string? CategorySource,
     DateTimeOffset CreatedAt);
+
+/// <summary>What a client is allowed to send when correcting a category.</summary>
+// One field, and that is the decision rather than a consequence of there being
+// nothing else to change. #63: do not send the whole transaction back to save one
+// field. A PATCH that accepted an amount would be a way to overwrite money with a
+// stale value from a screen somebody left open -- the row is read, edited
+// somewhere else, and then written back in full from the older copy. A request
+// type that cannot carry an amount cannot lose one.
+//
+// `required string?` rather than `string?`, and the two words are doing different
+// jobs. System.Text.Json enforces `required` while binding, so a body of `{}` is a
+// 400 from the binder before this type reaches the handler; the `?` is what makes
+// `{"category": null}` legal, which is how a category is cleared. Without the
+// first, absent and null would be the same request and "clear it" would be
+// indistinguishable from "you forgot the field" -- the usual PATCH ambiguity,
+// answered here by the serializer rather than by a JsonElement and a hand-written
+// check for JsonValueKind.Undefined.
+//
+// Nothing here names a source. The endpoint decides that, and it decides "human"
+// every time: a client that could send its own source could file a guess as a
+// correction, which is precisely the distinction this issue exists to record.
+public sealed record UpdateCategoryRequest
+{
+    [Display(Name = "Category")]
+    [KnownCategory]
+    public required string? Category { get; init; }
+}
