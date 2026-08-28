@@ -82,6 +82,19 @@ usings and imports, typos, boilerplate, running linters and tests.
 - Never touch `.env`, never print its contents, never put a key or a
   connection string into an example command.
 
+  **One sanctioned exception, agreed 2026-08-28 in #60**, and it is narrow: the
+  eval scorer may be run as `set -a; . ./.env; set +a; uv run ...`, which loads
+  the file into the environment of **that one command**. The value is never
+  echoed, copied or written anywhere else. This is what `docker compose` already
+  does with the same file, and it is what #76's step 3 asked for by a worse
+  route -- exporting into the shell, or a Windows user environment variable,
+  which a running process cannot see because the environment is read at start,
+  so it would have cost a session restart every time. It honours #76's other
+  decision untouched: `score.py` still does not parse `.env`, because the
+  parsing happens in the shell rather than in the script, and the folder stays
+  stdlib-only. Verifying a key is present is done by printing its **length**,
+  never its value.
+
 ## Technical conventions
 
 - **All text in this repository is English** -- comments, docs, commit
@@ -1576,12 +1589,41 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   deliberately broken `ANTHROPIC_API_KEY` produced `anthropic.AuthenticationError`,
   a logged traceback, and `200 {"category": null, "source": "model"}`. That is the
   acceptance test #59 names, and it is the only part of the model path that could be
-  exercised without spending money. **What remains unverified, said out loud: no
-  request has ever been accepted by the API.** The request shape was checked against
-  the SDK's own types instead -- `OutputConfigParam` has exactly `effort` and
-  `format`, `JSONOutputFormatParam` exactly `type` and `schema` -- which proves the
-  parameters exist and are typed as sent, and does not prove the model answers well.
-  That is #60's job and it needs a key.
+  exercised without spending money. The request shape was checked against the SDK's
+  own types instead -- `OutputConfigParam` has exactly `effort` and `format`,
+  `JSONOutputFormatParam` exactly `type` and `schema` -- which proves the parameters
+  exist and are typed as sent, and does not prove the model answers well.
+
+  **That last gap closed on 2026-08-28 in #60**, once #76 provisioned a key. The
+  request shape was right first time: the first call ever accepted by this
+  repository answered correctly, and 106 more followed with **zero failures and
+  zero timeouts**. The paragraph above used to end "no request has ever been
+  accepted by the API"; it has been, and the sentence is kept in this shape so the
+  record reads as a gap that was closed rather than one that was quietly deleted.
+
+  **The model scores 98.9% macro recall against the rules baseline's 56.1%** --
+  `claude-opus-5`, `effort=low`, prompt `sha256:c8ad9d9fd16f`, 53 rows, two
+  identical runs, one abstention and **zero confident errors**. The `other`
+  category, which a substring baseline structurally cannot score at all, went 0/3
+  to 3/3. Section 7 of `docs/evals.md` is the full account and is the file to read
+  before quoting the number, because the caveat matters more than the size: **the
+  eval set was written by Claude and the predictor scored against it is Claude**,
+  in English, when real entries would be Russian and Romanian. #47 -- real rows --
+  is the only thing that fixes that, and `evals/holdout.csv` is still unlooked-at.
+
+  **Measured at the 6-second timeout the service actually uses**, not a relaxed
+  one, at ~2.1 s per call. That was a decision rather than a default: a number
+  produced under a configuration that is not deployed describes something that does
+  not exist. It also means the timeout has now been shown to have headroom for this
+  model at this effort, which is what would have to be re-measured before raising
+  `CATEGORIZER_EFFORT`.
+
+  **`evals/baseline.json` still records the rules, deliberately.** It is what CI
+  asserts on every pull request, `check` refuses to compare across predictors, and
+  the model must never run on a pull request -- one API call per row would turn the
+  required check into a bill. The model's number lives in prose in `docs/evals.md`,
+  where it can carry its caveats; a JSON file cannot say "the set was written by the
+  thing being measured".
 
   **The fake is a fake *client*, not a fake predictor**, and both exist. The
   endpoint's seam is `dependency_overrides` and was already tested in #39; the

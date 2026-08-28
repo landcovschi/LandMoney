@@ -375,3 +375,127 @@ The structure of the misses is unchanged, which is the useful part:
   rows were written, and the rule is still left alone.
 - **`other` still scores 0% and still structurally cannot score anything else**,
   so the 90.9% hard ceiling on any abstaining substring baseline is unchanged.
+
+## 7. The model, and the number it beat the baseline by
+
+Written 2026-08-28 for #60, step 5 of slice 4 -- the measurement every other
+issue in this project exists to make possible. It is the first time a request
+from this repository has been accepted by the Anthropic API; #59 shipped the
+adapter against a deliberately broken key and said so, and #76 provisioned the
+real one.
+
+### What was measured, and with what
+
+Both predictors, the same 53 rows, the same day, the same code, one scorer:
+
+```
+python evals/score.py --confusion --misses
+uv run --project src/categorizer python evals/score.py --predictor model --confusion --misses
+```
+
+The model run is `claude-opus-5`, `effort=low`, `max_tokens=2048`, a 6-second
+per-call timeout, and the system prompt in `src/categorizer/src/categorizer/prompt.py`
+at **sha256:c8ad9d9fd16f**. The scorer prints that fingerprint in its own header
+beside the model id, which is what makes a recorded number reproducible: an
+edited prompt changes the digest, so a later run visibly disagrees about what was
+measured instead of silently agreeing.
+
+**The prompt was not edited.** #60 permits tuning it after seeing which rows
+missed, provided that is said out loud; nothing was tuned, and the number below
+is the first and only configuration that was run.
+
+### The number
+
+```
+                 rules      model     delta
+macro recall     56.1%      98.9%     +42.8
+accuracy         56.6%      98.1%     +41.5
+abstained        41.5%       1.9%     -39.6
+confident errors     1          0
+```
+
+**98.9% against 56.1%.** Section 2 point 5 puts the noise floor at about 3
+points on a set this size; 42.8 is not near it.
+
+The model was run **twice**, and the two runs are identical -- same macro recall,
+same accuracy, same single missed row. That is not proof of determinism and two
+samples cannot estimate a variance, but it does rule out the reading where a
+single lucky run carried the result.
+
+Per category, the model is 100% everywhere except `groceries` at 87.5%.
+
+### The failures, which are more interesting than the percentage
+
+This is section 5's point 3 taken seriously: the metric charges the same for an
+abstention and a confident error, and the two are not the same system.
+
+- **One miss in 53, and it is an abstention.** `fidesco`, line 33, declined in
+  both runs.
+- **Zero confident errors.** The model never wrote a wrong category. The rules
+  wrote one -- `parking fine` -> `transport` -- and it is the failure that
+  matters most on the .NET side, because a wrong category is stored as if it
+  were true while a null is a state the application already handles.
+- **The confusion matrix is a clean diagonal plus one cell.** Nothing was
+  confused *for* anything; the only off-diagonal count is the abstention.
+
+`fidesco` is a Moldovan supermarket chain, and it is the same class of failure
+the rules have -- a proper noun carrying no signal about what was bought. The
+difference is coverage: the model resolved `linella`, `kaufland` and `nr1 water
+6l`, which the rules missed alongside it. Declining rather than guessing is what
+the prompt instructs, and it is the behaviour worth having: the row cost one
+point of recall and stored nothing false.
+
+### The `other` question, which #60 asked specifically
+
+**`other` goes 0/3 to 3/3.** Its rows are `haircut`, `dry cleaning` and `parcel
+by post` -- services, which a substring list over merchant names cannot reach
+without enumerating every service anybody might buy.
+
+That is the whole of the answer to "is it doing the thing rules cannot". Section
+6 records a **90.9% hard ceiling** on any abstaining substring baseline, because
+one category of eleven is structurally unreachable. The model scored 98.9%,
+which is *above that ceiling* -- so the improvement is not the same baseline
+tuned further, it is a predictor that is not subject to the constraint.
+
+### What this number is not
+
+Three caveats, and the first is the one that matters most.
+
+1. **The eval set was written by Claude, and the model being scored is Claude.**
+   Section 6 records that #47 asked for real spending and did not get it; the 53
+   rows are invented. So an English-language set authored by one Claude model and
+   answered at 98.9% by another is uncomfortably close to grading its own
+   homework -- the descriptions are drawn from the same distribution as the
+   answers. Nothing here separates "the model understands personal spending"
+   from "the model recognises the phrasing another model would choose". **This
+   is the single strongest reason to distrust 98.9%**, it cannot be fixed by
+   re-running anything, and it is fixed only by #47 -- real rows, from the
+   owner's own history.
+2. **The descriptions are all English, deliberately** (section 6, point 3). Real
+   entries would be Russian and Romanian. That is the second most likely way this
+   reads optimistic, and it is preserved on purpose by the repository's
+   English-only rule.
+3. **53 rows, 3 to 8 per category.** `score.py` still warns below 3, and a single
+   row is 1.9 points of accuracy. A 42.8-point gap survives that easily; a future
+   comparison between two models would not.
+
+`evals/holdout.csv` was **not touched**, and remains unlooked-at. It is the only
+thing left that can answer a question this section cannot.
+
+### Operational facts worth keeping
+
+- **53 calls, 114 s and 115 s** for the two runs -- about 2.1 s each, comfortably
+  inside the 6-second timeout, which is why nothing failed. The measurement was
+  therefore taken at the timeout the *service* runs, not at a relaxed one; a
+  number produced under a configuration that is not deployed would describe
+  something that does not exist.
+- **Zero failed calls in either run**, so the ERROR-counting guard never fired.
+  That guard is what makes the number trustworthy rather than merely present: a
+  failed call is indistinguishable from an abstention, so a run with failures
+  would have read as a worse model rather than as a broken run.
+- **`evals/baseline.json` still records the rules**, and deliberately. It is what
+  CI asserts on every pull request, `check` refuses to compare across predictors,
+  and the model must never run on a pull request -- it costs money per row and the
+  required check would become a bill. The model's number lives here, in prose,
+  where it can carry the caveats above; a JSON file cannot say "the set was
+  written by the thing being measured".

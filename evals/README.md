@@ -55,6 +55,21 @@ and it borrows the categorizer's virtual environment because the `anthropic`
 package lives there. Everything else in this folder stays stdlib-only, which is
 what `--predictor rules` -- the default -- still proves on every CI run.
 
+**Getting the key into that environment is its own trap, and the answer is one
+line.** `docker compose` reads `.env` by itself; `uv run` does not, so a key
+written into `.env` reaches the container and not the scorer, and the run stops
+with `no Anthropic credential was found`. Rather than exporting it into a shell
+-- a Windows user variable is read by a process at start, so anything already
+running keeps the old environment -- source the file for that command alone:
+
+```bash
+set -a && . ./.env && set +a && uv run --project src/categorizer python evals/score.py --predictor model --confusion --misses
+```
+
+`score.py` still parses nothing: the shell does the loading. Measured on
+2026-08-28, that run is 53 calls in about 114 s -- ~2.1 s each, inside the
+adapter's 6-second timeout, which is why nothing failed.
+
 **It refuses rather than scoring low when calls fail.** `AnthropicPredictor`
 never raises: every failure is a null category, which is what protects a user's
 transaction on the .NET side and which here is indistinguishable from the model
