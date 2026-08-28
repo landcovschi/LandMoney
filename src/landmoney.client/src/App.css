@@ -31,7 +31,12 @@ header p {
    the one that matters: it does not navigate. Sign-out is a POST, and the switch
    between signing in and registering only changes what is on screen -- neither is
    an <a>, so neither is announced as one. This class buys back the appearance the
-   element gives up. */
+   element gives up.
+
+   The reset below is required rather than redundant, and #77 is why it reads that
+   way now: the button rules exclude `.link`, so without these declarations the
+   browser's own default styling applies -- a grey bezel with a border. This is
+   what the element looks like when nothing dresses it. */
 .link {
   background: none;
   border: none;
@@ -152,10 +157,17 @@ header p {
 /* --- buttons -------------------------------------------------------------- */
 
 /* The bare element rather than a class, because this screen has exactly two
-   buttons and the second one is reached below by where it sits. A .btn-primary
-   / .btn-secondary pair is the right shape at five buttons and is ceremony at
-   two. */
-button {
+   buttons that look like buttons and the second one is reached below by where
+   it sits. A .btn-primary / .btn-secondary pair is the right shape at five
+   buttons and is ceremony at two.
+
+   `:not(.link)` is the whole of #77. The link-shaped buttons undid the resting
+   state of this rule and could not undo the rest of it: `button:hover:not(:disabled)`
+   is specificity 0,2,1 against `.link`'s 0,1,0, so the accent came back on hover
+   with the label unreadable on top of it. Excluding the exception once, here, is
+   what stops every property added below from having to be undone a second time
+   somewhere else -- which is the part that fails silently. */
+button:not(.link) {
   align-self: flex-start;
   display: inline-flex;
   align-items: center;
@@ -176,14 +188,14 @@ button {
 /* @media (hover: hover) so a phone does not leave the pressed-looking state
    stuck on the last button touched, which is what a bare :hover does there. */
 @media (hover: hover) {
-  button:hover:not(:disabled) {
+  button:not(.link):hover:not(:disabled) {
     background: var(--accent-strong);
     box-shadow: var(--shadow-sm);
     transform: translateY(-1px);
   }
 }
 
-button:active:not(:disabled) {
+button:not(.link):active:not(:disabled) {
   transform: translateY(0);
   box-shadow: none;
 }
@@ -202,7 +214,7 @@ button:disabled {
    button's own colour, so it needs no token and cannot be wrong in either
    theme, and stopped outright under prefers-reduced-motion by the rule in
    index.css. */
-button:disabled::after {
+button:not(.link):disabled::after {
   content: '';
   width: 0.85em;
   height: 0.85em;
