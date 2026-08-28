@@ -666,10 +666,17 @@ jobs:
             exit 1
           fi
 
-          # /api/transactions rather than /, because it is the one that proves
-          # more than the container started: it reaches Postgres, so a wrong
-          # connection string or an unapplied migration fails here rather than
-          # at whatever hour someone next opens the page.
+          # Two probes rather than one, because #52 put a door in front of the
+          # endpoint this step used to ask. GET /api/transactions has answered
+          # 401 on every deployment since authentication landed, so `deploy` has
+          # been red over deployments that were fine -- the check was asserting a
+          # 200 that had stopped being the right answer. What that 200 proved was
+          # two separate things at once, and they are asked separately now.
+
+          # 1. The door is shut. 401 is the correct answer to a request with no
+          #    cookie, and asserting it is worth more than the old 200 ever was:
+          #    a 200 here would mean authorization had fallen off the endpoint,
+          #    which is the shape of the worst bug #52 found.
           #
           # --max-time 60 rather than curl's default, which is none, and it is
           # sized against the cold start -- 23.3 s from zero, measured in #35.
@@ -680,13 +687,37 @@ jobs:
           # otherwise take the job with it before the retry.
           for attempt in 1 2 3 4 5; do
             code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 "https://$fqdn/api/transactions") || true
-            [ "$code" = "200" ] && break
+            [ "$code" = "401" ] && break
             echo "attempt $attempt: $code"
             sleep 10
           done
 
-          if [ "$code" != "200" ]; then
-            echo "::error::GET https://$fqdn/api/transactions answered $code"
+          if [ "$code" != "401" ]; then
+            echo "::error::GET https://$fqdn/api/transactions answered $code, expected 401"
+            exit 1
+          fi
+
+          # 2. Postgres answers, which is what the old 200 proved and the 401
+          #    cannot: the cookie handler refuses an anonymous request before
+          #    anything opens a connection. Signing in as a username that does
+          #    not exist is the anonymous request that does reach the database --
+          #    SignInManager -> UserManager -> EF -> asp_net_users -- so a wrong
+          #    connection string or an unapplied migration is a 500 here rather
+          #    than a surprise at whatever hour someone next opens the page. It
+          #    writes nothing and can lock nobody out: there is no account for a
+          #    failed attempt to be counted against.
+          #
+          # The body is asserted and not only the status, and that is not belt
+          # and braces. Measured while writing this, against the deployed app: a
+          # request whose JSON is malformed is refused at binding with 400 and an
+          # *empty body*, so a status-only check passes without LoginAsync ever
+          # having run -- which is precisely the false pass that would leave this
+          # step green over a dead database. The sentence is the evidence that
+          # the endpoint was reached.
+          probe=$(curl -sS -o response.json -w '%{http_code}' --max-time 60             -H 'Content-Type: application/json'             --data '{"userName":"deploy-probe-no-such-account","password":"not-a-password"}'             "https://$fqdn/api/auth/login") || true
+
+          if [ "$probe" != "400" ] || ! grep -q 'do not match' response.json; then
+            echo "::error::POST https://$fqdn/api/auth/login answered $probe: $(cat response.json)"
             exit 1
           fi
 
@@ -695,5 +726,6 @@ jobs:
             echo
             echo "- image: $image"
             echo "- url: https://$fqdn/"
-            echo "- GET /api/transactions: $code"
+            echo "- GET /api/transactions: $code (the door is shut)"
+            echo "- POST /api/auth/login: $probe (the database answered)"
           } >> "$GITHUB_STEP_SUMMARY"
