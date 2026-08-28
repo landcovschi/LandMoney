@@ -172,7 +172,7 @@ export function LoginForm({ onSignedIn }: LoginFormProps) {
         )}
       </div>
 
-      <button type="submit" disabled={submitting}>
+      <button type="submit" disabled={submitting} aria-busy={submitting}>
         {submitting
           ? registering
             ? 'Creating...'

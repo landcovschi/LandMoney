@@ -259,7 +259,7 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
         </div>
       </div>
 
-      <button type="submit" disabled={submitting}>
+      <button type="submit" disabled={submitting} aria-busy={submitting}>
         {submitting ? 'Adding...' : 'Add transaction'}
       </button>
     </form>
