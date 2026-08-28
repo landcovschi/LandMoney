@@ -785,7 +785,7 @@ again by itself after 7 days.
        acceptance test -- and the request shape was checked against the SDK's own
        types. Whether the model is any good at this is step 5's question and it
        needs a key
-5. [ ] Run the evals. Did the model beat the baseline? Record the number
+5. [x] Run the evals. Did the model beat the baseline? Record the number
 
        **The scorer half landed 2026-08-28** in #75, and the box stays empty
        because no model call has been made: there is no key on this machine, and
@@ -811,6 +811,43 @@ again by itself after 7 days.
        job. The scorer counts the adapter's ERROR records and refuses; measured
        with no key, it stops before the first call rather than making 53 doomed
        ones
+
+       **Closed 2026-08-28 in #60, and the answer is 98.9% against 56.1%** --
+       +42.8 points of macro recall, +41.5 of accuracy, measured on the same 53
+       rows on the same day through one scorer. `claude-opus-5`, `effort=low`,
+       prompt `sha256:c8ad9d9fd16f`, and the prompt was **not** edited after
+       seeing which rows missed. The full account, including the caveats that
+       matter more than the percentage, is section 7 of `docs/evals.md`
+
+       **The failure shape is the interesting half.** One miss in 53 and it is an
+       abstention (`fidesco`, a merchant name carrying no signal); **zero
+       confident errors**, against the baseline's one. The confusion matrix is a
+       clean diagonal plus that single cell -- nothing was confused *for*
+       anything. On the .NET side that distinction is the whole game: a null is a
+       state the application already handles, a wrong category is stored as if it
+       were true
+
+       **`other` went 0/3 to 3/3**, which is #60's specific question answered.
+       Section 6 records a 90.9% structural ceiling on any abstaining substring
+       baseline, because one category of eleven is unreachable by merchant-name
+       matching; 98.9% is above that ceiling, so this is not the same baseline
+       tuned further
+
+       **The number is measured, and it is not trustworthy in the way its size
+       suggests.** The eval set was written by Claude (#47 asked for real
+       spending and is still open) and the predictor scored against it is Claude,
+       in English, when real entries would be Russian and Romanian. An LLM
+       answering rows an LLM invented is close to grading its own homework, and
+       no amount of re-running fixes it -- only #47 does. `evals/holdout.csv` is
+       still unlooked-at and is the only instrument left that this section's
+       number cannot bias
+
+       Two runs, identical to the row, 114 s and 115 s for 53 calls each -- ~2.1 s
+       per call, inside the 6-second timeout the *service* uses, so the number
+       describes the deployed configuration rather than a relaxed one. Zero
+       failed calls, so the ERROR guard above never fired. `baseline.json` still
+       records the rules on purpose: it is what CI asserts, and the model must
+       never run on a pull request
 
 **Done when:** the improvement over the baseline can be quoted as a number, and
 the thing that produced the number can be shown.
