@@ -484,8 +484,75 @@ jobs:
           # else. The expensive layers, `npm ci` and `dotnet restore`, live in
           # the two stages that get discarded, so `min` would cache nothing that
           # costs anything.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # `scope` is required from #61 onwards and was not before it. The gha
+          # cache backend keys everything under one scope, and its default is
+          # the literal string `buildkit` for every build in the run -- so the
+          # second image added below would import this image's layers, miss on
+          # all of them, and then export over them. Two builds, one cache, and
+          # the only symptom is that neither is ever faster. Naming the scopes
+          # keeps them apart. The first run after this change is a cold cache
+          # for the app as well, once.
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+
+      # ---------------------------------------------------------------------
+      # The categorizer image -- #61.
+      #
+      # A second image rather than a second job, because everything a job would
+      # bring is already here: the buildx driver, the registry login and the
+      # `needs: build` that stops a failed test from pushing anything. What it
+      # would add is a second checkout and a second login for one `docker build`.
+      #
+      # The two images are pushed from one job and therefore succeed or fail
+      # together, which is the property the deploy job below relies on: it
+      # updates two apps from one `github.sha`, and a run that pushed only one
+      # of them would deploy a commit that half exists.
+      # ---------------------------------------------------------------------
+      - name: Compute tags and labels for the categorizer
+        id: meta-categorizer
+        uses: docker/metadata-action@v6
+        with:
+          # `-categorizer` appended to the repository, so the two packages sit
+          # side by side under the same repository and both carry the
+          # `org.opencontainers.image.source` label that links them to it.
+          #
+          # #24's second trap applies to this string exactly as it does to the
+          # one above, and the suffix does not weaken it: `landcovschi/LandMoney`
+          # is still the capitalised half, and it is safe here only because
+          # metadata-action lowercases the image name. `ghcr.io/landcovschi/landmoney-categorizer`
+          # is the name that comes out, and it is the one the deploy job and the
+          # runbook write out in full rather than build from `github.repository`.
+          images: ghcr.io/${{ github.repository }}-categorizer
+
+          # The same two tags, for the same two reasons: `sha-<40>` is what the
+          # deploy job pins a revision to, and `latest` is for pulling it by
+          # hand. They are computed separately rather than shared because the
+          # `images:` input differs; the tag *values* are identical, and that is
+          # what lets one `github.sha` name both images.
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push the categorizer
+        id: push-categorizer
+        uses: docker/build-push-action@v7
+        with:
+          # `src/categorizer`, not the repository root, and the .dockerignore
+          # that applies is the one in that folder. This is the same opposite
+          # call docker-compose.yml makes for the same reason: the .NET image
+          # has to reach src/landmoney.client, and nothing here reaches outside
+          # its own folder -- `evals/` least of all.
+          context: ./src/categorizer
+
+          tags: ${{ steps.meta-categorizer.outputs.tags }}
+          labels: ${{ steps.meta-categorizer.outputs.labels }}
+          push: true
+
+          # A scope of its own -- see the app's, above. `mode=max` for the same
+          # reason as well: the layer worth caching is `uv sync --frozen`, and
+          # it lives in the build stage that gets discarded.
+          cache-from: type=gha,scope=categorizer
+          cache-to: type=gha,mode=max,scope=categorizer
 
       # The digest, not the tag, is the thing that cannot be moved: a tag is a
       # name someone can repoint, and `@sha256:...` is the image itself. Written
@@ -499,6 +566,9 @@ jobs:
             echo '```'
             echo '${{ steps.meta.outputs.tags }}'
             echo 'digest: ${{ steps.push.outputs.digest }}'
+            echo
+            echo '${{ steps.meta-categorizer.outputs.tags }}'
+            echo 'digest: ${{ steps.push-categorizer.outputs.digest }}'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -556,6 +626,14 @@ jobs:
       RESOURCE_GROUP: rg-landmoney
       CONTAINER_APP: landmoney
       IMAGE: ghcr.io/landcovschi/landmoney
+
+      # #61. A second app in the same environment, with internal ingress -- see
+      # step 16 of docs/deploy-azure.md for what lost and why. Both names are
+      # written out in lower case for the reason above: this is the half of the
+      # repository where `${{ github.repository }}` is a trap, and the suffix
+      # does not change that.
+      CATEGORIZER_APP: landmoney-categorizer
+      CATEGORIZER_IMAGE: ghcr.io/landcovschi/landmoney-categorizer
 
     steps:
       # No `actions/checkout` in this job, which answers #38's third trap rather
@@ -728,4 +806,110 @@ jobs:
             echo "- url: https://$fqdn/"
             echo "- GET /api/transactions: $code (the door is shut)"
             echo "- POST /api/auth/login: $probe (the database answered)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ----------------------------------------------------------------------
+      # Then the categorizer -- #61.
+      #
+      # Last rather than first, and the order is deliberate in both directions.
+      # It is not first because nothing above depends on it: an absent or old
+      # categorizer is a legal state for the app, which answers with no category
+      # and saves the transaction anyway (#39). It is not folded into the step
+      # above because a failure here must leave the app deployed and verified
+      # rather than half applied.
+      #
+      # It is also what makes the one-time bootstrap survivable. The app below
+      # does not exist until step 16 of docs/deploy-azure.md has been run once,
+      # and step 16 cannot run until this workflow has pushed the image it
+      # names -- so the first run after #61 merges is red here, on purpose,
+      # after everything else has gone green.
+      # ----------------------------------------------------------------------
+      - name: Deploy the categorizer revision
+        run: |
+          # Creating the app is not this workflow's job. A create-if-missing
+          # here would put the flags -- internal ingress, min-replicas 0, the
+          # cpu and memory -- into two places at once, and would quietly
+          # recreate an app somebody deliberately deleted. CI replaces images;
+          # the runbook creates resources. That is #38's division, kept.
+          if ! az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --output none --only-show-errors 2>/dev/null; then
+            echo "::error::$CATEGORIZER_APP does not exist. Run step 16 of docs/deploy-azure.md once, then re-run this job."
+            exit 1
+          fi
+
+          az containerapp update \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --image "$CATEGORIZER_IMAGE:sha-${{ github.sha }}" \
+            --output none --only-show-errors
+
+      # #61's fourth trap, answered rather than met: internal ingress means
+      # there is no public FQDN, so nothing here can send the categorizer a
+      # request. A runner is not inside the Container Apps environment, and the
+      # one process that is -- the app -- has no endpoint that reports on its
+      # dependencies, and would need a signed-in session to reach the one that
+      # would show it.
+      #
+      # So this step asks Azure three questions it can answer, and the fourth is
+      # asked by hand: the acceptance test in step 16 of docs/deploy-azure.md is
+      # a transaction saved through the deployed site with a description a rule
+      # matches. What is automated is everything that can go wrong without
+      # anyone typing anything -- a revision left on an old image, an ingress
+      # that became public, and an app pointed somewhere else.
+      - name: Check the categorizer
+        run: |
+          image=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --query "properties.template.containers[0].image" -o tsv --only-show-errors)
+
+          expected="$CATEGORIZER_IMAGE:sha-${{ github.sha }}"
+          if [ "$image" != "$expected" ]; then
+            echo "::error::the categorizer is running $image, expected $expected"
+            exit 1
+          fi
+
+          # `external: false` is the whole of the decision #61 turned on, and it
+          # is one flag away from being undone by a hand-typed `az containerapp
+          # ingress update`. A categorizer reachable from the internet is an
+          # unauthenticated endpoint that spends money once the model is behind
+          # it, so it is asserted rather than trusted.
+          external=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --query "properties.configuration.ingress.external" -o tsv --only-show-errors)
+          if [ "$external" != "false" ]; then
+            echo "::error::the categorizer's ingress is external=$external, expected false"
+            exit 1
+          fi
+
+          # The internal FQDN, read back rather than written down: it carries the
+          # environment's random middle label, which is assigned per environment
+          # and cannot be chosen (#35).
+          internal=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --query "properties.configuration.ingress.fqdn" -o tsv --only-show-errors)
+
+          # And the app is pointed at exactly that. This is the assertion that
+          # closes the hole the fallback of #39 opens: with Categorizer__BaseUrl
+          # unset the deployed app resolves the appsettings.json default,
+          # http://127.0.0.1:8000, finds nothing listening and stores every
+          # transaction with no category -- which is #61's opening sentence and
+          # is invisible from outside. `-o tsv` on a filter that matches nothing
+          # is an empty string, so the message prints `(unset)` rather than a
+          # blank where a URL should be.
+          base=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --query "properties.template.containers[0].env[?name=='Categorizer__BaseUrl'].value | [0]" \
+            -o tsv --only-show-errors)
+
+          if [ "$base" != "http://$internal" ]; then
+            echo "::error::the app's Categorizer__BaseUrl is ${base:-(unset)}, expected http://$internal -- see step 16 of docs/deploy-azure.md"
+            exit 1
+          fi
+
+          {
+            echo '### Categorizer'
+            echo
+            echo "- image: $image"
+            echo "- ingress: internal, http://$internal"
+            echo "- the app points at it: yes"
           } >> "$GITHUB_STEP_SUMMARY"

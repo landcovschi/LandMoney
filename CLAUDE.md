@@ -1679,6 +1679,85 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   connection and then hangs still costs the full eight seconds. That is the right
   way round -- accepting a connection is evidence something is alive.
 
+- **The categorizer is deployed as its own Container App with internal ingress,
+  `--min-replicas 0` -- decided 2026-08-28** (#61). `landmoney-categorizer` in
+  `cae-landmoney`, a second image pushed by the same `publish` job, a second
+  `containerapp update` in `deploy`, and `Categorizer__BaseUrl` set on the app to
+  the categorizer's internal FQDN. Step 16 of `docs/deploy-azure.md` is the
+  commands.
+
+  **What it fixes is an absence rather than a fault, which is why it lasted.**
+  #39 added the service to `docker-compose.yml` and stopped; slice 3 had closed
+  before the service existed, so nothing in Azure built, pushed or ran it. The
+  deployed app therefore resolved `Categorizer:BaseUrl` to the `appsettings.json`
+  default `http://127.0.0.1:8000`, found nothing listening, and stored **every**
+  transaction with no category. The fallback of #39 -- a failed categorizer is a
+  null category and never a failed save -- is exactly what hid it: nothing was
+  ever red. Worth keeping as the general shape, because this project keeps
+  choosing that fallback: **a dependency the application is designed to run
+  without is a dependency whose absence nothing reports.**
+
+  **What lost: a second container in the same app.** Shared revision, shared
+  lifecycle, `localhost:8000` keeps working with no configuration change, one
+  thing to deploy -- and it dissolves the cold-start problem below for free,
+  since uvicorn would start in parallel with the .NET process. It lost on what
+  this repository says it is for: skill gained over working code, and the thing
+  worth learning here is service-to-service inside a Container Apps environment
+  rather than two processes in one box. The second half of the argument is not
+  about learning at all -- a sidecar couples two releases into one, so shipping a
+  Python change would replace the .NET revision and sign everybody out, Data
+  Protection keys being in memory (#52).
+
+  **`--min-replicas 0`, and the first save of a session is the price.** #61's
+  first trap: the app takes 23.3 s to come back from zero (#35), and a
+  categorizer that also scales to zero puts a second cold start on the path of a
+  save that gives up after 8 s. `--min-replicas 1` is the alternative and keeps
+  one replica billed around the clock for a service one person uses weekly, on a
+  subscription already facing 15-20 USD a month when the Postgres free year ends
+  (#34). Declined as a **choice rather than a discovery**, which is what the trap
+  asked for. The categorizer's own cold start is deliberately recorded as *not
+  measured*: the image is 46 MB against 350 MB and uvicorn starts in about a
+  second, so the pessimism may be unearned, and a number belongs there rather
+  than a guess.
+
+  **Internal ingress means CI cannot smoke-test it, and that gap is answered
+  rather than papered over.** There is no public FQDN, a runner is not inside the
+  environment, and the one process that is -- the app -- has no endpoint
+  reporting on its dependencies and would need a signed-in session anyway. So
+  `Check the categorizer` asserts the three things that come undone without
+  anyone noticing: the revision runs this commit's image, the ingress is still
+  `external: false`, and the app's `Categorizer__BaseUrl` is exactly the internal
+  FQDN read back from Azure. The fourth question -- does it answer -- is the
+  by-hand acceptance test in step 16. **The `Categorizer__BaseUrl` assertion is
+  the one that matters**: it is the only automated thing standing between this
+  and the silent state described above.
+
+  **CI replaces images; the runbook creates resources.** The deploy job fails
+  with a message naming step 16 when the app is absent, and deliberately does not
+  create it: a create-if-missing would put internal ingress, the replica counts
+  and the cpu/memory into two places at once, and would quietly resurrect an app
+  somebody deleted on purpose. The cost is a **one-time red run**, by
+  construction and not by accident -- step 16 needs an image that only `publish`
+  on `main` can produce, so the first run after #61 merges cannot find the app.
+  The categorizer steps are therefore **last** in the job, after the app is
+  deployed and verified, so that first failure leaves nothing half-applied.
+
+  **The gha cache needed scopes, and forgetting them is silent in the familiar
+  way.** Two `docker/build-push-action` builds in one job share the cache
+  backend's default scope (`buildkit`), so the second imports the first's layers,
+  misses on all of them, and exports over them -- no error, and the only symptom
+  is that neither build is ever faster. `scope=app` and `scope=categorizer`.
+  This is the same failure shape as #24's missing `setup-buildx-action`, one
+  cache setting along.
+
+  **The deployed categorizer runs `rules`, written out rather than defaulted.**
+  `CATEGORIZER_PREDICTOR=rules` is set explicitly so `az containerapp show` can
+  answer the question; `model` means an `ANTHROPIC_API_KEY` secret and one Claude
+  call per saved transaction, which is a decision with a bill and is not this
+  one. The unauthenticated endpoint being internal-only is the other half of
+  that: an open categorizer with a model behind it is somebody else's Anthropic
+  bill.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as

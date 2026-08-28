@@ -100,9 +100,23 @@ application is running, and the application never asks which:
 
 `Categorizer:BaseUrl` is the opposite case and is worth the contrast: it names a
 service and carries no credential, so it sits in the committed `appsettings.json`
-with a default of `http://localhost:8000` and is overridden by an environment
-variable (`Categorizer__BaseUrl`) only inside compose. A value being
-configuration is not the same as a value being a secret.
+rather than in a secret store. A value being configuration is not the same as a
+value being a secret.
+
+It still takes three different values, one per arrangement, and only the first
+is the committed default:
+
+| Running                       | `Categorizer:BaseUrl`                                    |
+| ----------------------------- | -------------------------------------------------------- |
+| On this machine               | `http://127.0.0.1:8000` from `appsettings.json` -- and `127.0.0.1` rather than `localhost` on purpose, see the comment there |
+| In the `full` compose profile | `http://categorizer:8000`, the service name on the compose network |
+| In the deployed container     | The categorizer app's **internal FQDN**, set as an env var in Azure |
+
+The last one has been true only since #61; before it the deployed app fell back
+to the first row, found nothing listening inside its own container, and stored
+every transaction with no category. Step 16 of `docs/deploy-azure.md` is the
+setting, and `ci.yml` asserts it on every deployment -- the alternative is a
+failure that shows up as a feature quietly not existing.
 
 **Signing in needs one setting, and it is a secret.** Accounts live in this
 application's own database -- ASP.NET Core Identity, a username and a password,
