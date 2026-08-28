@@ -110,7 +110,7 @@ is the committed default:
 | ----------------------------- | -------------------------------------------------------- |
 | On this machine               | `http://127.0.0.1:8000` from `appsettings.json` -- and `127.0.0.1` rather than `localhost` on purpose, see the comment there |
 | In the `full` compose profile | `http://categorizer:8000`, the service name on the compose network |
-| In the deployed container     | The categorizer app's **internal FQDN**, set as an env var in Azure |
+| In the deployed container     | `https://` plus the categorizer app's **internal FQDN**, set as an env var in Azure -- and `https`, because the ingress answers a POST over http with a 301 that turns it into a GET |
 
 The last one has been true only since #61; before it the deployed app fell back
 to the first row, found nothing listening inside its own container, and stored

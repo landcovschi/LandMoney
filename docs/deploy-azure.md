@@ -1394,9 +1394,18 @@ az containerapp create --resource-group rg-landmoney --name landmoney-categorize
   Claude call per saved transaction. That is a decision with a bill attached and
   it is not this step's.
 - **No registry credentials**, for the reason step 10 gives: the package is
-  public. It is a *second* package though, and ghcr.io makes each new one
-  private by default -- so if the revision fails to start with `UNAUTHORIZED`,
-  the fix is the new package's settings on GitHub, not a flag here.
+  public. It is a *second* package, and #24 recorded that ghcr.io makes a new one
+  private by default -- **measured here, and it was already public**, listing its
+  tags to an anonymous pull token on the first try. The visibility was inherited
+  rather than set by anybody, so the manual package-settings step that #24
+  warned about did not exist this time. If a future package does start private
+  the symptom is a revision that fails to start with `UNAUTHORIZED`, and the fix
+  is the package's settings on GitHub, not a flag here:
+
+  ```
+  curl -s "https://ghcr.io/token?scope=repository:landcovschi/landmoney-categorizer:pull&service=ghcr.io"
+  curl -s -H "Authorization: Bearer <token>" "https://ghcr.io/v2/landcovschi/landmoney-categorizer/tags/list"
+  ```
 
 ### Point the app at it
 
@@ -1405,15 +1414,38 @@ rather than typing it:
 
 ```
 az containerapp show -g rg-landmoney -n landmoney-categorizer --query "properties.configuration.ingress.fqdn" -o tsv
-az containerapp update -g rg-landmoney -n landmoney --set-env-vars "Categorizer__BaseUrl=http://landmoney-categorizer.internal.<label>.polandcentral.azurecontainerapps.io"
+az containerapp update -g rg-landmoney -n landmoney --set-env-vars "Categorizer__BaseUrl=https://landmoney-categorizer.internal.<label>.polandcentral.azurecontainerapps.io"
 ```
 
 - **`--set-env-vars` adds and updates; `--replace-env-vars` deletes everything
   else** -- including `ConnectionStrings__Default`, which is a `secretref` and
-  would take the site down. One word apart in the same help text.
-- **`http://`, not `https://`.** Internal ingress serves both, and this hop never
-  leaves the environment. Plain http avoids a certificate to validate on a
-  connection that has no public exposure.
+  would take the site down. One word apart in the same help text. Confirmed by
+  reading all three variables back afterwards, and **read them back with `show`
+  rather than from the `update` response**: the response prints the two other
+  names with no `value` at all, which reads exactly like the update having
+  emptied them. It has not; `show` prints them intact.
+- **`https://`, and this was written the other way round first.** The reasoning
+  for `http://` reads well -- the hop never leaves the environment, and plain
+  http avoids validating a certificate on a connection with no public exposure --
+  and it does not work. `az containerapp create` sets `allowInsecure: false`, so
+  port 80 answers with a redirect; measured on this ingress, a POST to
+  `http://<internal fqdn>/categorize` is **`301 Moved Permanently`**, and
+  `HttpClient` follows a 301 by re-issuing it as a **GET**, which that route
+  answers `405`. Over https the same request is `200
+  {"category":"transport","source":"rules"}`.
+
+  Two things worth keeping from that. The failure would have been **another
+  silent null category** -- the exact state this step exists to end, arriving
+  through the fix for it -- which is why `ci.yml` asserts the scheme and not
+  merely the host. And `GET /health` over http appears to work, because a
+  redirected GET is still a GET: **the health check is the one probe that cannot
+  reveal this.**
+
+- **The certificate validates with nothing configured**, measured rather than
+  assumed: the environment's `*.internal.<label>...` name is served with a chain
+  the container already trusts, so there is no certificate to install and no
+  validation to disable. Worth stating because the tempting shortcut when https
+  is refused is to turn validation off, and it is not needed here.
 - **Two underscores**, the same trap step 12 records for the connection string.
   One makes a key nobody reads, and the symptom is silence: the app falls back to
   the `appsettings.json` default and stores no categories, which is the state
@@ -1431,6 +1463,23 @@ a laptop cannot reach it and neither can a GitHub runner. That is the point of
 the arrangement rather than an inconvenience, and it is why the checks split in
 two.
 
+**But it can be probed from inside the environment**, which is how the redirect
+above was found, and it is the technique to reach for rather than concluding that
+an internal service is unobservable. `az containerapp exec` runs a command in a
+live replica, and the categorizer's image ships an interpreter that can make an
+HTTP request -- so the probe is sent **to the internal FQDN**, not to
+`localhost`, and therefore travels the same DNS and the same ingress the app
+does:
+
+```
+az containerapp exec -g rg-landmoney -n landmoney-categorizer --command "python -c \"import urllib.request,json;d=json.dumps({'description':'Uber ride to the airport','amount':'42.10','currency':'EUR'}).encode();req=urllib.request.Request('https://landmoney-categorizer.internal.<label>.polandcentral.azurecontainerapps.io/categorize',data=d,headers={'Content-Type':'application/json'});r=urllib.request.urlopen(req,timeout=10);print(r.status, r.read().decode())\""
+```
+
+It needs a replica to attach to, so it works while one is running and answers
+`no replicas` once the app has scaled to zero. What it does **not** prove is the
+.NET client's own half -- that the aspnet image trusts the same certificate, and
+that the call fits the 8-second budget. Only a save through the site shows that.
+
 What `ci.yml` asserts on every deployment, in `Check the categorizer`: the
 revision runs this commit's image, the ingress is still `external: false`, and
 the app's `Categorizer__BaseUrl` is exactly the internal FQDN. Those are the
@@ -1440,11 +1489,20 @@ What is checked by hand, and is #61's acceptance test:
 
 | Check                                                    | Expected                       |
 | -------------------------------------------------------- | ------------------------------ |
-| Save a transaction described `Lidl` on the deployed site  | the row shows a category       |
+| Save a transaction described `Uber ride to the airport`    | the row shows `transport`      |
 | `az containerapp logs show -g rg-landmoney -n landmoney --type console --tail 40` | `Categorizer suggested ... by rules`, not `Categorizer is unreachable` |
 | `az containerapp update -g rg-landmoney -n landmoney-categorizer --min-replicas 0 --max-replicas 0`, then save again | the transaction is saved, with no category |
 
-The third row is the one worth doing rather than assuming: it is #39's fallback,
+**`Uber` and not `Lidl`, which is what #61 suggested.** There is no `lidl` rule:
+the baseline matches ordinary words (`supermarket`, `bakery`, `bread`) plus a
+short list of merchant names, and `Lidl` is answered `{"category": null}` --
+measured. A verification whose expected result is "a category" and whose input
+produces `null` fails while everything works, which is the wrong way for a check
+to be wrong. `docs/evals.md` records the same limit as the baseline's structural
+ceiling, since one category of eleven cannot be reached by merchant-name matching
+at all.
+
+The last row is the one worth doing rather than assuming: it is #39's fallback,
 which was measured against `docker compose stop` and has never been seen against
 an Azure ingress. `--max-replicas 0` is how a Container App is taken out of
 service without being deleted; put it back with `--max-replicas 1`.

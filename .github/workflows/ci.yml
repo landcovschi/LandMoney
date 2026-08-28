@@ -896,13 +896,23 @@ jobs:
           # is invisible from outside. `-o tsv` on a filter that matches nothing
           # is an empty string, so the message prints `(unset)` rather than a
           # blank where a URL should be.
+          #
+          # **`https`, and the scheme is asserted rather than assumed**, because
+          # http is the answer that looks right and silently does not work.
+          # Container Apps ingress is created with `allowInsecure: false`, so
+          # port 80 answers a POST with `301 Moved Permanently`; HttpClient
+          # follows a 301 and turns the POST into a GET, which /categorize
+          # answers 405. Measured from inside the environment, on this ingress:
+          # http POST -> 301, https POST -> 200 with a category. The failure
+          # would have been another silent null, which is the exact state #61
+          # exists to end -- so the scheme is part of what is checked.
           base=$(az containerapp show \
             --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
             --query "properties.template.containers[0].env[?name=='Categorizer__BaseUrl'].value | [0]" \
             -o tsv --only-show-errors)
 
-          if [ "$base" != "http://$internal" ]; then
-            echo "::error::the app's Categorizer__BaseUrl is ${base:-(unset)}, expected http://$internal -- see step 16 of docs/deploy-azure.md"
+          if [ "$base" != "https://$internal" ]; then
+            echo "::error::the app's Categorizer__BaseUrl is ${base:-(unset)}, expected https://$internal -- see step 16 of docs/deploy-azure.md"
             exit 1
           fi
 
@@ -910,6 +920,6 @@ jobs:
             echo '### Categorizer'
             echo
             echo "- image: $image"
-            echo "- ingress: internal, http://$internal"
+            echo "- ingress: internal, https://$internal"
             echo "- the app points at it: yes"
           } >> "$GITHUB_STEP_SUMMARY"
