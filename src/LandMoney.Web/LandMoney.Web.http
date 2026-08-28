@@ -187,3 +187,97 @@ Content-Type: application/json
   "category": "Groceries",
   "createdAt": "2000-01-01T00:00:00+00:00"
 }
+
+### ---------------------------------------------------------------------------
+### #62: CSV import. POST /api/transactions/import
+###
+### The body is the file itself, not multipart/form-data, and the Content-Type is
+### a security control rather than a formality -- multipart is form-submittable,
+### text/csv is not, so this request keeps both of the CSRF locks the JSON
+### endpoints have. Anything else is a 415.
+###
+### Every request below needs a session: the endpoint is inside the group
+### RequireAuthorization is applied to, so run the login request in the auth
+### section first, or expect 401.
+### ---------------------------------------------------------------------------
+
+### Two good rows. Expect 200: imported 2, skipped 0, rejected 0, no category.
+POST {{host}}/api/transactions/import
+Content-Type: text/csv
+
+occurred_at,amount,currency,description
+2026-06-02,412.50,MDL,linella
+2026-06-03,78.00,MDL,shaorma andys
+
+### The same file again. Expect 200 with imported 0 and both rows skipped,
+### each naming its own line. This is the re-import answer: detected, not silent.
+POST {{host}}/api/transactions/import
+Content-Type: text/csv
+
+occurred_at,amount,currency,description
+2026-06-02,412.50,MDL,linella
+2026-06-03,78.00,MDL,shaorma andys
+
+### One bad row among good ones. Expect imported 2, rejected 1, and line 3 named.
+POST {{host}}/api/transactions/import
+Content-Type: text/csv
+
+occurred_at,amount,currency,description
+2026-06-04,900.00,MDL,petrol
+not-a-date,78.00,MDL,shaorma
+2026-06-05,9.99,EUR,netflix
+
+### A Romanian decimal comma, quoted so it reaches the number parser at all.
+### Expect the row refused naming 1234.56 -- the file is not supported, by decision.
+POST {{host}}/api/transactions/import
+Content-Type: text/csv
+
+occurred_at,amount,currency,description
+2026-06-06,"1,50",MDL,paine
+
+### A negative amount, as a bank export writes a debit. Expect the row refused by
+### [Range], with a message naming Amount rather than saying "not a number".
+POST {{host}}/api/transactions/import
+Content-Type: text/csv
+
+occurred_at,amount,currency,description
+2026-06-07,-412.50,MDL,linella
+
+### A timestamp where a day belongs. Expect refused: OccurredAt is a day, the file
+### states no zone, and there is no correct day to derive from it.
+POST {{host}}/api/transactions/import
+Content-Type: text/csv
+
+occurred_at,amount,currency,description
+2026-06-08T14:33:00,412.50,MDL,linella
+
+### The eval set's own shape, with its fifth column. Expect the rows imported and
+### "category" reported under ignoredColumns -- read, and deliberately not stored.
+POST {{host}}/api/transactions/import
+Content-Type: text/csv
+
+occurred_at,amount,currency,description,category
+2026-06-09,6000.00,MDL,rent july,housing
+
+### A description holding a comma, quoted. Expect one row, description intact.
+POST {{host}}/api/transactions/import
+Content-Type: text/csv
+
+occurred_at,amount,currency,description
+2026-06-10,318.00,MDL,"lidl, centru"
+
+### A header missing a column. Expect 400 for the whole file, naming "currency".
+### This is the one class of problem that refuses everything rather than a row.
+POST {{host}}/api/transactions/import
+Content-Type: text/csv
+
+occurred_at,amount,description
+2026-06-11,412.50,linella
+
+### The wrong content type. Expect 415 -- and see the comment on CsvContentType
+### in TransactionEndpoints for why this check is not merely tidiness.
+POST {{host}}/api/transactions/import
+Content-Type: application/json
+
+occurred_at,amount,currency,description
+2026-06-12,412.50,MDL,linella

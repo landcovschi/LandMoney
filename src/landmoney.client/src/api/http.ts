@@ -19,6 +19,23 @@ import type { FieldErrors } from './types'
 const REQUEST_TIMEOUT_MS = 10_000
 
 /**
+ * How long one call may take, when the default is not enough.
+ *
+ * Added in #62 for exactly one caller. An import reads a file, parses every row,
+ * queries the whole date range and inserts in one transaction -- and on the
+ * deployed app it may also be the request that pays the 23 second cold start
+ * `docs/roadmap.md` records. Ten seconds is a backstop against a hang for a
+ * request that should take milliseconds; it is not a budget for this one.
+ *
+ * A parameter rather than a larger constant for everything, because raising the
+ * default would make a genuine hang take longer to report on every other call --
+ * which is the failure the timeout exists to catch.
+ */
+export interface RequestOptions {
+  timeoutMs?: number
+}
+
+/**
  * A request that failed in a way there is something to tell the user about.
  */
 // Every reason a request can fail arrives as this one type, so a caller has one
@@ -51,14 +68,17 @@ export async function request<T>(
   url: string,
   init: RequestInit,
   callerSignal?: AbortSignal,
+  options: RequestOptions = {},
 ): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS
+
   // Two independent reasons to give up, and both have to reach the same fetch:
   // the timeout above, and the caller changing its mind -- a component
   // unmounting, or StrictMode running an effect a second time. AbortSignal.any
   // is the DOM's linked cancellation source; the C# parallel is
   // CancellationTokenSource.CreateLinkedTokenSource, down to the fact that the
   // reason arriving afterwards says which of the two fired.
-  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
   const signal = callerSignal
     ? AbortSignal.any([timeoutSignal, callerSignal])
     : timeoutSignal
@@ -80,7 +100,7 @@ export async function request<T>(
     // refused". Both arrive here as the same rejected fetch.
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       throw new ApiError(
-        `The API did not answer within ${REQUEST_TIMEOUT_MS / 1000} seconds.`,
+        `The API did not answer within ${timeoutMs / 1000} seconds.`,
       )
     }
 

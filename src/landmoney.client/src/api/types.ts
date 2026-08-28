@@ -83,3 +83,39 @@ export interface NewTransaction {
 // it, `errors.amount` is typed `readonly string[]` and is `undefined` at runtime
 // whenever the amount was fine, which is most of the time.
 export type FieldErrors = Readonly<Record<string, readonly string[] | undefined>>
+
+/** What one row of an uploaded CSV did, when it did not simply import. */
+// `outcome` is a plain string rather than a union of two literals because the
+// server sends whatever ImportOutcomes holds, and a union here would be a
+// compile-time promise about another process's data. The two values are compared
+// against the constants below, and an unrecognised one falls through to being
+// shown as-is rather than being hidden.
+export interface ImportRowProblem {
+  /** The line of the file, 1-based, header included. */
+  lineNumber: number
+  outcome: string
+  reason: string
+}
+
+/** The two outcomes the server sends today. Mirrors `ImportOutcomes` in C#. */
+export const IMPORT_SKIPPED = 'skipped'
+export const IMPORT_REJECTED = 'rejected'
+
+/** What `POST /api/transactions/import` answers: `ImportResponse`. */
+// rows === imported + skipped + rejected, always, and the counts are exact even
+// when `problems` has been truncated -- so a screen built from the counts is
+// never the thing that is missing.
+export interface ImportResult {
+  rows: number
+  imported: number
+  skipped: number
+  rejected: number
+
+  /** Header columns that were read and ignored, such as `category`. */
+  ignoredColumns: readonly string[]
+
+  /** True when `problems` holds fewer entries than skipped + rejected. */
+  problemsTruncated: boolean
+
+  problems: readonly ImportRowProblem[]
+}

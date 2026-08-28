@@ -1,6 +1,9 @@
-﻿using LandMoney.Web.Categorizing;
+﻿using System.ComponentModel.DataAnnotations;
+using LandMoney.Web.Categorizing;
 using LandMoney.Web.Data;
+using LandMoney.Web.Import;
 using LandMoney.Web.Models;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.EntityFrameworkCore;
 
@@ -40,6 +43,12 @@ public static class TransactionEndpoints
             .AddEndpointFilter<ValidationFilter<CreateTransactionRequest>>();
 
         group.MapGet("/", ListAsync);
+
+        // #62. No ValidationFilter: there is no JSON body for it to find, and the
+        // rules it would run are run per row inside the handler instead -- on the
+        // same CreateTransactionRequest, through the same Validator call, so the two
+        // ways into this table cannot drift apart.
+        group.MapPost("/import", ImportAsync);
 
         return group;
     }
@@ -172,6 +181,305 @@ public static class TransactionEndpoints
         // No paging and no limit, matching #3. Worth saying out loud rather than
         // forgetting: this returns the whole table, which is right for one
         // person's weekly spending and wrong the moment it is not.
+    }
+
+    /// <summary>The only content type this endpoint accepts, and it is a security control.</summary>
+    // **Load-bearing, not cosmetic, and the reason the file does not arrive as
+    // multipart/form-data.** AuthenticationSetup.cs records two CSRF locks: the
+    // SameSite=Lax cookie, and the JSON content type a cross-site form cannot set
+    // without a preflight this server never answers. multipart/form-data is a
+    // *form-submittable* type, so a multipart endpoint would keep only the first of
+    // those; text/csv is not, so both survive. Relaxing this check to accept
+    // anything -- which looks like tolerance of a client that sends
+    // application/octet-stream -- removes a control while reading like tidying up.
+    //
+    // Choosing it also avoids the other half of the multipart cost: minimal APIs
+    // apply antiforgery validation to any endpoint that binds a form, so IFormFile
+    // would need .DisableAntiforgery() and app.UseAntiforgery(), machinery this
+    // application deliberately has none of.
+    private const string CsvContentType = "text/csv";
+
+    /// <summary>How large an uploaded file may be.</summary>
+    // A megabyte is roughly 15,000 rows of this shape, comfortably more than the
+    // row cap below, so whichever limit a real file meets first it meets the one
+    // with the clearer message.
+    private const int MaxImportBytes = 1024 * 1024;
+
+    /// <summary>How many rows one import may carry.</summary>
+    // The endpoint holds every row in memory, queries once over their whole date
+    // range and inserts them in one transaction. All three are fine at this size
+    // and none of them is fine unbounded.
+    private const int MaxImportRows = 5000;
+
+    /// <summary>How many per-row explanations are sent back.</summary>
+    // A file where every row is wrong would otherwise answer with 5,000 sentences.
+    // The counts in ImportResponse are exact whatever this does, so what is lost by
+    // truncating is the detail and never the summary -- and the response says it
+    // truncated rather than leaving the reader to notice.
+    private const int MaxReportedProblems = 200;
+
+    // Deliberately does not take CategorizerClient, and that absence is a decision
+    // rather than an omission. #39 categorises on the create path *before*
+    // SaveChangesAsync, one HTTP call per transaction; a 300-row file would be 300
+    // calls, and #59's own measurement of the broken case -- 2.15 s per save against
+    // a categorizer that is not there -- makes that a request that can legitimately
+    // run for ten minutes. What lost: a batch endpoint on the Python service, which
+    // is the honest fix and is a change to a service #61 has only just deployed.
+    //
+    // So every imported row arrives with Category and CategorySource null, which is
+    // the state Category has been designed for since #1, and the response reports
+    // how many. The cost is real and is the shape #39 keeps paying for: a dependency
+    // the application is designed to run without is a dependency whose absence
+    // nothing reports. Here it is reported, and the backfill is its own issue.
+    private static async Task<Results<Ok<ImportResponse>, ProblemHttpResult>> ImportAsync(
+        HttpContext http,
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        // Split rather than string-compared whole, because a browser sends
+        // "text/csv" and a File object with a charset sends "text/csv; charset=utf-8".
+        var mediaType = http.Request.ContentType?.Split(';', 2)[0].Trim();
+
+        if (!string.Equals(mediaType, CsvContentType, StringComparison.OrdinalIgnoreCase))
+        {
+            return TypedResults.Problem(
+                detail: $"Send the file as the request body with Content-Type: {CsvContentType}.",
+                statusCode: StatusCodes.Status415UnsupportedMediaType);
+        }
+
+        // Before a single byte is read, which is the only time this is writable --
+        // the feature reports IsReadOnly once the body has started arriving. Setting
+        // it lets Kestrel refuse an oversized upload itself, draining the connection
+        // properly, rather than this handler abandoning a body the client is still
+        // sending.
+        if (http.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } maxBodySize)
+        {
+            maxBodySize.MaxRequestBodySize = MaxImportBytes;
+        }
+
+        byte[]? bytes;
+
+        try
+        {
+            bytes = await ReadCappedAsync(http.Request.Body, MaxImportBytes, cancellationToken);
+        }
+        // What Kestrel throws when the limit above is exceeded. Caught so the answer
+        // is this endpoint's own sentence naming the limit, rather than whatever
+        // UseExceptionHandler makes of an exception escaping a handler.
+        catch (BadHttpRequestException)
+        {
+            bytes = null;
+        }
+
+        if (bytes is null)
+        {
+            return TypedResults.Problem(
+                detail: $"The file is larger than the {MaxImportBytes / 1024} KB this endpoint accepts.",
+                statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+
+        if (!CsvText.TryDecode(bytes, out var text, out var encodingProblem))
+        {
+            return TypedResults.Problem(
+                detail: encodingProblem, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        ParsedFile file;
+
+        try
+        {
+            file = TransactionCsv.Parse(text);
+        }
+        // A header nothing can be done with, or a quote that is never closed. The
+        // only failures that refuse a whole file: everything else is a row problem
+        // and is reported beside the rows that did import.
+        catch (CsvFormatException exception)
+        {
+            return TypedResults.Problem(
+                detail: exception.Message, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (file.Rows.Count > MaxImportRows)
+        {
+            return TypedResults.Problem(
+                detail: $"The file holds {file.Rows.Count} rows; this endpoint takes {MaxImportRows} at a time.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var problems = new List<ImportRowProblem>();
+        var accepted = new List<(int LineNumber, CreateTransactionRequest Request)>();
+
+        foreach (var row in file.Rows)
+        {
+            if (row.Request is not { } request)
+            {
+                // Reason is non-null whenever Request is null -- the invariant
+                // ImportRow's two factory methods exist to hold.
+                problems.Add(new ImportRowProblem(
+                    row.LineNumber, ImportOutcomes.Rejected, row.Reason ?? "Unreadable."));
+                continue;
+            }
+
+            var results = new List<ValidationResult>();
+
+            // The same two arguments ValidationFilter<T> passes, for the same two
+            // reasons, and both fail silently if dropped. validateAllProperties:
+            // true or every rule but [Required] is skipped, so a negative amount
+            // imports. RequestServices or PlausibleDateAttribute never finds its
+            // TimeProvider and quietly takes the fallback clock.
+            var isValid = Validator.TryValidateObject(
+                request,
+                new ValidationContext(request, http.RequestServices, items: null),
+                results,
+                validateAllProperties: true);
+
+            if (!isValid)
+            {
+                problems.Add(new ImportRowProblem(
+                    row.LineNumber,
+                    ImportOutcomes.Rejected,
+                    string.Join(" ", results.Select(result => result.ErrorMessage ?? "Invalid value."))));
+                continue;
+            }
+
+            accepted.Add((row.LineNumber, request));
+        }
+
+        // One query for the whole file rather than one per row. Bounded by the
+        // file's own date range, and the owner filter is applied by AppDbContext
+        // without this asking -- so a row belonging to somebody else can neither be
+        // seen here nor counted as a duplicate of one of these.
+        // ix_transactions_owner_id_occurred_at_created_at covers the predicate.
+        var existing = new HashSet<TransactionKey>();
+
+        if (accepted.Count > 0)
+        {
+            var earliest = accepted.Min(row => row.Request.OccurredAt);
+            var latest = accepted.Max(row => row.Request.OccurredAt);
+
+            var stored = await db.Transactions
+                .Where(transaction => transaction.OccurredAt >= earliest && transaction.OccurredAt <= latest)
+                .Select(transaction => new
+                {
+                    transaction.OccurredAt,
+                    transaction.Amount,
+                    transaction.Currency,
+                    transaction.Description,
+                })
+                .ToListAsync(cancellationToken);
+
+            foreach (var transaction in stored)
+            {
+                existing.Add(new TransactionKey(
+                    transaction.OccurredAt,
+                    transaction.Amount,
+                    transaction.Currency,
+                    transaction.Description));
+            }
+        }
+
+        var seen = new HashSet<TransactionKey>();
+        var toAdd = new List<Transaction>();
+
+        foreach (var (lineNumber, request) in accepted)
+        {
+            // ToUpperInvariant here rather than in TransactionCsv, so this is the
+            // same line CreateAsync writes for the same reason -- ToUpper follows
+            // the machine's culture and a Turkish machine produces a string that is
+            // not "TRY". Done before the key is built, or "mdl" and "MDL" would be
+            // two different transactions.
+            var currency = request.Currency.ToUpperInvariant();
+            var key = new TransactionKey(request.OccurredAt, request.Amount, currency, request.Description);
+
+            if (existing.Contains(key))
+            {
+                problems.Add(new ImportRowProblem(
+                    lineNumber,
+                    ImportOutcomes.Skipped,
+                    "An identical transaction is already recorded. If this is a genuine second purchase, "
+                    + "add it from the form."));
+                continue;
+            }
+
+            if (!seen.Add(key))
+            {
+                problems.Add(new ImportRowProblem(
+                    lineNumber, ImportOutcomes.Skipped, "An identical row appears earlier in this file."));
+                continue;
+            }
+
+            toAdd.Add(new Transaction
+            {
+                // Id, CreatedAt and OwnerId are all left alone, exactly as in
+                // CreateAsync: EF fills the key, the entity's initializer fills the
+                // timestamp, and AppDbContext.SaveChangesAsync stamps the owner on
+                // every added entity -- which is why a bulk add needs no per-row
+                // ownership code and cannot forget it.
+                //
+                // Category and CategorySource stay null. See the note on this
+                // method: the import does not call the categorizer.
+                OccurredAt = request.OccurredAt,
+                Amount = request.Amount,
+                Currency = currency,
+                Description = request.Description,
+            });
+        }
+
+        // Guarded rather than called unconditionally. EF would answer 0 without
+        // opening a connection anyway, but the guard says so out loud, and it makes
+        // a file whose rows were all rejected a request that provably never touches
+        // Postgres.
+        if (toAdd.Count > 0)
+        {
+            db.Transactions.AddRange(toAdd);
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        // One transaction for the whole file, which is what a single SaveChanges
+        // gives: an insert that fails takes the others with it rather than leaving
+        // a half-imported file nobody can tell from a fully imported one. Every
+        // row here has already passed the same validation the single-row POST
+        // applies, so the realistic remaining failure is the database being
+        // unreachable -- which should indeed take the whole thing.
+        var ordered = problems.OrderBy(problem => problem.LineNumber).ToList();
+        var truncated = ordered.Count > MaxReportedProblems;
+
+        return TypedResults.Ok(new ImportResponse(
+            Rows: file.Rows.Count,
+            Imported: toAdd.Count,
+            Skipped: ordered.Count(problem => problem.Outcome == ImportOutcomes.Skipped),
+            Rejected: ordered.Count(problem => problem.Outcome == ImportOutcomes.Rejected),
+            IgnoredColumns: file.IgnoredColumns,
+            ProblemsTruncated: truncated,
+            Problems: truncated ? ordered.Take(MaxReportedProblems).ToList() : ordered));
+    }
+
+    /// <summary>The whole body, or null if it is longer than <paramref name="max"/>.</summary>
+    // Reads rather than CopyToAsync into a MemoryStream, because that has no cap and
+    // the cap is the point. Null rather than an exception for "too long": it is an
+    // expected answer about the request, not an exceptional event, and the caller
+    // has a status for it.
+    private static async Task<byte[]?> ReadCappedAsync(Stream body, int max, CancellationToken cancellationToken)
+    {
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+
+        while (true)
+        {
+            var read = await body.ReadAsync(chunk, cancellationToken);
+
+            if (read == 0)
+            {
+                return buffer.ToArray();
+            }
+
+            if (buffer.Length + read > max)
+            {
+                return null;
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
     }
 
     // Kept separate from the projection in ListAsync even though the two build

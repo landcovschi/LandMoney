@@ -629,6 +629,16 @@ again by itself after 7 days.
        first pass was rejected under `CLAUDE.md`'s English rule. That last one
        preserves the single most likely way this baseline reads optimistic.
        `docs/evals.md` section 6 has the full account
+
+       **#62 removed the excuse, on 2026-08-28, and this box is still empty.**
+       A CSV of the four columns can now be imported in one request, which is
+       what stood between a year of real spending and this list -- typing it.
+       What it does not do is label anything: the import stores no category by
+       design, and `evals/transactions.csv` needs a fifth column filled in by
+       hand. So the remaining work is a bank export converted once, imported,
+       and then labelled row by row -- a session's work rather than a feature.
+       **This ticks when those rows replace the invented ones**, not when
+       something can carry them
 2. [x] **A rules baseline.** String matching on the description. Score it.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat
