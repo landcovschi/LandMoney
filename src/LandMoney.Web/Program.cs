@@ -1,4 +1,4 @@
-﻿using LandMoney.Web.Api;            // MapTransactionEndpoints
+﻿using LandMoney.Web.Api;            // MapTransactionEndpoints, MapCategoryEndpoints
 using LandMoney.Web.Auth;          // AddLandMoneyAuthentication, MapAuthEndpoints
 using LandMoney.Web.Categorizing;  // CategorizerClient
 using LandMoney.Web.Data;          // AppDbContext
@@ -509,6 +509,11 @@ var staticFileOptions = new StaticFileOptions
 app.UseStaticFiles(staticFileOptions);
 
 app.MapTransactionEndpoints().RequireAuthorization();
+
+// #63. The eleven categories the correction dropdown is built from. Its own
+// RequireAuthorization, because a group only inherits what is applied to it --
+// there is no ambient rule here, so a new group added without this line is public.
+app.MapCategoryEndpoints().RequireAuthorization();
 
 // #52. Register, sign in, sign out, and /api/me.
 app.MapAuthEndpoints();

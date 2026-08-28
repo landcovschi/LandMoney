@@ -1973,6 +1973,123 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   documents. What the suite does cover is the endpoint being inside the group
   `RequireAuthorization` is applied to, and every pure function underneath it.
 
+- **Correcting a category in the interface: `PATCH /api/transactions/{id}`, a
+  dropdown of the eleven, and a badge naming the source -- decided 2026-08-28**
+  (#63). `src/LandMoney.Web/Api/Categories.cs` holds the vocabulary and the three
+  sources; the screen is
+  `src/landmoney.client/src/components/CategoryCell.tsx`. 31 new tests, and they
+  still need no Postgres, no Docker and no network.
+
+  **What it is for is not the screen.** A correction made by a person is a
+  labelled row, produced by the one user who can judge it, during ordinary use --
+  and every other route to labelled data in this project is somebody sitting down
+  to do a chore. #62 was the same argument approached from the other side.
+
+  **The vocabulary now exists in two places, not three, and that was the decision
+  the issue actually turned on.** #63 said to decide how the copies stay in step
+  or accept the drift out loud. The client's copy is gone: `GET /api/categories`
+  serves `Categories.All` and the dropdown renders whatever it is given, so the
+  screen cannot offer a category the server would refuse. The two that remain --
+  `categories.py` and the C# array -- are pinned by
+  `CategoriesTests.The_vocabulary_is_the_one_the_categorizer_knows`, which reads
+  the Python file (located by `[CallerFilePath]`, not by the runner's working
+  directory) and compares the **sequence**, since the order is display order and
+  categories.py says so.
+
+  What lost: three copies with a comment on each, which is cheapest and leaves
+  live the failure a closed vocabulary exists to prevent -- a person labelling a
+  row with a word the scorer then rejects. And one shared data file all three
+  read, which is the only route with no copies at all and breaks #39's decision
+  that nothing in `src/categorizer` may reach outside its own folder, that being
+  its Docker build context. A code generator lost to a test on the same argument
+  every generator loses on here: it is a build step in three places for eleven
+  strings that change about once a year.
+
+  **A JSON PATCH with one field, and the omission is the control.** #63:
+  do not send the whole transaction back to save one field, because a PATCH that
+  accepts an amount is a way to overwrite money with a stale value from a screen
+  somebody left open. `UpdateCategoryRequest` has exactly `Category`, so there is
+  no amount to lose.
+
+  **`required string?` is what answers the usual PATCH ambiguity**, and it is the
+  serializer doing it rather than the handler. System.Text.Json enforces
+  `required` while binding, so `{}` is a 400 before the type reaches the handler,
+  while `{"category": null}` is legal and means clear it. Measured: the 400 names
+  the missing property. The alternative is a `JsonElement` and a hand-written
+  check for `JsonValueKind.Undefined`, which is the version of this every guide
+  shows.
+
+  **Clearing sets both columns to null, keeping #59's invariant** -- a source
+  exists exactly when a category does. What lost, and it is a real loss written
+  down rather than a tidy answer: a row a person deliberately cleared is
+  afterwards indistinguishable from one nothing has ever touched, so a future
+  backfill would re-predict over somebody's "I do not know either" -- a hole in
+  the never-overwrite rule this same issue asks for. Storing
+  `category = null, source = human` is the shape that records it and it lost on
+  turning a property checkable in one line of SQL into a special case every later
+  query has to know about. **Reopen it the day something re-categorises existing
+  rows**, which is the change that makes the hole cost anything.
+
+  **The never-overwrite rule is a call, not a sentence in a closed issue.**
+  `CategorySources.MayOverwrite` is trivially true at its one call site -- the
+  transaction is constructed thirty lines above and has no source -- and exists
+  because that is the state in which a rule is easiest to lose. It is what a
+  backfill gets copied from, and `CategorySourcesTests` is what stops it being
+  deleted as dead code. Note which way the null goes: an unset source is a row
+  nothing has claimed, so a prediction may have it.
+
+  **404 and never 403 for another account's row**, and no ownership check appears
+  in the handler: `AppDbContext`'s global query filter means the row is not found
+  at all. Verified with two accounts -- B correcting A's row is a 404, B's list is
+  empty, and A's row is untouched. That is #52's check, which is the one that has
+  caught a real bug here before.
+
+  **The correction does not reload the list, and that is the trap the issue
+  names.** `handleCreate` asks the server for the whole list again and argues for
+  it: the sort order is the server's and a back-dated entry belongs in the middle,
+  so inserting client-side would mean writing that comparator a second time in
+  another language. None of it applies here -- a correction changes neither sort
+  key, so the row cannot move, and the response carries the stored row. Replacing
+  it in place is not a guess. The reason it matters more than for a create is not
+  that a blank table is uglier: a create is followed by an empty form, and a
+  correction is followed by looking at the row to see whether it took. Measured:
+  five rows on screen throughout, and no `.list-status` at any point.
+
+  **The optimistic update is honest about failing.** `CategoryCell` holds the
+  chosen value only while the request is in flight, because a controlled select
+  that snaps back and then changes again reads as the click not registering. On
+  failure it is dropped, so the select visibly returns to what is stored. Measured
+  with the API stopped: the value reverted to `groceries`, `aria-invalid` went
+  true, the badge still said `rules`, and "Could not reach the API." appeared in
+  the row rather than in a banner at the top -- which is #52's mislocated-message
+  mistake avoided rather than repeated.
+
+  **Nothing asserts what the handler writes**, said plainly because it is the
+  invariant this change is most likely to break. `request.Category is null ? null
+  : Human` is one line in an endpoint that needs a signed-in session, which needs
+  `UserManager`, which needs the database -- the same wall #52 and #62 both
+  document. It was verified by hand instead: set, correct, clear, and the two
+  columns moved together every time. Extracting the ternary into a testable
+  function was the alternative and lost on being indirection around a conditional
+  that sits directly beneath the comment explaining it.
+
+  **Verified against the running application, on a second instance.** The
+  everyday `dotnet run` was already up and holding `bin\Debug`, so the build went
+  to a separate output folder and the instance to port 5199 against the same
+  compose Postgres -- which is worth knowing as a technique: it needs
+  `--contentRoot` pointing at the project, or there is no `appsettings.json` and
+  no `wwwroot`. A row with `source: model` was produced by a **stub categorizer**
+  on another port rather than by SQL or by a paid API call, which is the better
+  test of the two: it proves an arbitrary source string travels from the service
+  to the badge. All three badges then rendered on rows that actually had all
+  three, which is what #63 asks for in as many words.
+
+  **The refusals, measured:** a word outside the eleven, wrong case, and the empty
+  string are each a 400 keyed `category` whose message lists the eleven. The empty
+  string matters because it is what an HTML `<select>` yields for a blank option --
+  the client converts it to null before sending, and the server refusing it is
+  what says so if that ever stops.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as

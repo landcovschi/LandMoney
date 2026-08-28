@@ -639,6 +639,19 @@ again by itself after 7 days.
        and then labelled row by row -- a session's work rather than a feature.
        **This ticks when those rows replace the invented ones**, not when
        something can carry them
+
+       **#63 opened a second route to the same rows, on 2026-08-28, and this box
+       is still empty too.** The category column is now a dropdown of the eleven
+       with a badge saying where the value came from -- `rules`, `model` or
+       `human` -- and a correction stores `category_source = human`. The point is
+       not the screen: it is that every other route to labelled data in this
+       project is somebody sitting down to do a chore, and this one produces a
+       labelled row as a by-product of ordinary use, from the one person who can
+       judge it. What it does **not** do is reach `evals/transactions.csv` --
+       there is no export, so the rows accumulate in Postgres and getting them
+       into the CSV is still a hand job. **This ticks when real labelled rows
+       replace the invented ones**, by whichever of the two routes gets there
+
 2. [x] **A rules baseline.** String matching on the description. Score it.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat

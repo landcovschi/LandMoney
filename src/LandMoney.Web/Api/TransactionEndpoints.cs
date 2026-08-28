@@ -50,6 +50,19 @@ public static class TransactionEndpoints
         // ways into this table cannot drift apart.
         group.MapPost("/import", ImportAsync);
 
+        // #63. PATCH rather than PUT, because this replaces one field and not the
+        // row: PUT means "here is the resource", and a PUT that ignores four of the
+        // fields it was sent is a lie about what happened to them.
+        //
+        // The {id:guid} constraint is what keeps this from swallowing /import --
+        // routing scores a literal segment above a parameter, and a constrained
+        // parameter does not match "import" in the first place. It also turns a
+        // malformed id into a 404 from routing rather than a 400 from the binder,
+        // which is the right answer: an id that cannot exist and an id that does not
+        // exist are the same fact to a caller.
+        group.MapPatch("/{id:guid}", UpdateCategoryAsync)
+            .AddEndpointFilter<ValidationFilter<UpdateCategoryRequest>>();
+
         return group;
     }
 
@@ -128,8 +141,20 @@ public static class TransactionEndpoints
         var suggestion = await categorizer.SuggestCategoryAsync(
             transaction.Description, transaction.Amount, transaction.Currency, cancellationToken);
 
-        transaction.Category = suggestion?.Category;
-        transaction.CategorySource = suggestion?.Source;
+        // #63: a prediction never writes over a human correction. Trivially true
+        // here -- the transaction was constructed thirty lines above and has no
+        // source at all, so the guard cannot currently be false -- and it is written
+        // anyway, because this is the only place in the application where a
+        // prediction is stored and it is therefore what a backfill or a
+        // re-categorise gets copied from. The issue allows the rule to exist in code
+        // and be commented rather than be exercised by a scenario, and this is the
+        // shape that survives: a call somebody has to delete on purpose, rather than
+        // a sentence in an issue that closed.
+        if (CategorySources.MayOverwrite(transaction.CategorySource))
+        {
+            transaction.Category = suggestion?.Category;
+            transaction.CategorySource = suggestion?.Source;
+        }
 
         db.Transactions.Add(transaction);
         await db.SaveChangesAsync(cancellationToken);
@@ -170,6 +195,7 @@ public static class TransactionEndpoints
                 t.Currency,
                 t.Description,
                 t.Category,
+                t.CategorySource,
                 t.CreatedAt))
             .ToListAsync(cancellationToken);
 
@@ -489,6 +515,57 @@ public static class TransactionEndpoints
     // more machinery than seven arguments are worth at this size. If a field is
     // ever added, both places have to change; the compiler will say so, because
     // the record's constructor is positional.
+    /// <summary>#63. Corrects one category, and records that a person did it.</summary>
+    // The row is loaded rather than updated in place with ExecuteUpdateAsync. That
+    // would be one round trip instead of two and is the wrong trade here: the
+    // response has to carry the stored row back so the client can put it on screen
+    // without asking for the whole list again, and "did it exist" and "was it
+    // yours" both come out of the same SELECT for free.
+    //
+    // No ownership check appears in this method, and its absence is the design
+    // rather than an omission. AppDbContext applies a global query filter on
+    // OwnerId, so another account's row is not found at all and this answers 404 --
+    // which is also the right status to answer on purpose: a 403 would confirm that
+    // the id exists, and there is no reason to let one account enumerate another's
+    // transactions by watching which ids are refused differently.
+    private static async Task<Results<Ok<TransactionResponse>, NotFound>> UpdateCategoryAsync(
+        Guid id,
+        UpdateCategoryRequest request,
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        var transaction = await db.Transactions
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+
+        if (transaction is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        // The two columns are written from one value, the way #59 established, so
+        // they cannot disagree: a source exists exactly when a category does. That
+        // is what makes clearing set *both* to null rather than leaving "human"
+        // behind on an empty category.
+        //
+        // What that costs, and it was decided rather than overlooked: a row a
+        // person deliberately cleared -- "I do not know either", which is a real
+        // answer and the same abstention the rules baseline produces -- is
+        // indistinguishable afterwards from a row nothing has ever touched. So a
+        // future backfill would re-predict over it, which is a hole in the
+        // never-overwrite rule above. The alternative was to break the invariant
+        // and store `category = null, source = human`, and it lost on making a
+        // property that is currently checkable in one line of SQL into a special
+        // case that every later query has to know about. Revisit it when something
+        // actually re-categorises rows, which is the change that makes the hole
+        // cost anything.
+        transaction.Category = request.Category;
+        transaction.CategorySource = request.Category is null ? null : CategorySources.Human;
+
+        await db.SaveChangesAsync(cancellationToken);
+
+        return TypedResults.Ok(ToResponse(transaction));
+    }
+
     private static TransactionResponse ToResponse(Transaction transaction) => new(
         transaction.Id,
         transaction.OccurredAt,
@@ -496,5 +573,6 @@ public static class TransactionEndpoints
         transaction.Currency,
         transaction.Description,
         transaction.Category,
+        transaction.CategorySource,
         transaction.CreatedAt);
 }

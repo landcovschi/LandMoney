@@ -52,6 +52,25 @@ export interface Transaction {
   category: string | null
 
   /**
+   * What produced the category: `rules`, `model`, `human`, or null with it.
+   *
+   * Added in #63, and it is the field that makes a correction visible. Without
+   * it a category a person chose and a category a substring match guessed are
+   * the same word on the screen, and after a week nothing can tell them apart.
+   *
+   * A plain string rather than a union of the three literals, for the same
+   * reason `ImportRowProblem.outcome` is one: two of the three values are
+   * another process's words arriving over HTTP, so a union here would be a
+   * compile-time promise about what the categorizer sends. The constants below
+   * are compared against; an unrecognised source is shown as it arrived rather
+   * than hidden.
+   *
+   * The invariant, established in #59 and checked against the running database:
+   * this is non-null exactly when `category` is. Both, or neither.
+   */
+  categorySource: string | null
+
+  /**
    * C# `DateTimeOffset`, ISO 8601 with an offset.
    *
    * An instant, unlike `occurredAt` -- so this one *is* converted to local time
@@ -70,6 +89,30 @@ export interface NewTransaction {
   amount: number
   currency: string
   description: string
+}
+
+/** The three things that can have decided a category. Mirrors `CategorySources`. */
+// Only `human` is this application's own word -- the other two are the
+// categorizer's, arriving over HTTP. They are here so the badge can be styled and
+// labelled per source without three string literals appearing in JSX, and not so
+// that an unknown fourth value is hidden: CategoryCell prints whatever it is given.
+export const SOURCE_RULES = 'rules'
+export const SOURCE_MODEL = 'model'
+export const SOURCE_HUMAN = 'human'
+
+/** What `PATCH /api/transactions/{id}` accepts: `UpdateCategoryRequest`. */
+// One field, and the omission is the point rather than an economy. #63: do not
+// send the whole transaction back to save one field, because a PATCH that accepts
+// an amount is a way to overwrite money with a stale value from a screen somebody
+// left open. There is nothing to keep in step here -- a field this type does not
+// have cannot be sent by mistake.
+//
+// `category: string | null` and never `undefined`. The C# record declares the
+// member `required`, so System.Text.Json refuses a body that omits it; `undefined`
+// would be dropped by JSON.stringify and produce exactly that 400. Clearing a
+// category is `null`, spelled out.
+export interface CategoryUpdate {
+  category: string | null
 }
 
 /** The `errors` object of an RFC 9457 problem: field name to what is wrong. */
