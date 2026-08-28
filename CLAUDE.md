@@ -1720,6 +1720,38 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   second, so the pessimism may be unearned, and a number belongs there rather
   than a guess.
 
+  **`https://` to the internal FQDN, and `http://` was written first and is
+  wrong.** The reasoning for http reads well -- the hop never leaves the
+  environment, so there is no certificate worth validating -- and
+  `az containerapp create` sets `allowInsecure: false`, so port 80 answers a POST
+  with **`301 Moved Permanently`**, `HttpClient` follows a 301 by re-issuing it
+  as a **GET**, and `/categorize` answers **405**. Over https the same request is
+  `200 {"category":"transport","source":"rules"}`. Both measured from inside the
+  environment, which is the only place either could be.
+
+  Three things to keep from that. The failure would have been **another silent
+  null category**, arriving through the change that exists to end silent null
+  categories, which is why `ci.yml` asserts the scheme and not only the host.
+  **`GET /health` over http appears to work**, because a redirected GET is still
+  a GET -- the health check is the one probe structurally unable to reveal this,
+  and a smoke test built out of it would have passed. And the certificate
+  validates with nothing configured, so the tempting shortcut of disabling
+  validation when https is refused is never needed here.
+
+  **An internal service is not unobservable, and `az containerapp exec` is the
+  door.** The categorizer's image ships a Python interpreter, so a request can be
+  sent from a live replica **to the internal FQDN** rather than to `localhost` --
+  same DNS, same ingress, same method the app uses. That is how the 301 was
+  found, and it is the technique rather than a one-off. What it cannot show is
+  the .NET half: that the aspnet image trusts the same chain, and that the call
+  fits the 8-second budget. Only a save through the site shows that.
+
+  **`Lidl` is not a rule, and #61's own acceptance test said to use it.** The
+  baseline matches ordinary words plus a few merchant names; `Lidl` is answered
+  `{"category": null}`, measured. A check whose input produces the failure it is
+  written to detect passes nothing and fails everything -- the acceptance test in
+  step 16 uses a description that actually matches, and says why.
+
   **Internal ingress means CI cannot smoke-test it, and that gap is answered
   rather than papered over.** There is no public FQDN, a runner is not inside the
   environment, and the one process that is -- the app -- has no endpoint

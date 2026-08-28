@@ -767,6 +767,16 @@ again by itself after 7 days.
        categorizer's own cold start is deliberately recorded as not yet measured
        rather than guessed at
 
+       **`http://` to the internal FQDN was wrong, and the way it was wrong is
+       the lesson.** The ingress is created with `allowInsecure: false`, so a
+       POST over port 80 is a `301`, `HttpClient` re-issues a 301 as a GET, and
+       `/categorize` answers 405 -- another silent null category, arriving
+       through the change that exists to end silent null categories. `GET
+       /health` over http looks fine throughout, a redirected GET still being a
+       GET, so a health-check smoke test could not have caught it. Found by
+       probing the internal FQDN from inside a replica with `az containerapp
+       exec`, which is the answer to "an internal service cannot be observed"
+
 4. [x] An Anthropic adapter behind a port, plus a fake with canned responses so
        tests never hit the network and never cost money
 
