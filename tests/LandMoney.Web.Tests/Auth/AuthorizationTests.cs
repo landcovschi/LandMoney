@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using Microsoft.Extensions.Hosting;
 
 namespace LandMoney.Web.Tests.Auth;
@@ -62,6 +63,29 @@ public class AuthorizationTests
         var response = await client.PostAsJsonAsync(
             "/api/transactions",
             new { occurredAt = "not-a-date", amount = -1, currency = "X", description = "" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    // #62. The import endpoint is inside the group RequireAuthorization is applied
+    // to, and this is the assertion that it stayed there -- a new MapPost written
+    // outside the group would compile, work, and be public.
+    //
+    // The body is a file that would import cleanly if it ever reached the handler,
+    // which is what makes the test worth having: a 200 here would mean an anonymous
+    // caller had written rows into somebody's table.
+    [Fact]
+    public async Task An_anonymous_import_is_refused()
+    {
+        using var app = TestApp.WithInviteCode();
+        using var client = app.CreateNonFollowingClient();
+
+        using var content = new StringContent(
+            "occurred_at,amount,currency,description\n2026-06-02,412.50,MDL,linella",
+            Encoding.UTF8,
+            "text/csv");
+
+        var response = await client.PostAsync("/api/transactions/import", content);
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
