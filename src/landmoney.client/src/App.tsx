@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { getMe, logout, type Me } from './api/auth'
 import { createTransaction, listTransactions } from './api/transactions'
 import type { NewTransaction } from './api/types'
+import { ImportForm } from './components/ImportForm'
 import { LoginForm } from './components/LoginForm'
 import { TransactionForm } from './components/TransactionForm'
 import { TransactionList, type ListState } from './components/TransactionList'
@@ -199,6 +200,20 @@ function App() {
       {session.status === 'signedIn' && (
         <>
           <TransactionForm onSubmit={handleCreate} />
+
+          {/*
+            Below the form and above the list, deliberately. Typing one
+            transaction is the everyday act and stays at the top; importing a
+            file is the occasional one. Putting it above the form would make the
+            first thing on the screen the thing almost nobody is here to do.
+
+            `reload` rather than a handler of its own: an import that stored rows
+            wants exactly what a create wants, which is the list fetched again.
+            The cost is the same one handleCreate's comment describes -- the list
+            blinks through "Loading..." rather than holding the previous rows.
+          */}
+          <ImportForm onImported={reload} />
+
           <TransactionList state={list} onRetry={reload} />
         </>
       )}

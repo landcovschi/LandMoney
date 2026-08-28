@@ -449,6 +449,84 @@ button:not(.link):disabled::after {
   font-weight: 400;
 }
 
+/* --- the import ---------------------------------------------------------- */
+
+/* Reuses .entry for the card, so the two forms on this page are visibly the same
+   kind of thing. Only what differs is declared here. */
+
+/* A file input draws itself, and the browser's own button is the one control on
+   this page that cannot be restyled beyond this. Setting the width stops it
+   stretching to the full card on Firefox, where it is a block by default and on
+   Chrome it is not -- one of the few places the two disagree about layout rather
+   than about painting. */
+.import input[type='file'] {
+  width: 100%;
+  max-width: 32rem;
+  font: inherit;
+  color: var(--text-muted);
+}
+
+.import code {
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  font-size: var(--text-xs);
+
+  /* The header line is the one string a reader has to copy exactly, so it must
+     not wrap in the middle of a column name -- but it must be allowed to wrap
+     somewhere on a phone, which is what the anywhere value permits. */
+  overflow-wrap: anywhere;
+}
+
+.import-report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  font-size: var(--text-sm);
+}
+
+.import-problems {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 18rem;
+
+  /* Scrolled rather than truncated in the page. Two hundred problems is the
+     server's cap and would otherwise push the transaction list off the bottom of
+     the screen -- the report is about a file that has been dealt with, and the
+     rows are what the page is for. */
+  overflow-y: auto;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.import-problems li {
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
+  line-height: var(--leading-normal);
+}
+
+.import-line {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Refused and skipped are different facts, so they are different colours: one is
+   a mistake in the file to go and fix, the other is a row that was already there
+   and needs nothing done about it. The skipped token reuses .tag's teal, which is
+   the "this is fine" colour everywhere else on the page. */
+.import-problems [data-outcome='rejected'] .tag {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 /* --- narrow ---------------------------------------------------------------- */
 
 /* One breakpoint, and everything stacks. Two columns of half-width inputs on a

@@ -172,9 +172,15 @@ public static class CsvReader
     /// <summary>A line with nothing on it, which is not a row and not an error.</summary>
     // A row of `,,,` has four empty fields and is a real row that will be rejected
     // for its dates; a row of `""` was written deliberately and is also a row. Only
-    // a line with no separators, no quotes and no text is skipped, which is the
-    // trailing newline every editor adds and the blank line every bank export ends
-    // with.
+    // a line with no separators, no quotes and no text is skipped: a blank line
+    // between rows, and the second of the two newlines a file ending in two of
+    // them has.
+    //
+    // Not the single trailing newline every editor adds -- that one never reaches
+    // here. It ends the last real row, and the three-condition guard at the end of
+    // Read is what stops a phantom row after it. Worth separating, because the two
+    // look like one rule and only one of them is this one; found by mutating this
+    // line and watching the trailing-newline test stay green.
     private static bool IsBlank(List<string> fields, bool rowHadQuotes) =>
         !rowHadQuotes && fields.Count == 1 && fields[0].Length == 0;
 }

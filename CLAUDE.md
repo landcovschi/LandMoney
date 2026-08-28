@@ -1790,6 +1790,189 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   that: an open categorizer with a model behind it is somebody else's Anthropic
   bill.
 
+- **CSV import: one endpoint, `POST /api/transactions/import`, taking a raw
+  `text/csv` body -- decided 2026-08-28** (#62). `src/LandMoney.Web/Import/` holds
+  the reader, the four-column parser and the duplicate key; the screen is
+  `src/landmoney.client/src/components/ImportForm.tsx`. 64 new tests, and they
+  still need no Postgres, no Docker and no network.
+
+  **Why now, and it is not about the .NET side at all.** The eval set is 53 rows
+  written by Claude, and `docs/evals.md` section 7 says the caveat matters more
+  than the number: the set was written by the thing being measured. #47 -- real
+  rows -- is the only thing that fixes it, and the reason it has not happened is
+  that a year of history is a lot to type. This is the short way round. The .NET
+  slice rule still holds: this is one endpoint and one file input, and it exists
+  to feed `evals/`, not to grow the application.
+
+  **`text/csv` as the raw body, not `multipart/form-data`, and this is the
+  decision the whole shape hangs off.** Multipart is what every tutorial shows and
+  what `IFormFile` binds. It loses on security rather than on convenience:
+  `AuthenticationSetup.cs` records **two** CSRF locks -- the `SameSite=Lax` cookie,
+  and the JSON content type a cross-site form cannot set without a preflight this
+  server never answers -- and `multipart/form-data` is one of the three types a
+  plain cross-site `<form>` can produce, so a multipart endpoint would silently
+  keep only the first. `text/csv` is not form-submittable, so both survive. **The
+  `Content-Type` check in the handler is therefore a control and not tidiness**,
+  which is written beside it, because relaxing it to accept
+  `application/octet-stream` from some client looks like tolerance and is not.
+
+  It also avoids the other half of the cost: minimal APIs apply antiforgery
+  validation to any endpoint that binds a form, so `IFormFile` needs
+  `.DisableAntiforgery()` **and** `app.UseAntiforgery()` -- machinery #52
+  deliberately left out. What the raw body gives up is the filename, which nothing
+  here wants, and the browser sends the `File` object directly with no `FormData`.
+
+  **The rules are `CreateTransactionRequest`'s, run through the same `Validator`
+  call `ValidationFilter<T>` makes.** So a row read out of a CSV is judged by
+  exactly the rules a row posted as JSON is judged by, the messages are written
+  once, and the two ways into this table cannot drift. Both arguments of that call
+  are load-bearing and fail silently if dropped -- `validateAllProperties: true`
+  or every rule but `[Required]` is skipped, and `HttpContext.RequestServices` or
+  `PlausibleDateAttribute` never finds its `TimeProvider`. That is #21's paragraph
+  arriving at a second call site unchanged.
+
+  Which also answers, rather than edits, the comment on
+  `CreateTransactionRequest.MaxYearsBehind`: it predicts this feature by name --
+  "the number to revisit first if CSV import of old statements ever arrives" -- and
+  five years comfortably holds a year of history. Measured rather than assumed: a
+  row dated 2016 comes back as `Date cannot be earlier than 2021-08-28`, which is
+  the rule working through the import path with an `InvariantCulture` date, and is
+  the same bound the form applies.
+
+  **`NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint`, and the
+  absence of `AllowThousands` is the entire mechanism.** The decision recorded for
+  #62 is that a file written with a comma for the decimal point is not supported.
+  `NumberStyles.Number` -- the obvious constant, and what `decimal.Parse` defaults
+  to -- includes `AllowThousands`, and under `InvariantCulture` that reads `"1,50"`
+  as **one hundred and fifty**, silently. That is #31's failure in a new coat, and
+  it is the one mutation in this change that would have shipped looking correct.
+
+  `AllowLeadingSign` is in for the mirror-image reason. A bank export writes a
+  debit as `-412.50`; parsing it and letting `[Range]` refuse it produces *"Amount
+  must be between 0.01 and ..."*, which names the real problem. Refusing it in the
+  parser would say *"not a number"* and send the reader hunting a typo in a field
+  that reads perfectly.
+
+  **What a Romanian export really does is fail on field count, not on the number**,
+  and that is worth knowing before somebody reads the message. An unquoted `1,50`
+  is two CSV fields, so the row has one too many and the message says so. The
+  number path is only reached when the amount is quoted. Both are refused, which
+  is the decision; they are refused with different sentences, which is not obvious
+  from the decision.
+
+  **Dates are `ParseExact` against `yyyy-MM-dd` and a timestamp is refused rather
+  than truncated.** #62 asks for truncation to be deliberate; declining to convert
+  is the most deliberate form available. The honest reason is that the file states
+  no zone, so there is no correct day to derive from `2026-07-05T14:33:00` -- which
+  is #17's argument for `DateOnly` arriving at the import boundary rather than at
+  the storage one.
+
+  **Encoding is strict UTF-8 with the BOM stripped by hand, and the obvious
+  implementation is the one that fails silently.**
+  `new StreamReader(stream, strictUtf8, detectEncodingFromByteOrderMarks: true)`
+  reads well and swaps in its own `Encoding.UTF8` -- the *replacing* one -- the
+  moment it sees a UTF-8 BOM, which is exactly what a spreadsheet writes. The
+  strict instance would then be discarded in the commonest case, and a cp1251
+  description would arrive as replacement characters: imports fine, reads as
+  nonsense, never categorised, which is #62's encoding trap word for word.
+  Stripping `EF BB BF` and calling `UTF8Encoding(false, throwOnInvalidBytes: true)`
+  keeps one decoder for every input, and the correctness of the function then does
+  not depend on an internal detail of `StreamReader` at all. A UTF-16 BOM is named
+  separately, because "not valid UTF-8" is true and points at the wrong fix for
+  Excel's "Unicode Text" export.
+
+  **Duplicates are detected, skipped and named per row**, keyed on day, amount,
+  currency and description, in one query bounded by the file's own date range --
+  not one query per row. The owner filter is applied by `AppDbContext` without the
+  query asking, and `ix_transactions_owner_id_occurred_at_created_at` covers the
+  predicate.
+
+  **The decimal scale in that key is load-bearing and is not obvious.** Postgres
+  returns `numeric(18,2)` as `78.50` while the CSV says `78.5`; those are different
+  bit patterns. `decimal.Equals` compares values and `decimal.GetHashCode` is
+  normalised to match, so a `HashSet` lookup agrees -- and if it did not, the
+  failure would be a **silent double-import**. Asserted in a unit test on both
+  halves of the contract, and then measured against the running application: the
+  same file sent twice skipped all seven rows including that one.
+
+  **What that costs, said out loud in the response text as well as here:** two
+  identical real purchases on one day -- two 38 MDL espressos, same shop, same
+  description -- are one row after an import. What lost: importing everything and
+  reporting a count, which never loses a real repeat and silently doubles the table
+  when a file is sent twice. Neither is free; this one fails in the direction that
+  is visible and correctable, because the response names the line it skipped and
+  the form is still there.
+
+  **The import does not call the categorizer, and the screen says so.** #39
+  categorises before `SaveChangesAsync`, one call per transaction; #59's measured
+  broken case is 2.15 s per save against a categorizer that is not there, so a
+  300-row file would be a request that legitimately runs for minutes. What lost: a
+  batch endpoint on the Python service, which is the honest fix and is a change to
+  a service #61 had only just deployed. So every imported row has a null category
+  and a null source, and the response reports how many -- because this is the third
+  time this project has chosen that fallback and **a dependency the application is
+  designed to run without is a dependency whose absence nothing reports**. Here it
+  is reported. The backfill is its own issue.
+
+  **A file-level failure and a row-level failure are different things and are
+  answered differently.** A missing header column, a duplicated one, an empty file
+  or a quote that is never closed refuses everything with a 400: nothing can be
+  done with any row. Anything wrong with one row is an entry in `problems` and the
+  other rows still import, which is #62's second acceptance test. `CsvFormatException`
+  exists only for the first kind, which is why it is deliberately narrow.
+
+  **`CsvReader` returns a list rather than a `yield return` iterator**, and the
+  reason is that exception rather than performance. A deferred iterator throws
+  during enumeration -- here, halfway through the endpoint's loop, after some rows
+  had already become entities, from a `foreach` that looks like it only reads.
+
+  **CsvHelper lost, and it is the better-tested library.** It lost on the
+  dependency rule against a genuinely small scope: the whole of RFC 4180 is quoted
+  fields, doubled quotes, and two line endings, and `CsvReaderTests` names each of
+  those. The moment this has to read a dialect -- semicolons, an escape character,
+  a per-file encoding -- CsvHelper is the right answer and the hand-written reader
+  is the thing to delete.
+
+  **`REQUEST_TIMEOUT_MS` gained a per-call override**, which is a change to the
+  file every request in the client goes through. An import reads a file, validates
+  every row, queries a date range and inserts in one transaction, and on the
+  deployed app may also pay the 23.3 s cold start of #35 -- ten seconds is not that
+  budget. Raising the constant for everything was the alternative and loses for the
+  reason #35 already wrote down: a longer timeout makes a genuine hang take longer
+  to report, which is the failure the timeout exists to catch.
+
+  **Checked by breaking it, per #21: eleven mutations, one at a time, reverted from
+  a commit rather than from memory.** All eleven caught. Two are worth keeping.
+  Writing `NumberStyles.Number` in place of the two flags killed two tests, which
+  is the point of the theory that quotes its amounts. And mutating `IsBlank` killed
+  only the blank-line test and **not** the trailing-newline one -- because a single
+  trailing newline never reaches `IsBlank`; it ends the last real row, and the
+  three-condition guard at the end of `Read` is what stops a phantom row. The
+  comment claimed both. It was wrong, and only the mutation said so.
+
+  **Verified against the running compose stack, which is where the interesting half
+  is.** Seven rows imported with amounts and dates matching the file exactly,
+  including `78.5` stored as `78.50` and a quoted `lidl, centru` kept whole. The
+  same file again: nothing imported, seven skipped, each naming its line. A
+  ten-row file with eight deliberate faults: two imported, one skipped, seven
+  refused, and every message named the right rule. A cp1251 file refused by name; a
+  BOM-prefixed UTF-8 file with a Cyrillic description imported intact.
+  `multipart/form-data` and a missing content type both 415; anonymous 401.
+
+  **And the #52 check, which is the one that has caught a real bug before.** A
+  second account sees none of the first account's rows, and importing the
+  *identical* file as that second account imports all seven rather than skipping
+  them as duplicates. That is the global query filter scoping the duplicate query
+  without the query mentioning ownership -- the property that would have failed
+  silently, in the direction of one person's import being silently swallowed by
+  another person's data.
+
+  **What is still not automated, said plainly.** Everything above about the
+  endpoint was done by hand: the handler needs a signed-in session, which needs
+  `UserManager`, which needs the database, which is the same wall `AuthorizationTests`
+  documents. What the suite does cover is the endpoint being inside the group
+  `RequireAuthorization` is applied to, and every pure function underneath it.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as
