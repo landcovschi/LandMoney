@@ -100,7 +100,7 @@ public class CategorizerSummaryTests
         var metrics = NewMetrics();
         for (var i = 0; i < 3; i++)
         {
-            metrics.Record(CategorizerOutcome.Timeout, source: null, TimeSpan.FromSeconds(2));
+            metrics.Record(CategorizerOutcome.Timeout, source: null, CategorizerKind.Save, TimeSpan.FromSeconds(2));
         }
 
         var summary = Summary(await StartAndStop(metrics));
@@ -121,8 +121,8 @@ public class CategorizerSummaryTests
         // #64's third acceptance test. The whole line exists so that "it declined"
         // and "it did not answer" can be told apart by someone who was not there.
         var metrics = NewMetrics();
-        metrics.Record(CategorizerOutcome.Abstained, source: null, TimeSpan.FromMilliseconds(30));
-        metrics.Record(CategorizerOutcome.Unreachable, source: null, TimeSpan.FromMilliseconds(5));
+        metrics.Record(CategorizerOutcome.Abstained, source: null, CategorizerKind.Save, TimeSpan.FromMilliseconds(30));
+        metrics.Record(CategorizerOutcome.Unreachable, source: null, CategorizerKind.Save, TimeSpan.FromMilliseconds(5));
 
         var summary = Summary(await StartAndStop(metrics));
 
@@ -136,8 +136,8 @@ public class CategorizerSummaryTests
         // Which is the number the issue is really after: "how often does the model
         // answer" is not answerable from a count of successes.
         var metrics = NewMetrics();
-        metrics.Record(CategorizerOutcome.Suggested, "model", TimeSpan.FromMilliseconds(2100));
-        metrics.Record(CategorizerOutcome.Suggested, "rules", TimeSpan.FromMilliseconds(4));
+        metrics.Record(CategorizerOutcome.Suggested, "model", CategorizerKind.Save, TimeSpan.FromMilliseconds(2100));
+        metrics.Record(CategorizerOutcome.Suggested, "rules", CategorizerKind.Save, TimeSpan.FromMilliseconds(4));
 
         var summary = Summary(await StartAndStop(metrics));
 
@@ -159,8 +159,8 @@ public class CategorizerSummaryTests
         // and that distinction is the one worth having, since the untimed call is
         // exactly the state where no categorizer is configured at all.
         var metrics = NewMetrics();
-        metrics.Record(CategorizerOutcome.NotConfigured, source: null, elapsed: null);
-        metrics.Record(CategorizerOutcome.Suggested, "rules", TimeSpan.FromMilliseconds(12));
+        metrics.Record(CategorizerOutcome.NotConfigured, source: null, CategorizerKind.Save, elapsed: null);
+        metrics.Record(CategorizerOutcome.Suggested, "rules", CategorizerKind.Save, TimeSpan.FromMilliseconds(12));
 
         var summary = Summary(await StartAndStop(metrics));
 
@@ -184,12 +184,46 @@ public class CategorizerSummaryTests
         // is total, including the shutdown report, because the service returns
         // before it ever starts a timer.
         var metrics = NewMetrics();
-        metrics.Record(CategorizerOutcome.Suggested, "rules", TimeSpan.FromMilliseconds(9));
+        metrics.Record(CategorizerOutcome.Suggested, "rules", CategorizerKind.Save, TimeSpan.FromMilliseconds(9));
 
         var entries = await StartAndStop(metrics, Interval(0));
 
         var disabled = Assert.Single(entries);
         Assert.Equal(0d, disabled.Field("Seconds"));
         Assert.Null(disabled.Field("Calls"));
+    }
+
+    [Fact]
+    public async Task The_line_says_how_many_of_the_calls_were_somebody_typing()
+    {
+        // #67. The number that keeps the rest of the line honest: from here on most
+        // calls are previews, so "12 recorded" without this would read as twelve
+        // transactions. Against the model it is also the bill, which is the reason
+        // it is a number in a summary rather than something to count in a log.
+        var metrics = NewMetrics();
+        metrics.Record(CategorizerOutcome.Suggested, "rules", CategorizerKind.Save, TimeSpan.FromMilliseconds(4));
+        metrics.Record(CategorizerOutcome.Suggested, "rules", CategorizerKind.Preview, TimeSpan.FromMilliseconds(3));
+        metrics.Record(CategorizerOutcome.Abstained, source: null, CategorizerKind.Preview, TimeSpan.FromMilliseconds(3));
+
+        var summary = Summary(await StartAndStop(metrics));
+
+        Assert.Equal(3L, summary.Field("Calls"));
+        Assert.Equal("save=1, preview=2", summary.Field("ByKind"));
+    }
+
+    [Fact]
+    public async Task A_kind_that_did_not_happen_is_printed_as_zero()
+    {
+        // Unlike BySource, which prints only what answered. The two vocabularies
+        // have different owners: there are exactly two kinds and both are this
+        // application's, so a missing one is a fact -- "preview=0" says the screen
+        // asked for nothing, which after #67 is a symptom rather than an absence of
+        // news.
+        var metrics = NewMetrics();
+        metrics.Record(CategorizerOutcome.Suggested, "rules", CategorizerKind.Save, TimeSpan.FromMilliseconds(4));
+
+        var summary = Summary(await StartAndStop(metrics));
+
+        Assert.Equal("save=1, preview=0", summary.Field("ByKind"));
     }
 }

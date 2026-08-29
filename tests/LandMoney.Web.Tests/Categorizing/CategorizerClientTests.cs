@@ -91,6 +91,21 @@ public class CategorizerClientTests
     private static Task<CategorySuggestion?> Ask(CategorizerClient client, CancellationToken cancellationToken = default)
         => client.SuggestCategoryAsync("Dinner at the pizza place", 42.50m, "EUR", cancellationToken);
 
+    /// <summary>The same question down the #67 path, where the answer keeps its shape.</summary>
+    private static Task<CategorizerAnswer> Preview(
+        CategorizerClient client, CancellationToken cancellationToken = default)
+        => client.PreviewCategoryAsync("Dinner at the pizza place", 42.50m, "EUR", cancellationToken);
+
+    /// <summary>A client with nothing configured, which is a legal state since #57.</summary>
+    // Not reachable through ClientThat: that one sets a base address, which is the
+    // whole difference between "the categorizer said nothing" and "there is no
+    // categorizer". The handler throws rather than answering, so a test that
+    // accidentally sent a request would fail loudly instead of passing.
+    private static CategorizerClient UnconfiguredClient(CategorizerMetrics metrics) =>
+        new(new HttpClient(new StubHandler((_, _) => throw new InvalidOperationException("No request should be sent."))),
+            metrics,
+            NullLogger<CategorizerClient>.Instance);
+
     // --- the two normal answers ----------------------------------------------
 
     [Fact]
@@ -539,5 +554,127 @@ public class CategorizerClientTests
         Assert.NotNull(window);
         Assert.Equal(1, window.BySource["other"]);
         Assert.False(window.BySource.ContainsKey("wizard"));
+    }
+
+    // --- the preview path (#67) ----------------------------------------------
+
+    [Fact]
+    public async Task A_previewed_suggestion_is_the_category_and_the_source()
+    {
+        var client = ClientThat((_, _) => Json("""{"category":"eating-out","source":"rules"}"""));
+
+        Assert.Equal(new CategorizerAnswer("eating-out", "rules"), await Preview(client));
+    }
+
+    [Fact]
+    public async Task A_previewed_abstention_says_who_had_no_idea()
+    {
+        // **The distinction this whole path exists for.** On the save side an
+        // abstention and a dead service are both null and are treated the same,
+        // correctly -- neither stores a category. Here they are two different
+        // things on a screen: "no idea" is a normal answer on roughly a third of
+        // the labelled set and has to be visible, and a categorizer that is not
+        // running has to be invisible, because there is nothing the person typing
+        // could do about it.
+        var answer = await Preview(ClientThat((_, _) => Json("""{"category":null,"source":"rules"}""")));
+
+        Assert.Equal(new CategorizerAnswer(null, "rules"), answer);
+
+        // And it is still not a suggestion, so the save path cannot accidentally
+        // store one.
+        Assert.Null(answer.Suggestion);
+    }
+
+    [Fact]
+    public async Task A_preview_with_no_categorizer_configured_answers_nothing_at_all()
+    {
+        // The state the deployed application was in on every save between #39 and
+        // #61. It has to be distinguishable from an abstention here, or the screen
+        // would tell somebody the categorizer had no idea about a description it
+        // was never shown.
+        var metrics = NewMetrics();
+
+        Assert.Equal(CategorizerAnswer.Nothing, await Preview(UnconfiguredClient(metrics)));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.NotConfigured));
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.BadGateway)]
+    public async Task A_preview_that_fails_answers_nothing_and_never_throws(HttpStatusCode status)
+    {
+        // The promise #39 made for the save path, restated for a path that has no
+        // transaction to protect: a suggestion may not become an error on a screen.
+        // Both fields null, which is what the client renders as nothing extra.
+        var client = ClientThat((_, _) => Json("""{"category":"eating-out","source":"rules"}""", status));
+
+        Assert.Equal(CategorizerAnswer.Nothing, await Preview(client));
+    }
+
+    [Fact]
+    public async Task An_answer_this_side_refuses_is_not_reported_as_an_abstention()
+    {
+        // A category over the column's width, from a service that named itself
+        // perfectly well. It is tempting to report it as "rules had no idea",
+        // because the source is right there -- and that would be this application
+        // inventing a sentence. It had an idea; this side will not use it.
+        var metrics = NewMetrics();
+        var tooLong = new string('x', 101);
+        var client = ClientThat(
+            (_, _) => Json($$"""{"category":"{{tooLong}}","source":"rules"}"""), metrics: metrics);
+
+        Assert.Equal(CategorizerAnswer.Nothing, await Preview(client));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Unusable));
+        Assert.Equal(0, Counted(window, CategorizerOutcome.Abstained));
+    }
+
+    [Fact]
+    public async Task A_preview_is_counted_as_a_preview_and_a_save_as_a_save()
+    {
+        // #67. The outcomes are one set of counters because a preview fails in the
+        // same nine ways; the call counts are two, because from here on the
+        // previews are the majority and against the model each is a charge. The
+        // kind is chosen by which method was called and by nothing else, so this is
+        // also the assertion that the two entry points did not end up sharing one.
+        var metrics = NewMetrics();
+        var client = ClientThat((_, _) => Json("""{"category":"eating-out","source":"rules"}"""), metrics: metrics);
+
+        await Ask(client);
+        await Preview(client);
+        await Preview(client);
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, window.ByKind[CategorizerKind.Save]);
+        Assert.Equal(2, window.ByKind[CategorizerKind.Preview]);
+        Assert.Equal(3, Counted(window, CategorizerOutcome.Suggested));
+    }
+
+    [Fact]
+    public async Task A_preview_that_is_abandoned_still_throws_and_is_still_counted()
+    {
+        // The typing stopped, or the field changed, and the browser aborted. The
+        // exception escapes for the same reason it does on the save path -- nobody
+        // is left to answer -- and the call is counted, because it was made and
+        // against the model it was paid for. That number is what says how much of
+        // the bill was thrown away.
+        var metrics = NewMetrics();
+        var client = ClientThat((_, _) => Json("""{"category":"eating-out","source":"rules"}"""), metrics: metrics);
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Preview(client, cts.Token));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Abandoned));
+        Assert.Equal(1, window.ByKind[CategorizerKind.Preview]);
     }
 }

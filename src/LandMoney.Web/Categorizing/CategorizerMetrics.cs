@@ -15,6 +15,19 @@ public sealed record CategorizerWindow(
     TimeSpan Length,
     long Calls,
     IReadOnlyDictionary<string, long> ByOutcome,
+    // #67. What asked -- a save, or a description being typed. It is its own
+    // dimension rather than a second set of counters because a preview fails in
+    // exactly the nine ways a save does; what differs is only whether anything
+    // came of it, and how many there are.
+    //
+    // What this deliberately does not do: split the outcomes by kind. That would
+    // answer "did saves get categories" without reading a log line, and it costs a
+    // dictionary of dictionaries and a summary line that no longer has one shape.
+    // The per-call lines carry both words, so the question is a query rather than
+    // a number, and the number that could not be recovered from anywhere else --
+    // how many calls each path made, which against the model is the bill -- is
+    // here.
+    IReadOnlyDictionary<string, long> ByKind,
     IReadOnlyDictionary<string, long> BySource,
     int Measured,
     int Dropped,
@@ -77,6 +90,7 @@ public sealed class CategorizerMetrics
 
     private readonly Lock _gate = new();
     private readonly Dictionary<string, long> _byOutcome = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _byKind = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _bySource = new(StringComparer.Ordinal);
     private readonly List<double> _durations = new(capacity: 64);
     private int _dropped;
@@ -116,13 +130,14 @@ public sealed class CategorizerMetrics
     /// <summary>One call, one outcome.</summary>
     /// <param name="outcome">A value from <see cref="CategorizerOutcome"/>, never free text.</param>
     /// <param name="source">Who produced the category, when there is one. Bounded before it is tagged.</param>
+    /// <param name="kind">A value from <see cref="CategorizerKind"/>: what asked for this.</param>
     /// <param name="elapsed">
     /// How long the call took, or null when there was no call -- which is only
     /// <see cref="CategorizerOutcome.NotConfigured"/>. Recording a zero there would
     /// put a heap of instant successes into the histogram and drag every percentile
     /// down, so the absence is represented rather than approximated.
     /// </param>
-    public void Record(string outcome, string? source, TimeSpan? elapsed)
+    public void Record(string outcome, string? source, string kind, TimeSpan? elapsed)
     {
         var label = source is null ? null : Label(source);
 
@@ -130,7 +145,11 @@ public sealed class CategorizerMetrics
         // suggested line splits by producer -- #64 asks for exactly that -- while
         // every other outcome keeps one series instead of one per producer that did
         // not answer.
-        var tags = new TagList { { "outcome", outcome } };
+        // `kind` on both instruments and always. Unlike `source` it is never
+        // absent -- something always asked -- and unlike `source` it is this
+        // application's own word, so there is no bounding to do: CategorizerKind
+        // has two members and nothing else can reach here.
+        var tags = new TagList { { "outcome", outcome }, { "kind", kind } };
         if (label is not null)
         {
             tags.Add("source", label);
@@ -140,13 +159,15 @@ public sealed class CategorizerMetrics
 
         if (elapsed is { } took)
         {
-            _duration.Record(took.TotalSeconds, new TagList { { "outcome", outcome } });
+            _duration.Record(
+                took.TotalSeconds, new TagList { { "outcome", outcome }, { "kind", kind } });
         }
 
         lock (_gate)
         {
             _calledSinceWindow++;
             _byOutcome[outcome] = _byOutcome.GetValueOrDefault(outcome) + 1;
+            _byKind[kind] = _byKind.GetValueOrDefault(kind) + 1;
 
             if (label is not null)
             {
@@ -197,6 +218,7 @@ public sealed class CategorizerMetrics
                 length,
                 _calledSinceWindow,
                 new Dictionary<string, long>(_byOutcome, StringComparer.Ordinal),
+                new Dictionary<string, long>(_byKind, StringComparer.Ordinal),
                 new Dictionary<string, long>(_bySource, StringComparer.Ordinal),
                 Measured: _durations.Count,
                 Dropped: _dropped,
@@ -205,6 +227,7 @@ public sealed class CategorizerMetrics
                 MaxMs: _durations.Count == 0 ? 0 : _durations[^1]);
 
             _byOutcome.Clear();
+            _byKind.Clear();
             _bySource.Clear();
             _durations.Clear();
             _dropped = 0;

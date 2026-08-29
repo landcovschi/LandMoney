@@ -206,3 +206,79 @@ public sealed record UpdateCategoryRequest
     [KnownCategory]
     public required string? Category { get; init; }
 }
+
+/// <summary>What a client may ask a category about, before there is a transaction. #67.</summary>
+// The three fields the categorizer reads, and no date: the day money was spent
+// tells a predictor nothing, and a field an endpoint does not use is a field a
+// client can be refused for getting wrong. That absence is the whole reason this
+// is not CreateTransactionRequest -- a mistyped year would otherwise stop the
+// suggestion appearing, for a reason that has nothing to do with the description.
+//
+// **The rules below are copied from CreateTransactionRequest and that is a
+// decision rather than an oversight.** They exist here for a different reason than
+// they exist there: on the create path they protect the column, and here they keep
+// the outbound request inside what `CategorizeRequest` in contracts.py accepts --
+// `amount` is `Field(gt=0, max_digits=18, decimal_places=2)` on that side, so an
+// amount this endpoint waved through would come back as a 422 the user cannot see
+// and cannot act on. Two contracts that happen to agree, which is the same call
+// CategorizerContracts.cs makes for the same three fields one hop further out.
+//
+// What lost: pulling the bounds out into shared constants both records reference.
+// It removes the literal duplication and not the risk, because what actually
+// drifts is *which attributes are present* -- a rule added to the create path and
+// forgotten here -- and a shared string does nothing about that. It also edits the
+// file where these rules are decided for the benefit of a file that consumes them.
+// CategorySuggestionRequestTests reads both types by reflection and fails when they
+// disagree, which is the same answer CategoriesTests gives to the same problem.
+//
+// There is no ownership or rate limiting on any of this, and it is worth saying
+// where it will be looked for: a signed-in caller can ask for as many suggestions
+// as it likes, and against a model each one is a charge. What stands between this
+// and a bill is the client's debounce and minimum length, which is a control in the
+// wrong place -- acceptable while registration needs an invite code and the
+// deployed categorizer runs the rules (#61), and the first thing to revisit when
+// either stops being true.
+public sealed record CategorySuggestionRequest
+{
+    [Display(Name = "Amount")]
+    [Range(typeof(decimal), "0.01", "9999999999999999.99",
+        ParseLimitsInInvariantCulture = true,
+        ErrorMessage = "{0} must be between {1} and {2}.")]
+    [DecimalScale(2)]
+    public required decimal Amount { get; init; }
+
+    [Display(Name = "Currency")]
+    [RegularExpression("^[A-Za-z]{3}$", ErrorMessage = "{0} must be a three-letter ISO 4217 code.")]
+    public required string Currency { get; init; }
+
+    [Display(Name = "Description")]
+    [Required(AllowEmptyStrings = false)]
+    [StringLength(500, MinimumLength = 1)]
+    public required string Description { get; init; }
+}
+
+/// <summary>What the suggestion endpoint answers. Always a 200. #67.</summary>
+// Two nullable fields carrying three states, and the rule is that **Source says
+// something answered**:
+//
+//   {"category":"groceries","source":"rules"}  a suggestion
+//   {"category":null,"source":"rules"}         it answered, and had no idea
+//   {"category":null,"source":null}            nothing answered
+//
+// The middle one is why this is not simply the category. #67 asks for "no idea" to
+// be shown, because it is a normal answer on roughly a third of the labelled set
+// and a screen that shows nothing for it is a screen that looks broken every third
+// transaction -- while a categorizer that is not running has to be invisible, since
+// there is nothing the person typing could do about it. On the wire from the Python
+// service both are the same null; CategorizerAnswer is where they are separated.
+//
+// A status code was the alternative -- 200 for an answer, 503 for no categorizer --
+// and it lost on what it would mean. Nothing here failed: this endpoint answered
+// the question it was asked, and the answer is that there is no suggestion. A 5xx
+// would also put a red line in the browser's console for the ordinary state of an
+// application whose categorizer is optional by design.
+//
+// It does not carry the transaction back. The client already has every field, it
+// sent them, and echoing them would invite a screen that trusts this response for
+// something other than the one word it is for.
+public sealed record CategorySuggestionResponse(string? Category, string? Source);
