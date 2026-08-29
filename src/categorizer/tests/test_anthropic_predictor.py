@@ -491,7 +491,13 @@ def test_half_a_price_is_no_price_and_says_so(caplog):
     caplog.set_level(logging.ERROR)
 
     assert _prices_from({PRICE_INPUT_ENV: "5"}) is None
-    assert PRICE_OUTPUT_ENV in caplog.text
+
+    # Which error, and not merely that there was one. Found by mutation: deleting
+    # the half-configured check entirely still passed this test, because `float("")`
+    # then raises and the unparseable branch logs a message naming the same two
+    # variables. An assertion that some error was logged cannot tell a rule from the
+    # accident that happens to follow it.
+    assert "Only one of" in caplog.text
 
 
 def test_a_price_that_is_not_a_number_does_not_stop_the_service(caplog):

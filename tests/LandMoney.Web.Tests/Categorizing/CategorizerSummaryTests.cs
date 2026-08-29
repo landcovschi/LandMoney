@@ -151,6 +151,24 @@ public class CategorizerSummaryTests
     }
 
     [Fact]
+    public async Task The_latency_figures_say_how_many_calls_they_cover()
+    {
+        // Found by mutation, per #21: swapping {Measured} for {Calls} on the summary
+        // line passed the whole suite, because every other test here has one number
+        // for both. A window with an untimed call in it is what tells them apart --
+        // and that distinction is the one worth having, since the untimed call is
+        // exactly the state where no categorizer is configured at all.
+        var metrics = NewMetrics();
+        metrics.Record(CategorizerOutcome.NotConfigured, source: null, elapsed: null);
+        metrics.Record(CategorizerOutcome.Suggested, "rules", TimeSpan.FromMilliseconds(12));
+
+        var summary = Summary(await StartAndStop(metrics));
+
+        Assert.Equal(2L, summary.Field("Calls"));
+        Assert.Equal(1, summary.Field("Measured"));
+    }
+
+    [Fact]
     public async Task Nothing_happened_is_nothing_written()
     {
         // The rule that makes the line worth reading when it does appear.

@@ -2227,6 +2227,25 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   same `null` on the wire, two different numbers here. Then a description the rules
   match: `Categorizer suggested: groceries by rules in 4ms`.
 
+  **Checked by breaking it, per #21: sixteen mutations, one at a time, reverted
+  from the commit rather than from memory.** Fourteen were caught; the two that
+  were not are the reason the exercise is worth its hour, because both were tests
+  that looked like they asserted something.
+
+  Swapping `{Measured}` for `{Calls}` on the summary line passed the entire suite
+  -- every test until then had a window where the two numbers are equal, so
+  "latency over 3 of them" and "3 recorded" were indistinguishable. The test added
+  for it uses a window holding one untimed call, which is exactly the
+  no-categorizer state.
+
+  The other is sharper. Deleting the half-a-price check in `_prices_from`
+  entirely still passed `test_half_a_price_is_no_price_and_says_so`, because
+  `float("")` then raises and the *unparseable* branch logs an error naming the
+  same two variables -- so the test was satisfied by the accident that follows the
+  rule rather than by the rule. It now asserts which error. **A test that asserts
+  only that something was logged cannot tell a rule from what happens in its
+  absence.**
+
   **What is not automated, said plainly.** That the timer fires on its configured
   interval: driving a `PeriodicTimer` needs a clock whose `CreateTimer` is fake,
   which is `Microsoft.Extensions.TimeProvider.Testing` -- the package CLAUDE.md
