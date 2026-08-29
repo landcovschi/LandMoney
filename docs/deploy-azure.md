@@ -1518,6 +1518,53 @@ az containerapp update -g rg-landmoney -n landmoney-categorizer --image ghcr.io/
 ```
 
 
+## Step 17 -- reading what the categorizer is doing
+
+Added 2026-08-29 with #64. Nothing to create and nothing to set: this is where the
+numbers are, now that there are numbers.
+
+Two kinds of line reach Log Analytics, both as JSON since #64 -- one row per entry,
+with the message template's placeholders as fields under `State`:
+
+* one per call worth a line, from `LandMoney.Web.Categorizing.CategorizerClient`,
+  carrying `Outcome` -- `suggested`, `refused`, `timeout`, `unreachable`,
+  `unreadable` or `unusable`. **An abstention writes no line and is only a
+  count**: it is the baseline declining on about a third of the labelled set, and
+  a warning per save would train a reader to skip the ones that matter;
+* one per minute in which anything happened, from `CategorizerSummary`, carrying
+  every count and `P50Ms` / `P95Ms` / `MaxMs`. **Silence means nothing was saved**,
+  not that the summary is broken.
+
+The whole point of the outcome being a field rather than a sentence is that this
+is a query and not a search:
+
+```
+az monitor log-analytics query \
+  --workspace <the workspace id from step 8> \
+  --analytics-query "ContainerAppConsoleLogs_CL | where ContainerName_s == 'landmoney' | extend p = parse_json(Log_s) | where tostring(p.Category) endswith 'CategorizerClient' | summarize count() by tostring(p.State.Outcome)" \
+  -o table
+```
+
+`not-configured` on that list is the bug #61 existed to fix, and it is the one to
+look for first: it means `Categorizer__BaseUrl` is not reaching the app and every
+transaction is being stored with no category. `timeout` and `unreachable` are not
+the same thing and are not interchangeable -- a stopped container leaves the SYN
+unanswered, so it counts as a timeout (#39, measured twice).
+
+**Tokens and cost live in the other container**, because only it can see them.
+`landmoney-categorizer` writes one `model_call outcome=... elapsed_ms=...
+input_tokens=... output_tokens=... cost_usd=...` line per call, and it says
+`cost_usd=unpriced` unless `CATEGORIZER_PRICE_INPUT_PER_MTOK` and
+`CATEGORIZER_PRICE_OUTPUT_PER_MTOK` are both set on that app -- there is no price
+in the code, deliberately, because a stale one would be believed. None of this
+appears today: the deployed categorizer is pinned to `CATEGORIZER_PREDICTOR=rules`
+(step 16), so there are no tokens to count until that changes.
+
+Which side to believe when they disagree, decided in #64: **this service is
+authoritative for what the model did, and the .NET app for what the user got.** A
+call answered at seven seconds is billed and logged here, and is a `timeout`
+over there; both are correct, and they are answering different questions.
+
 ## Tearing it all down
 
 One command, and it is the reason everything went into one resource group:

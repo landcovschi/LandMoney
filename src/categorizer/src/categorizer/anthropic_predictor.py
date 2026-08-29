@@ -17,8 +17,9 @@ which is the exact mutation #39 caught by hand.
 
 import json
 import logging
+import time
 from decimal import Decimal
-from typing import Any, Final, Mapping, Protocol
+from typing import Any, Final, Mapping, NamedTuple, Protocol
 
 from categorizer.categories import KNOWN, NO_PREDICTION
 from categorizer.contracts import CategorizeRequest, CategorizeResponse, Category, Source
@@ -58,6 +59,56 @@ DEFAULT_MAX_TOKENS: Final[int] = 2048
 # saving without them.
 DEFAULT_EFFORT: Final[str] = "low"
 
+# What one call cost, as far as this process can tell -- #64.
+#
+# **No default price, and that is the decision this whole section turns on.** The
+# published rate for `claude-opus-5` on 2026-08-29 is 5.00 USD per million input
+# tokens and 25.00 USD per million output tokens, and writing those two numbers
+# into this file would produce a cost figure that stays confident and becomes
+# wrong: a price changes without anything in this repository noticing, and a
+# silently stale number in a log is worse than an absent one, because it is
+# believed. So the prices are configuration, the figures above are what to put in
+# it today, and with nothing configured the tokens are still logged -- they are the
+# fact, the money is the multiplication.
+PRICE_INPUT_ENV: Final[str] = "CATEGORIZER_PRICE_INPUT_PER_MTOK"
+PRICE_OUTPUT_ENV: Final[str] = "CATEGORIZER_PRICE_OUTPUT_PER_MTOK"
+
+
+class Usage(NamedTuple):
+    """Tokens in and out, when the response says. None when it does not."""
+
+    # Optional because this reads another library's object defensively, the same
+    # way `_answer_from` reads the content blocks. A stub in a test carries no
+    # usage; so does a response shape that changes. Neither is worth an exception on
+    # the path where a transaction is being saved, and "unknown" is a thing a log
+    # line can say.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+class Prices(NamedTuple):
+    """USD per million tokens, in and out."""
+
+    input_per_mtok: float
+    output_per_mtok: float
+
+    def cost_of(self, usage: Usage) -> float | None:
+        """What that call cost, or None if it cannot be worked out.
+
+        Cache reads are deliberately not modelled: nothing here sends
+        `cache_control`, so there are none, and a cache-aware calculation would be
+        untested arithmetic guarding against a feature that does not exist. The day
+        `_user_message`'s prefix-cache note is acted on, this figure becomes an
+        overestimate and this is the docstring that says so.
+        """
+        if usage.input_tokens is None or usage.output_tokens is None:
+            return None
+
+        return (
+            usage.input_tokens * self.input_per_mtok
+            + usage.output_tokens * self.output_per_mtok
+        ) / 1_000_000
+
 
 class _Messages(Protocol):
     def create(self, **kwargs: Any) -> Any: ...
@@ -88,11 +139,17 @@ class AnthropicPredictor:
         model: str = DEFAULT_MODEL,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         effort: str = DEFAULT_EFFORT,
+        prices: Prices | None = None,
     ) -> None:
         self._client = client
         self._model = model
         self._max_tokens = max_tokens
         self._effort = effort
+        # An argument rather than something read from the environment in here, for
+        # the same reason the client is: a test names the configuration it is
+        # testing instead of mutating the process. None means unpriced, which is
+        # the state a deployment that never set a price is in.
+        self._prices = prices
 
     # Read-only, and they exist for #60 rather than for this class. A score is
     # only reproducible if what produced it is written down beside it, and the
@@ -162,6 +219,7 @@ class AnthropicPredictor:
             client,
             model=env.get("CATEGORIZER_MODEL", DEFAULT_MODEL),
             effort=env.get("CATEGORIZER_EFFORT", DEFAULT_EFFORT),
+            prices=_prices_from(env),
         )
 
     def categorize(self, request: CategorizeRequest) -> CategorizeResponse:
@@ -182,8 +240,25 @@ class AnthropicPredictor:
         )
 
     def _category_for(self, request: CategorizeRequest) -> Category | None:
+        # #64. Everything from here to the end of this method is about being able to
+        # say afterwards what happened, and the four outcomes below are the four
+        # this process can tell apart -- which is one more than the .NET side can
+        # see, since `unusable` and `abstained` are the same `category: null` on the
+        # wire.
+        #
+        # **This service is authoritative for what the model did**, and the .NET
+        # client is authoritative for what the user got. #64 asks for that to be
+        # decided rather than discovered, and the split follows from what each side
+        # can observe: a call that answers at seven seconds is billed, counted here,
+        # and already abandoned over there, while a request that never arrives is
+        # counted there and unknowable here. So "how often does the model answer" is
+        # this file's number, and "how often did a save get a category" is
+        # CategorizerClient's. Neither is a correction of the other.
+        started = time.perf_counter()
+        usage = Usage()
+
         try:
-            answer = self._ask(request)
+            answer, usage = self._ask(request)
         # **Broad on purpose, and this is the paragraph to read before narrowing
         # it.** This method sits on the path where a user's transaction is being
         # saved, and #39's promise is that categorising can never cost that row.
@@ -203,14 +278,60 @@ class AnthropicPredictor:
         # clause and no caller-cancellation to let through.
         except Exception:
             logger.exception("The model call failed; answering with no category.")
+            self._log_call("failed", started, usage)
             return None
 
-        if answer is None or answer == NO_PREDICTION:
+        # Three separate lines where the code above had one condition, and the
+        # distinction is the point rather than the tidiness. `abstained` is the model
+        # declining a row it was told it may decline; `unusable` is the model
+        # answering something this adapter threw away -- a word outside the
+        # vocabulary, an empty response, a body that is not JSON. Both are a null
+        # category and both count as a miss in #60's score, and they want different
+        # reactions: one is the prompt working, the other is the prompt or the
+        # schema needing a look.
+        if answer is None:
+            self._log_call("unusable", started, usage)
             return None
 
+        if answer == NO_PREDICTION:
+            self._log_call("abstained", started, usage)
+            return None
+
+        self._log_call("answered", started, usage)
         return Category(answer)
 
-    def _ask(self, request: CategorizeRequest) -> str | None:
+    def _log_call(self, outcome: str, started: float, usage: Usage) -> None:
+        """One line per call: what happened, how long, how many tokens, what it cost.
+
+        `key=value` rather than a sentence, because this is the line something will
+        eventually parse. It is deliberately not JSON: uvicorn owns the logging
+        configuration here, and a `dictConfig` that reformats every line this
+        service and its server write is a bigger change than #64 asks for -- the
+        .NET half took the JSON console because its fields reach Log Analytics as
+        rows, and this half has no such consumer today.
+
+        **Nothing about the transaction is in it.** #64's first trap is about metric
+        cardinality and the same rule holds harder here: the description is the
+        user's own spending, and a log line is where it would sit for ever.
+        """
+        cost = self._prices.cost_of(usage) if self._prices else None
+
+        logger.info(
+            "model_call outcome=%s model=%s effort=%s elapsed_ms=%.0f "
+            "input_tokens=%s output_tokens=%s cost_usd=%s",
+            outcome,
+            self._model,
+            self._effort,
+            (time.perf_counter() - started) * 1000,
+            # "unknown" rather than 0: a response that did not report its usage and a
+            # call that used no tokens are different things, and a zero would quietly
+            # become a zero in whatever adds these up.
+            _or_unknown(usage.input_tokens),
+            _or_unknown(usage.output_tokens),
+            "unpriced" if cost is None else f"{cost:.6f}",
+        )
+
+    def _ask(self, request: CategorizeRequest) -> tuple[str | None, Usage]:
         message = self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
@@ -229,7 +350,79 @@ class AnthropicPredictor:
                 "effort": self._effort,
             },
         )
-        return _answer_from(message)
+        # The usage travels back beside the answer rather than being read from a
+        # field on `self`, so that two calls cannot interleave and report each
+        # other's tokens. FastAPI runs this handler on a worker thread (`def`, not
+        # `async def` -- see main.py), so that is a real race and not a theoretical
+        # one.
+        return _answer_from(message), _usage_from(message)
+
+
+def _prices_from(env: Mapping[str, str]) -> Prices | None:
+    """The two prices, or None -- which means the log reports tokens and no money.
+
+    **An unparseable price does not stop the process**, which is the opposite of how
+    `main.py` treats an unrecognised `CATEGORIZER_PREDICTOR`, and the difference is
+    what each mistake costs. There, the wrong value serves the rules while the
+    deployment believes a model is running, and #60 would record a baseline under a
+    model's name. Here the worst case is a missing figure in a diagnostic line: a
+    price affects nothing this service does, so refusing to start over one would
+    take a categorizer off the air to protect an arithmetic convenience.
+
+    Half-configured is the case worth a line of its own. One price set and the other
+    absent is somebody in the middle of doing this, and silently reporting nothing
+    would look identical to never having tried.
+    """
+    raw_input = env.get(PRICE_INPUT_ENV, "").strip()
+    raw_output = env.get(PRICE_OUTPUT_ENV, "").strip()
+
+    if not raw_input and not raw_output:
+        return None
+
+    if not raw_input or not raw_output:
+        logger.error(
+            "Only one of %s and %s is set, so no cost will be reported. Both are needed.",
+            PRICE_INPUT_ENV,
+            PRICE_OUTPUT_ENV,
+        )
+        return None
+
+    try:
+        return Prices(float(raw_input), float(raw_output))
+    except ValueError:
+        # The values are prices rather than credentials, so naming them is what
+        # makes this fixable; there is nothing here that `.env` would not want read
+        # aloud.
+        logger.error(
+            "%s=%r and %s=%r are not both numbers, so no cost will be reported.",
+            PRICE_INPUT_ENV,
+            raw_input,
+            PRICE_OUTPUT_ENV,
+            raw_output,
+        )
+        return None
+
+
+def _usage_from(message: Any) -> Usage:
+    """Tokens in and out, read the way `_answer_from` reads the content blocks.
+
+    Defensively, and for the same reason: this is another library's object arriving
+    over a network, and a missing attribute here would raise on the path where a
+    user's transaction is being saved -- turning an accounting detail into a failed
+    guess. Anything unreadable is None, which the log line prints as `unknown`.
+    """
+    usage = getattr(message, "usage", None)
+
+    return Usage(_as_tokens(getattr(usage, "input_tokens", None)),
+                 _as_tokens(getattr(usage, "output_tokens", None)))
+
+
+def _as_tokens(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _or_unknown(tokens: int | None) -> object:
+    return "unknown" if tokens is None else tokens
 
 
 def _user_message(request: CategorizeRequest) -> str:

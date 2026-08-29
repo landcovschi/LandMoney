@@ -118,6 +118,21 @@ every transaction with no category. Step 16 of `docs/deploy-azure.md` is the
 setting, and `ci.yml` asserts it on every deployment -- the alternative is a
 failure that shows up as a feature quietly not existing.
 
+That failure is also why there are numbers now (#64). Every call to the
+categorizer records one of nine outcomes, and once a minute -- and only when
+something happened -- the application writes one line saying how many of each and
+what the p95 was. `Categorizer:SummaryIntervalSeconds` is the interval and `0`
+turns the line off. Outside Development the log is JSON, one row per entry, so
+those fields can be queried rather than searched: step 17 of
+`docs/deploy-azure.md` has the query.
+
+The money is counted on the other side of the wire, in the Python service, which
+is the only process that can see it: `CATEGORIZER_PRICE_INPUT_PER_MTOK` and
+`CATEGORIZER_PRICE_OUTPUT_PER_MTOK` in `.env`, both or neither, and with neither
+set the per-call line still reports the tokens. There is no price in the code on
+purpose -- a rate moves without this repository noticing, and a stale figure in a
+log is worse than a missing one.
+
 **Signing in needs one setting, and it is a secret.** Accounts live in this
 application's own database -- ASP.NET Core Identity, a username and a password,
 and a login form in the client. There is no identity provider and nothing to
