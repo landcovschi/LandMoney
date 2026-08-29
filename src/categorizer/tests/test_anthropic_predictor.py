@@ -32,6 +32,8 @@ from categorizer.anthropic_predictor import (
     _prices_from,
 )
 from categorizer.categories import CATEGORIES, NO_PREDICTION
+from categorizer.prompt import fingerprint, system_prompt
+from categorizer.retrieval import Example, LexicalStore
 from categorizer.contracts import CategorizeRequest, Category, Source
 
 # --- the fake ----------------------------------------------------------------
@@ -96,10 +98,13 @@ def predictor_for(
     prices: Prices | None = None,
     cache: object | None = None,
     model: str = "claude-opus-5",
+    examples: object | None = None,
 ) -> tuple[AnthropicPredictor, StubClient]:
     client = StubClient(*answers)
     return (
-        AnthropicPredictor(client, model=model, prices=prices, cache=cache),
+        AnthropicPredictor(
+            client, model=model, prices=prices, cache=cache, examples=examples
+        ),
         client,
     )
 
@@ -717,3 +722,117 @@ def test_a_hit_is_served_without_the_model_being_reachable_at_all():
     cold, _ = predictor_for(RuntimeError("the network is gone"), cache=cache)
 
     assert cold.categorize(a_transaction()).category == Category.GROCERIES
+
+
+# --- retrieval -- #66 ---------------------------------------------------------
+#
+# The seam is `examples=`, a constructor argument like the client and the cache, so
+# a test that wanted retrieval has to say so and none can reach a real Voyage or a
+# real Postgres by forgetting. The stores themselves are tested in
+# `test_retrieval.py`; what is checked here is the join -- that what a store finds
+# reaches the model, and that the fingerprint keying the cache describes the prompt
+# that was actually sent.
+
+
+def a_corpus() -> LexicalStore:
+    return LexicalStore(
+        [
+            Example("linella", "groceries"),
+            Example("linella centru", "groceries"),
+            Example("rent july", "housing"),
+        ]
+    )
+
+
+def sent_by(client: StubClient) -> dict:
+    return client.messages.calls[0]
+
+
+def test_the_retrieved_rows_reach_the_model_in_the_user_message():
+    predictor, client = predictor_for(answering("groceries"), examples=a_corpus())
+
+    predictor.categorize(a_transaction(description="linella"))
+
+    shown = sent_by(client)["messages"][0]["content"]
+    assert '"linella" -> groceries' in shown
+    assert "housing" not in shown
+
+
+def test_the_examples_are_in_the_user_message_and_not_the_system_prompt():
+    """The load-bearing placement of #66, and it is about `cache.py`.
+
+    An answer is keyed on the model, the effort, the prompt fingerprint and the
+    user message. Retrieved rows in the system prompt would not be covered by that
+    key, so the first lookup for a description would be replayed for every later
+    one -- serving an answer computed from a corpus that has since gained the row
+    that would have changed it. #65's second trap, one issue along.
+    """
+    predictor, client = predictor_for(answering("groceries"), examples=a_corpus())
+
+    predictor.categorize(a_transaction(description="linella"))
+
+    assert '"linella" -> groceries' in sent_by(client)["messages"][0]["content"]
+    assert '"linella" -> groceries' not in sent_by(client)["system"]
+
+
+def test_examples_change_the_system_prompt_and_the_fingerprint():
+    """Two prompts, two fingerprints, and the second is why the first matters.
+
+    A model shown five labelled rows and told nothing about them will reach for the
+    majority; the appended paragraph is what lets it decline them. So the prompt
+    genuinely differs, and an answer keyed under the base fingerprint would be
+    labelled with instructions it was never sent.
+    """
+    with_examples, client_with = predictor_for(answering("groceries"), examples=a_corpus())
+    without, client_without = predictor_for(answering("groceries"))
+
+    with_examples.categorize(a_transaction(description="linella"))
+    without.categorize(a_transaction(description="linella"))
+
+    assert sent_by(client_with)["system"] != sent_by(client_without)["system"]
+    assert fingerprint(True) != fingerprint(False)
+    assert sent_by(client_without)["system"] == system_prompt(False)
+
+
+def test_a_corpus_that_finds_nothing_is_the_prompt_from_before_66():
+    """`bool(neighbours)`, not "a store is configured".
+
+    A store that found nothing must produce the base prompt -- otherwise the call is
+    labelled with a paragraph about examples that are not there, and every cache
+    entry written before #66 is orphaned for no gain. It also means an empty corpus
+    costs exactly nothing.
+    """
+    predictor, client = predictor_for(answering("groceries"), examples=a_corpus())
+
+    predictor.categorize(a_transaction(description="zzz"))
+
+    assert sent_by(client)["system"] == system_prompt(False)
+    assert "past transactions" not in sent_by(client)["messages"][0]["content"]
+
+
+def test_retrieval_failing_still_answers():
+    """#39's promise reaching a third dependency, asserted rather than assumed."""
+
+    class Exploding:
+        label = "exploding"
+
+        def nearest(self, description: str, *, k: int):
+            raise RuntimeError("no database")
+
+    predictor, _ = predictor_for(answering("groceries"), examples=Exploding())
+
+    assert predictor.categorize(a_transaction()).category == Category.GROCERIES
+
+
+def test_the_predictor_reports_which_store_answered():
+    """Read off the store, never off the setting that built it.
+
+    Same rule `Predictor` follows for `source`: a header saying "vector" because a
+    variable said so rather than because a vector store answered is the lie #59
+    wrote that rule to prevent.
+    """
+    with_store, _ = predictor_for(examples=a_corpus())
+    without, _ = predictor_for()
+
+    assert "lexical" in with_store.retrieval
+    assert without.retrieval == "off"

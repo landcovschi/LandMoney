@@ -511,3 +511,125 @@ thing left that can answer a question this section cannot.
   required check would become a bill. The model's number lives here, in prose,
   where it can carry the caveats above; a JSON file cannot say "the set was
   written by the thing being measured".
+
+## 8. Retrieval, and the eval set running out of room
+
+Written 2026-08-29 for #66, which asked for the user's own history to be used as
+few-shot examples and for the number from section 7 to move "in whichever
+direction, and both numbers recorded". Both numbers are below. Neither moved,
+and the reason is the most useful thing this section has to say.
+
+### The measurement is out of headroom, and that is the finding
+
+Section 7 put the model at **98.9% macro recall on `transactions.csv`** -- one
+miss in 53, the abstention on `fidesco`. So before anything was built, the
+arithmetic said:
+
+| | today | perfect | headroom |
+| --- | --- | --- | --- |
+| macro recall | 98.9% | 100% | **+1.1** |
+| accuracy | 98.1% | 100% | +1.9 |
+
+Section 2 point 5 puts the noise floor on a set this size at about **3 points**.
+An improvement of at most 1.1 cannot be distinguished from noise. **This set can
+detect retrieval harming the model and is structurally unable to detect it
+helping.**
+
+`holdout.csv` was labelled for #66 (section 4 releases it at the end of slice 4,
+which closed with #60) specifically to give a corpus and an eval that do not
+overlap -- #66's second trap, since a nearest-neighbour lookup that can return the
+row it is answering is a lie with a very good percentage. It turned out to have
+even less room:
+
+```
+                     transactions.csv (53)   holdout.csv (10)
+rules                        56.1%                44.4%
+model, no retrieval          98.9%               100.0%
+model, lexical retrieval       not run           100.0%
+model, vector retrieval        not run           not run
+```
+
+**The model scores 100.0% on the holdout with no retrieval at all** -- ten of ten,
+zero abstentions, zero confident errors. There is no number left to improve.
+
+That the harder-for-the-rules set (44.4% against 56.1%) is the easier-for-the-model
+set is worth a sentence: the rules fail on proper nouns and non-English words
+(`benzin full tank`, `minibus`), and those are exactly what a model reads without
+difficulty. Substring difficulty and semantic difficulty are not the same axis, and
+this set is the clearest demonstration of it so far.
+
+### What was measured, and what it says
+
+Lexical retrieval over the 53-row corpus, scored on the holdout: **100.0% macro
+recall and 100.0% accuracy, unchanged**. That is not "retrieval helped". It is the
+one thing this data can report, and it is worth having, because the free inspection
+run beforehand predicted it might go the other way:
+
+```
+python evals/score.py --set evals/holdout.csv --corpus evals/transactions.csv \
+    --retrieval lexical --show-examples
+```
+
+```
+heating  [housing]
+    0.188  headphones  -> shopping
+    0.105  parking fine  -> fees
+    0.105  dry cleaning  -> other
+corner shop  [groceries]
+    0.125  cofee  -> eating-out
+    0.115  shelter donation  -> gifts
+    0.111  t-shirt  -> shopping
+```
+
+**Trigram retrieval on this corpus is mostly noise.** Scores sit around 0.1, and
+the only genuine hit in ten rows is `minibus` -> `trolleybus`. The model was shown
+five confidently-labelled, mostly-irrelevant rows for nearly every transaction and
+got all ten right anyway. So the finding is about the **prompt** rather than about
+retrieval: the paragraph telling the model that the rows were chosen by similarity
+rather than relevance, that some may be irrelevant, and that being shown examples
+is never a reason to stop answering `unknown`, is doing its job. Without that
+paragraph this run is the obvious way to make a 100% into a 90%, and it was written
+before the run rather than after it.
+
+**No score floor was added in response to seeing those numbers**, and that is a
+decision rather than an oversight. Dropping neighbours below some similarity would
+plainly have tidied the output above. Choosing the threshold by looking at the eval
+set is exactly what `holdout.csv` exists to catch, and `retrieval.py` says so at
+the one place it would go. The single exception is `LexicalStore` discarding rows
+that score exactly zero, which is not a threshold: a trigram score of zero means
+the two descriptions share no three consecutive characters at all, so the row is
+not a weak match but not a match.
+
+### What was not measured, and why
+
+**The vector arm has not been run.** It is implemented, tested and switched on by
+one setting, and it needs a `VOYAGE_API_KEY` -- Anthropic has no embedding model
+and its own documentation points at Voyage AI. Provisioning that key is the
+owner's act, the way #76 was for the Anthropic one. The first 200 million tokens
+are free per account, so the arm costs nothing but the signing up.
+
+**`transactions.csv` was not re-scored with retrieval.** 53 rows is 53 calls,
+about USD 0.60, to move a number whose maximum possible movement is 1.1 points
+against a 3-point noise floor -- and the only corpus available to retrieve from
+would be the 10-row holdout. It is the reading to buy **after** #47, not before.
+
+### What this means for #66, said plainly
+
+The mechanism works, is inspectable and is off by default. What cannot be claimed
+is that it helps, and no configuration of the data this project currently holds
+could establish that it does. #66 says the honest outcome may be "it did not
+help"; the honest outcome here is one step short of that -- **"it did no harm, and
+nothing here can measure whether it helps"**.
+
+The blocker is not retrieval and never was. It is that **the eval set is
+saturated**: a predictor at 98.9% and 100% has nothing left to demonstrate on 63
+rows written in English by the same kind of system being scored. #47 -- real rows,
+in Russian and Romanian, which #62's CSV import exists to feed -- is the
+prerequisite for every future claim about the categorizer getting better, and it is
+now the single most valuable open item in the project. Section 6's warning that the
+English descriptions are "the single most likely way this baseline reads
+optimistic" has become the thing that stops work rather than a caveat on it.
+
+`baseline.json` is untouched. It records the rules on `transactions.csv`, CI
+asserts it on every pull request, and none of the above is a number a required
+check may depend on.

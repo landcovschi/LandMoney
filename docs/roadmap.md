@@ -920,7 +920,22 @@ the thing that produced the number can be shown.
       call and never a missing category -- and after the first failure it stops
       asking for thirty seconds, which took a stopped container from **1055 ms
       added to every save** down to 531 ms once and 0 ms after
-- [ ] pgvector: find similar past transactions
+- [x] pgvector: find similar past transactions -- #66, 2026-08-29, and the
+      result is that **the eval set ran out of room before retrieval did**. An
+      `ExampleStore` port with two implementations, the retrieved rows in the
+      user message (not the system prompt, or `cache.py` would replay an answer
+      computed from a corpus that has since changed), and one setting that turns
+      it off. `holdout.csv` was labelled to give a corpus and an eval that do not
+      overlap -- and the model scores **100.0% on it with no retrieval at all**,
+      against 98.9% on the 53-row set whose headroom was already +1.1 points
+      against a 3-point noise floor. Lexical retrieval holds 100.0%, which is the
+      only thing this data can say: the free `--show-examples` run beforehand
+      showed the neighbours were mostly noise (`heating` -> `headphones`), so
+      holding is a finding about the **prompt** -- the paragraph telling the model
+      the rows may be irrelevant, written before the run. The vector arm is
+      implemented and unrun, waiting on a `VOYAGE_API_KEY`. Section 8 of
+      `docs/evals.md` is the account, and its conclusion is that #47 is now the
+      single most valuable open item in the project
 - [x] Token and cost accounting per request -- #64, 2026-08-29. The Python
       adapter logs one `model_call` line per call carrying the outcome, the
       elapsed time, the input and output tokens off `message.usage`, and the

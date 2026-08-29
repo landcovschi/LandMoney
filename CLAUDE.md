@@ -2419,6 +2419,161 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   so a test that forgot to pass one fails to construct rather than quietly connecting
   to whatever is listening on 6379.
 
+- **Retrieval: the user's own confirmed labels as few-shot examples -- decided
+  2026-08-29** (#66). `src/categorizer/src/categorizer/embedding.py` turns a
+  description into a vector, `retrieval.py` holds the `ExampleStore` port and two
+  implementations, the retrieved rows go into the **user message**, and
+  `CATEGORIZER_RETRIEVAL=off|lexical|vector` is the one setting. 56 new Python
+  tests, none of which opens a socket. No new dependency.
+
+  **The headline is that the eval set ran out of room before retrieval did, and
+  it was arithmetic rather than a surprise.** #60 put the model at 98.9% macro
+  recall on the 53 rows -- one miss, an abstention -- so the entire headroom was
+  **+1.1 points against a 3-point noise floor**. Section 2 of `docs/evals.md` says
+  what that means and it was said before anything was built: this set can detect
+  retrieval *harming* the model and is structurally unable to detect it helping.
+  `holdout.csv` was labelled for #66 to get a corpus and an eval that do not
+  overlap, and it had **less** room: **the model scores 100.0% on it with no
+  retrieval at all**. Lexical retrieval holds 100.0%. Section 8 of
+  `docs/evals.md` is the account, and its conclusion is that **#47 is now the
+  single most valuable open item in the project** -- every future claim that this
+  categorizer got better needs rows that are not saturated.
+
+  **What the run actually measured is the prompt, not retrieval**, and it is the
+  half worth keeping. `--show-examples` is free and was run first: trigram
+  neighbours over this corpus are mostly noise -- `heating` retrieves
+  `headphones`, `corner shop` retrieves `cofee` and `t-shirt`, scores around 0.1,
+  and the only real hit in ten rows is `minibus` -> `trolleybus`. The model was
+  shown five confident, mostly irrelevant labelled rows for nearly every
+  transaction and got all ten right. The paragraph telling it the rows were chosen
+  by similarity rather than relevance, that some may be irrelevant, and that being
+  shown examples is never a reason to stop answering `unknown`, is what absorbed
+  that -- and it was written before the run rather than after it. Told nothing, a
+  model shown five confident-looking labelled rows reaches for the majority.
+
+  **No score floor was added after seeing those numbers**, and the restraint is
+  the decision. Dropping neighbours below a similarity would have tidied the
+  output visibly; choosing the threshold by looking at the eval set is exactly
+  what `holdout.csv` exists to catch, and `retrieval.py` says so at the one place
+  it would go. The single exception is `LexicalStore` discarding rows scoring
+  exactly zero, which is not a threshold: no shared trigram at all is not a weak
+  match, it is the absence of one, and cosine has no equivalent because it never
+  reaches zero between real strings.
+
+  **The examples go in the user message and not the system prompt, and that is the
+  load-bearing placement.** `cache.py` keys an answer on the model, the effort, the
+  prompt's fingerprint and the user message. Rows in the system prompt would not be
+  covered by that key, so the first lookup for a description would be replayed for
+  ever -- serving an answer computed from a corpus that has since gained the very
+  row that would have changed it. #65's second trap, one issue along, and the same
+  shape: an answer remembered under a label that does not describe what produced it.
+
+  **Two prompts, two fingerprints, switched on `bool(neighbours)`.** The examples
+  paragraph is appended only when there are examples, which keeps the no-examples
+  prompt byte-for-byte the one #60 measured -- `sha256:c8ad9d9fd16f` is unchanged
+  and pinned by a test -- so the "off" arm of #66's own comparison did not have to
+  be bought again at 53 API calls. The switch is the *presence of neighbours* and
+  not "a store is configured": a store that found nothing must produce the base
+  prompt, or the call is labelled with instructions about examples that are not
+  there, and an empty corpus would orphan every cache entry written since #65 for
+  no gain.
+
+  **Anthropic has no embedding model.** Its own documentation says so and points at
+  **Voyage AI**, so this is the first time the project depends on anything but
+  Anthropic for a model, and the second network call inside the eight seconds a
+  save has (#59). `voyage-4-lite`, 1024 dimensions, a 2-second timeout chosen
+  against the budget rather than the network. The first **200 million tokens are
+  free per account**, and at roughly five tokens a description that is forty
+  million transactions -- so the model choice is about latency and not money, and
+  256/512 Matryoshka truncations were deliberately not taken for a first
+  measurement, because a truncation is a second variable and a number that moved
+  for two reasons says nothing about either.
+
+  **The `voyageai` SDK lost, and it is the exact mirror of why the `anthropic` SDK
+  won in #59.** There the package bought retries, streaming, error typing and beta
+  headers for one dependency. None of that exists here -- one POST, a bearer token,
+  a flat JSON body. What it would have cost was measured with `uv pip compile`
+  rather than guessed: **51 packages**, among them `langchain-core`, `langsmith`,
+  `huggingface-hub`, `numpy`, `pillow` and `tokenizers`, and **three further HTTP
+  stacks** (`httpx` 0.28, `requests`, `aiohttp`) beside the `httpx2` #59
+  consolidated this service onto. So `pyproject.toml` is unchanged and the call
+  goes through the client already in the runtime tree. The day this wants
+  reranking, contextualised chunks or the multimodal models, the SDK is the right
+  answer and `embedding.py` is what to delete.
+
+  **`input_type` is the parameter that fails silently**, which is why it is a
+  `Literal` and not a string. Voyage prepends a different sentence for a query than
+  for a document, so identical text embeds differently on purpose; embed a corpus
+  as queries and retrieval still returns neighbours, ranked worse, with nothing
+  anywhere reporting it. Two call sites choose that word and one test looks at both.
+
+  **The response's order is not promised**, so `embed` sorts by the `index` field
+  each row carries -- the "key by id, never by position" rule the Batches API has,
+  arriving at a second endpoint. Read positionally, a batch pairs every vector with
+  the wrong description, and there is no exception and no log line: retrieval simply
+  starts returning unrelated rows.
+
+  **`LexicalStore` is the control and not a fallback.** #66 says out loud that
+  whether embeddings beat substring matching on two- and three-word merchant names
+  is a real question. A vector store scored against nothing cannot be shown to have
+  earned a vendor, a key and a second timeout, so trigram overlap -- padded the way
+  `pg_trgm` pads, needing no network -- is scored beside it, and it is free.
+
+  **Nothing in the retrieval path raises.** `neighbours_for` is the one door and
+  swallows everything into an empty list, which is the predictor #60 measured at
+  98.9%. Third time this project has made that promise, after #39's categorizer and
+  #65's Redis -- and per #64 it means the absence must be counted or nobody learns
+  about it, so `failed` and `empty` are different words in the log. Per #64's other
+  rule the line carries **no description**: the query is the user's own spending and
+  so is every neighbour.
+
+  **`CATEGORIZER_RETRIEVAL` refuses an unrecognised value** where the embedding
+  timeout and the example count fall back, and the asymmetry is #59's: `vectors` --
+  the plural, the typo somebody will actually make -- would serve no retrieval while
+  the deployment believed it had some, and the score would be recorded under the
+  wrong name.
+
+  **Three refusals in the scorer, each of which would otherwise print a number that
+  lies.** `--corpus` may not be `--set`, because every row would retrieve itself at
+  a similarity of exactly 1.0 carrying its own gold label and the run would score
+  near 100% measuring nothing -- #66's second trap, answered by a refusal rather
+  than by a sentence in a README. `--retrieval` with `--predictor rules` is refused,
+  because a substring scan reads nothing but the description so a corpus changes
+  nothing, and the run would be a with-retrieval measurement of a predictor with no
+  retrieval. And a corpus is loaded through the same `load` the eval set uses, so a
+  label outside the vocabulary is an error there too -- otherwise the model is shown
+  a twelfth category as a worked example by rows it was told to trust.
+
+  **`--show-examples` scores nothing and costs nothing**, which is what makes it get
+  used. #66 asks for the chosen examples to be inspectable because a retrieval step
+  nobody can look at is untestable; looking at it must not cost one API call per row.
+  It reads the store directly rather than reconstructing what the predictor did, and
+  prints each row's gold label beside its neighbours -- the fastest way to see the
+  failure that matters, five confident neighbours agreeing on the wrong category.
+
+  **What is deliberately not built, and the reason is this file's own rule.** There
+  is **no pgvector store and no `psycopg` dependency**, although the issue's title
+  names the extension. The measurement above says retrieval has no demonstrated
+  value on any data this project holds; the deployed categorizer runs `rules` (#61)
+  so nothing there would read it; and it cannot be exercised end to end without a
+  Voyage key. Building it now is infrastructure for a feature with no consumer and
+  no measured benefit, which is the netshift failure this file exists to prevent.
+  What that costs, said out loud: the `<=>` operator, the index and an owner-scoped
+  query are the skill #66 was partly for, and they are not gained yet. The
+  `ExampleStore` port is the seam they arrive through, and `VectorStore`'s docstring
+  names the row count at which an O(n) loop in Python stops being the right answer.
+
+  **Also not built: the live .NET path.** `CategorizeRequest` gains no owner field,
+  so nothing sends one -- and it must, before any store is queried in production, or
+  one account's descriptions land in another account's prompt. That is the shape of
+  the follow-up rather than a detail of it.
+
+  **The vector arm is implemented, tested and unrun.** It needs `VOYAGE_API_KEY`,
+  which is the owner's act the way #76 was for the Anthropic key, and the free tier
+  means it costs nothing but the signing up. `transactions.csv` was not re-scored
+  with retrieval either: 53 calls to move a number by at most 1.1 points is the
+  reading to buy **after** #47, not before.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as
