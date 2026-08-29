@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from 'react'
+import { useCategorySuggestion } from '../hooks/useCategorySuggestion'
 import { ApiError } from '../api/transactions'
 import type { FieldErrors, NewTransaction } from '../api/types'
 import { FieldMessages } from './FieldMessages'
+import { SourceTag } from './SourceTag'
 
 // The three codes the entity's own documentation names. A <select> rather than
 // a text input because the server validates the *shape* of a currency and not
@@ -66,6 +68,14 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
   const [amount, setAmount] = useState('')
   const [currency, setCurrency] = useState(CURRENCIES[0])
   const [description, setDescription] = useState('')
+
+  // #67. What the categorizer would say about what is being typed, asked once the
+  // typing stops. It is display only: nothing here is sent with the transaction and
+  // nothing waits for it, so a suggestion cannot delay or block a save. The row's
+  // category is decided on the server when the transaction is created, from the
+  // same three values -- see the endpoint for why it is asked twice rather than
+  // sent back from here.
+  const suggestion = useCategorySuggestion(description, amount, currency)
 
   const [submitting, setSubmitting] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
@@ -256,6 +266,54 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
             id="description-error"
             messages={fieldErrors.description}
           />
+
+          {/*
+            #67. The one visibly intelligent thing in this application, said out
+            loud before the transaction exists rather than after it is a row in a
+            table.
+
+            role="status" and not role="alert": it is announced politely, after
+            whatever is being typed, because it is not an error and interrupting
+            somebody mid-word to tell them about a guess is worse than saying
+            nothing. Deliberately not tied to the input with aria-describedby,
+            which would read it out again on every focus.
+
+            Nothing is rendered while a request is in flight, and nothing at all is
+            rendered when one fails -- the reasoning is on SuggestionState. The
+            previous suggestion stays visible while a newer one is on the way,
+            which is the one place this shows something a beat out of date: it is
+            about the description as it was 400 ms ago. Clearing it per keystroke
+            was the alternative and it flickers, and the answer that matters is the
+            server's at save time rather than this one.
+          */}
+          {suggestion.status !== 'none' && (
+            <p className="suggestion" role="status">
+              {suggestion.status === 'suggested' ? (
+                <>
+                  <span className="suggestion-label">Suggested</span>
+                  <span className="tag">{suggestion.category}</span>
+                  <SourceTag source={suggestion.source} />
+                </>
+              ) : (
+                <>
+                  {/*
+                    "No idea" is a normal answer -- the rules decline on roughly a
+                    third of the labelled set -- so it is shown rather than treated
+                    as nothing having happened. The badge names who declined, which
+                    is the difference between a baseline that does not know this
+                    shop and a model that does not.
+                  */}
+                  <span className="suggestion-label">No suggestion</span>
+                  <span className="tag tag-empty">Uncategorised</span>
+                  <SourceTag source={suggestion.source} />
+                </>
+              )}
+
+              <span className="suggestion-note">
+                A guess, applied when you save. You can change it in the list.
+              </span>
+            </p>
+          )}
         </div>
       </div>
 

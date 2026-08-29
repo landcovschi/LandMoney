@@ -154,6 +154,42 @@ header p {
   color: var(--danger);
 }
 
+/* --- the suggestion while typing (#67) ------------------------------------ */
+
+/* Under the description and inside its field, so it sits where the answer is
+   about rather than in a place of its own. A flex row for the same reason
+   .category is one: the label, the token and the badge are three things that
+   belong on one line and must wrap rather than push each other out at the
+   narrower widths. */
+.suggestion {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+}
+
+/* Quieter than the token beside it. The word "Suggested" is scaffolding for the
+   category, which is the thing worth reading -- and this is a guess about a
+   transaction that does not exist yet, so it must not shout as loudly as the
+   fields above it, which are what the person came here to fill in. */
+.suggestion-label {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Its own line, always: flex-basis 100% rather than a wrap that depends on how
+   long the category happens to be. The sentence is the same length every time and
+   the row above it is not, so letting it flow would make the form's height depend
+   on the word "subscriptions". */
+.suggestion-note {
+  flex-basis: 100%;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
 /* --- buttons -------------------------------------------------------------- */
 
 /* The bare element rather than a class, because this screen has exactly two

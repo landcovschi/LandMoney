@@ -1,6 +1,8 @@
 using LandMoney.Web.Auth;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
 namespace LandMoney.Web.Tests.Auth;
@@ -22,11 +24,13 @@ internal sealed class TestApp : WebApplicationFactory<Program>
 {
     private readonly string? _inviteCode;
     private readonly string _environment;
+    private readonly Action<IServiceCollection>? _services;
 
-    private TestApp(string? inviteCode, string environment)
+    private TestApp(string? inviteCode, string environment, Action<IServiceCollection>? services = null)
     {
         _inviteCode = inviteCode;
         _environment = environment;
+        _services = services;
     }
 
     /// <summary>Deployed and working: registration needs the code.</summary>
@@ -35,6 +39,16 @@ internal sealed class TestApp : WebApplicationFactory<Program>
 
     /// <summary>No code configured. Development opens registration; nothing else does.</summary>
     public static TestApp WithoutInviteCode(string environment) => new(null, environment);
+
+    /// <summary>The same application with something replaced. #67.</summary>
+    // The seam a test needs when the request has to be *answered* rather than
+    // refused: a stub for the categorizer, and a way past authorization that is not
+    // UserManager. It is a callback rather than anything named, so this file keeps
+    // knowing nothing about what any one test replaces -- and the replacing happens
+    // in ConfigureTestServices, which runs after the application has registered
+    // everything and is therefore the only place an override wins.
+    public static TestApp With(Action<IServiceCollection> services) =>
+        new("let-me-in-please", Environments.Production, services);
 
     /// <summary>A client that reports a redirect instead of following it.</summary>
     // AllowAutoRedirect defaults to true, and with it on "this answered 302" is not
@@ -71,5 +85,10 @@ internal sealed class TestApp : WebApplicationFactory<Program>
         builder.UseSetting("Categorizer:BaseUrl", string.Empty);
 
         builder.UseSetting(AuthenticationSetup.InviteCodeKey, _inviteCode ?? string.Empty);
+
+        if (_services is not null)
+        {
+            builder.ConfigureTestServices(_services);
+        }
     }
 }

@@ -1,5 +1,12 @@
 import { request } from './http'
-import type { CategoryUpdate, ImportResult, NewTransaction, Transaction } from './types'
+import type {
+  CategorySuggestion,
+  CategorySuggestionQuery,
+  CategoryUpdate,
+  ImportResult,
+  NewTransaction,
+  Transaction,
+} from './types'
 
 // ApiError is re-exported rather than moved out of sight: every component that
 // catches one imports it from here, and #52 moving the class to http.ts is not a
@@ -130,5 +137,55 @@ export function importTransactions(
     },
     signal,
     { timeoutMs: IMPORT_TIMEOUT_MS },
+  )
+}
+
+/** How long a suggestion may take before it stops being worth having. #67. */
+// Far below the ten seconds every other call gets, and for the opposite reason to
+// the import's two minutes. That constant is a backstop against a hang on a
+// request that must not be abandoned; this one is a deadline on an answer whose
+// whole value is that it arrives while the description is still on the screen. A
+// suggestion that lands after nine seconds is not a slow success, it is a wrong
+// answer about whatever is being typed by then -- #67 says so in as many words.
+//
+// Five seconds rather than something tighter because of what is on the other side:
+// the server gives the categorizer two seconds to connect and eight overall (#59),
+// and the model answers in about 2.1 s (#60). Tighter than that would abandon calls
+// that were about to succeed, and every abandoned one is still billed.
+//
+// What it costs, and it is a real cost rather than a rounding: the first request
+// after an idle spell pays a cold start -- 23.3 s for the app (#35), and the
+// categorizer scales to zero too (#61) -- so it will time out and the field will
+// show nothing. That is the right failure. The save that follows has its own,
+// longer budget, and this is a suggestion nobody asked for.
+const SUGGESTION_TIMEOUT_MS = 5_000
+
+/** What the categorizer says about a description, before anything is saved. #67. */
+// Writes nothing: this is the one call in this file with no consequence at all if
+// it fails, which is why every caller of it swallows the failure rather than
+// showing it. The abort signal is the point of the parameter -- three keystrokes
+// make three requests and the second can answer after the third, so the caller
+// aborts the superseded one and `request` turns that into a rejection it
+// recognises as its own.
+export function suggestCategory(
+  query: CategorySuggestionQuery,
+  signal?: AbortSignal,
+): Promise<CategorySuggestion> {
+  return request<CategorySuggestion>(
+    `${TRANSACTIONS_URL}/category-suggestion`,
+    {
+      method: 'POST',
+
+      // The same header the POST and the PATCH need, and for the same two
+      // reasons: minimal APIs bind a JSON body only when the request says it is
+      // sending one, and a content type no cross-site form can produce is one of
+      // the two CSRF locks AuthenticationSetup.cs records. It matters more here
+      // than elsewhere -- this endpoint writes nothing, so a request nobody
+      // noticed would leave no trace except a bill.
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(query),
+    },
+    signal,
+    { timeoutMs: SUGGESTION_TIMEOUT_MS },
   )
 }
