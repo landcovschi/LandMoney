@@ -1,11 +1,11 @@
 occurred_at,amount,currency,description,category
-2026-08-21,318.00,MDL,corner shop,
-2026-08-21,38.00,MDL,espresso,
-2026-08-22,12.00,MDL,minibus,
-2026-08-22,1150.00,MDL,heating,
-2026-08-23,42.00,EUR,domain for a year,
-2026-08-23,380.00,MDL,vitamins,
-2026-08-24,1650.00,MDL,backpack,
-2026-08-24,700.00,MDL,concert,
-2026-08-25,850.00,MDL,benzin full tank,
-2026-08-25,2000.00,MDL,wedding present,
+2026-08-21,318.00,MDL,corner shop,groceries
+2026-08-21,38.00,MDL,espresso,eating-out
+2026-08-22,12.00,MDL,minibus,transport
+2026-08-22,1150.00,MDL,heating,housing
+2026-08-23,42.00,EUR,domain for a year,subscriptions
+2026-08-23,380.00,MDL,vitamins,health
+2026-08-24,1650.00,MDL,backpack,shopping
+2026-08-24,700.00,MDL,concert,leisure
+2026-08-25,850.00,MDL,benzin full tank,transport
+2026-08-25,2000.00,MDL,wedding present,gifts
