@@ -21,6 +21,7 @@ is prompted -- what the labels *mean* is a property of the eval set, and what
 the model is *told* is a property of one predictor being scored against it.
 """
 
+import hashlib
 from typing import Final
 
 from categorizer.categories import CATEGORIES, NO_PREDICTION
@@ -109,6 +110,28 @@ are not the same kind of spending.
 
 This is one transaction with no conversation around it. Do not ask questions and \
 do not explain your reasoning."""
+
+# What this prompt is, in twelve hex characters. Two things read it, and it lives
+# here rather than in either of them because they must never disagree.
+#
+# `evals/score.py` prints it in the header above the score -- #60's half that is
+# not a percentage, since a score with no record of the prompt beside it is not
+# reproducible. And `cache.py` puts it in every key, which is #65's second trap:
+# without it, the first prompt edit would serve yesterday's answers for ever and
+# the eval run after that edit would measure a cache rather than a model.
+#
+# One string doing both is what makes those two facts one fact -- an edited prompt
+# both re-labels the score and invalidates every cached answer, in the same commit,
+# with nothing to remember.
+#
+# Twelve characters of a sha256, which is 48 bits: ample for telling two prompts
+# apart, and short enough to read out of a report header.
+#
+# What it deliberately does not cover: RESPONSE_SCHEMA. A vocabulary change moves
+# this digest anyway, because the category names appear verbatim in the block
+# above -- but a change to the schema's *shape* alone would not, and would need the
+# `v1` in `cache.py`'s key prefix.
+FINGERPRINT: Final[str] = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
 
 # The answer's shape, enforced by the API rather than by parsing prose.
 #

@@ -48,7 +48,6 @@ property that let #25 exist before any of that did.
 """
 
 import argparse
-import hashlib
 import logging
 import os
 import sys
@@ -631,7 +630,7 @@ class ModelCallFailed(logging.Handler):
 
 
 def build_predictor(
-    name: str, env: Mapping[str, str], total: int
+    name: str, env: Mapping[str, str], total: int, use_cache: bool = False
 ) -> tuple[Callable[[Row], str], str]:
     """The predictor and the label that says what it was, for the header.
 
@@ -659,8 +658,26 @@ def build_predictor(
     # was not asked to run, and CI runs the rules path on the runner's own python
     # precisely so that an accidental dependency in here is caught.
     from categorizer.anthropic_predictor import AnthropicPredictor
+    from categorizer.cache import REDIS_URL_ENV
     from categorizer.contracts import CategorizeRequest
-    from categorizer.prompt import SYSTEM_PROMPT
+    from categorizer.prompt import FINGERPRINT
+
+    # **The cache is off unless it is asked for, and that is #65's second trap
+    # aimed at the one place it bites hardest.** The service caches because the
+    # same coffee shop should not be billed twice; a scorer that did the same
+    # would report a number produced by calls that may have happened days ago,
+    # under a `.env` nobody remembers, and two identical runs would stop being
+    # evidence of anything -- the second one would be reading the first.
+    #
+    # Erased rather than not passed, because `from_env` reads the environment this
+    # process was started with, and the sanctioned way to run this against a real
+    # key is `set -a; . ./.env; set +a` (CLAUDE.md), which exports everything in the
+    # file -- including a Redis URL that is there for the service's benefit.
+    #
+    # `--cache` is still worth having: re-scoring after a change to the *scorer*
+    # costs nothing, and a 53-row run is 53 calls.
+    if not use_cache:
+        env = {**env, REDIS_URL_ENV: ""}
 
     predictor = AnthropicPredictor.from_env(env)
     done = 0
@@ -692,11 +709,15 @@ def build_predictor(
     # because an edited prompt changes this string, so a recorded number and a
     # later run visibly disagree about what was measured rather than silently
     # agreeing. The prompt itself is in git, one file, `prompt.py`.
-    fingerprint = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
+    #
+    # Computed in `prompt.py` since #65 rather than here, because `cache.py` needs
+    # the same value for its keys and two hashes of one file are two things that
+    # can disagree. The printed string is unchanged -- sha256:c8ad9d9fd16f is still
+    # sha256:c8ad9d9fd16f, which is how the move is known to have been a move.
     return (
         predict,
         f"{predictor.model}, effort={predictor.effort}, "
-        f"prompt.py sha256:{fingerprint}",
+        f"prompt.py sha256:{FINGERPRINT}, cache={'on' if use_cache else 'off'}",
     )
 
 
@@ -719,6 +740,12 @@ def main(argv: list[str] | None = None) -> int:
         choices=PREDICTORS,
         default=PREDICTORS[0],
         help="what answers the rows. 'model' costs one API call per row (default: rules)",
+    )
+    parser.add_argument(
+        "--cache",
+        action="store_true",
+        help="let the model path read and write the Redis cache (default: off, so "
+        "every row is a live call). Nothing on the rules path reads this",
     )
     parser.add_argument(
         "--confusion",
@@ -758,7 +785,9 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger("categorizer").addHandler(failures)
 
     try:
-        predictor, label = build_predictor(args.predictor, os.environ, len(rows))
+        predictor, label = build_predictor(
+            args.predictor, os.environ, len(rows), use_cache=args.cache
+        )
     except ImportError as error:
         print(
             f"--predictor {args.predictor} needs the categorizer's dependencies: {error}",

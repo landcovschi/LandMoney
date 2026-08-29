@@ -6,7 +6,7 @@
 #
 # **Two ways to bring this up, added in #39.**
 #
-#   docker compose up -d                  postgres + categorizer
+#   docker compose up -d                  postgres + categorizer + redis
 #   docker compose --profile full up -d   ... and the .NET app as well
 #
 # The default is the everyday loop: the two things the application talks to,
@@ -84,6 +84,23 @@ services:
       # today's published rate to copy in.
       CATEGORIZER_PRICE_INPUT_PER_MTOK: ${CATEGORIZER_PRICE_INPUT_PER_MTOK:-}
       CATEGORIZER_PRICE_OUTPUT_PER_MTOK: ${CATEGORIZER_PRICE_OUTPUT_PER_MTOK:-}
+
+      # #65, the answer cache. `redis` is the service below, resolved by the compose
+      # network's DNS -- the same word the app uses for `categorizer`, and for the
+      # same reason 127.0.0.1 would be wrong here.
+      #
+      # **Defaulted on although the everyday loop runs the rules**, and that is safe
+      # by construction rather than by care: only `AnthropicPredictor.from_env`
+      # builds a cache, and the rules branch of `build_predictor` never runs that
+      # line. So with CATEGORIZER_PREDICTOR=rules this value is read by nothing, no
+      # connection is opened, and #65's third acceptance test -- the rules path does
+      # not touch Redis at all -- holds without anybody having to unset anything.
+      # Switching one variable to `model` then gets the cache with no second edit.
+      CATEGORIZER_REDIS_URL: ${CATEGORIZER_REDIS_URL:-redis://redis:6379/0}
+
+      # Thirty days unless told otherwise -- see cache.py. Here so that a session
+      # experimenting with the prompt can shorten it without editing code.
+      CATEGORIZER_CACHE_TTL_SECONDS: ${CATEGORIZER_CACHE_TTL_SECONDS:-}
     ports:
       # Published so the host's `dotnet run` can reach it, and bound to
       # 127.0.0.1 for the same reason postgres is. The app *container* does not
@@ -99,6 +116,61 @@ services:
       timeout: 3s
       retries: 10
       start_period: 3s
+
+  # The answer cache -- #65. Slice 5's first line: identical input must not be
+  # billed twice. `CLAUDE.md` says a database gets added when it has a job, and this
+  # is the day it has one -- there was nothing to cache while the answer came from
+  # 109 substrings in memory, and there still is not: only the model path reads it.
+  redis:
+    image: redis:8-alpine
+    container_name: landmoney-redis
+    restart: unless-stopped
+    # Everything here says "this is a cache and nothing else", and each argument is
+    # a decision rather than tuning:
+    #
+    #   --save "" --appendonly no   no persistence at all. The default image
+    #                               snapshots to a container path, which for a cache
+    #                               is disk written for data whose loss costs one
+    #                               model call. There is no volume below for the
+    #                               same reason -- `docker compose down` throwing
+    #                               this away is correct.
+    #   --maxmemory 64mb            a ceiling, so a runaway cannot take the machine.
+    #                               An entry is about 120 bytes, so this is hundreds
+    #                               of thousands of them.
+    #   --maxmemory-policy allkeys-lru
+    #                               evict rather than refuse writes. The default is
+    #                               `noeviction`, which answers a full cache with an
+    #                               error on every SET -- which this service would
+    #                               swallow and log for ever while never caching
+    #                               anything again. That is exactly the silent
+    #                               failure #65 exists to end.
+    command:
+      - "redis-server"
+      - "--save"
+      - ""
+      - "--appendonly"
+      - "no"
+      - "--maxmemory"
+      - "64mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    ports:
+      # Published on localhost for `redis-cli` and for the `dotnet run` loop, bound
+      # to 127.0.0.1 for the reason postgres is: without the prefix Docker publishes
+      # on every interface and straight through the Windows firewall. Redis has no
+      # password here and that is only tolerable because of this line.
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      # Unlike postgres and the categorizer, **nothing waits on this one**: there is
+      # no `depends_on` pointing here, because a Redis that is not up yet is a cache
+      # miss and a cache miss is a model call. Making the categorizer wait for it
+      # would turn an optimisation into a start-up dependency, which is the
+      # inversion #65's third trap warns about.
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 2s
 
   # The .NET application, behind the `full` profile -- see the header.
   app:

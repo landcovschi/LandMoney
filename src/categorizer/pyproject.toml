@@ -37,6 +37,21 @@ dependencies = [
     # compatible, the lock says what was resolved. Same split as a PackageReference
     # version against packages.lock.json.
     "fastapi>=0.115",
+    # #65, the answer cache. redis-py, the official client, and the major is
+    # load-bearing for the fifth time after #22, #24, #39 and #59: from memory this
+    # is 5.x, and 8.1.0 is what PyPI answered on 2026-08-29 -- three majors of
+    # guessing avoided by one query.
+    #
+    # What lost. `redis[hiredis]` swaps the pure-python protocol parser for a C
+    # extension, which is a native build in an image that has none for a service
+    # whose whole point is *not* making a call; the parsing here is one short JSON
+    # string. Writing the RESP protocol by hand loses for the reason the anthropic
+    # SDK won #59: connection pooling, timeouts and reconnection are not what this
+    # issue is about. A dict in memory loses to the issue itself -- this container
+    # scales to zero (#61), so a process-local cache is empty again about fourteen
+    # minutes after anybody stops using it, which is exactly the fortnightly
+    # spending session this is supposed to make cheap.
+    "redis>=8.1",
     "uvicorn>=0.34",
 ]
 
