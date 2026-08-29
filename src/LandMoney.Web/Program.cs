@@ -1,9 +1,11 @@
 ﻿using LandMoney.Web.Api;            // MapTransactionEndpoints, MapCategoryEndpoints
 using LandMoney.Web.Auth;          // AddLandMoneyAuthentication, MapAuthEndpoints
-using LandMoney.Web.Categorizing;  // CategorizerClient
+using LandMoney.Web.Categorizing;  // CategorizerClient, CategorizerMetrics, CategorizerSummary
 using LandMoney.Web.Data;          // AppDbContext
+using System.Text.Json;            // JsonWriterOptions, for the JSON console formatter
 using Microsoft.AspNetCore.HttpOverrides; // ForwardedHeaders
 using Microsoft.EntityFrameworkCore; // UseNpgsql
+using Microsoft.Extensions.Logging.Console; // JsonConsoleFormatterOptions
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -263,6 +265,77 @@ builder.Services
             builder.Configuration.GetValue("Categorizer:ConnectTimeoutSeconds", 2d)),
     });
 
+// --- What the categorizer is actually doing -- #64 ---------------------------
+//
+// AddMetrics is what registers IMeterFactory, and it is written out although the
+// web host already calls it: this file is also run by efbundle and by anything
+// else that builds the host, and a singleton whose dependency is registered by
+// somebody else's default is a startup failure waiting for a framework change.
+// The call is TryAdd underneath, so saying it twice costs nothing.
+builder.Services.AddMetrics();
+
+// A singleton, because a counter that resets per request counts nothing. It is
+// resolved by CategorizerClient, which is registered as a transient typed client
+// above -- the usual captive-dependency rule runs the other way and is satisfied:
+// a shorter-lived object may hold a longer-lived one.
+builder.Services.AddSingleton<CategorizerMetrics>();
+
+// The thing that makes the counts readable without a metrics endpoint, which #64
+// defers to its own issue. It writes one line per window in which anything
+// happened, and nothing at all otherwise.
+builder.Services.AddHostedService<CategorizerSummary>();
+
+// **JSON on the console outside Development, and this is the half of #64 that is
+// not about the categorizer at all.** The default console formatter writes two
+// lines per entry -- a header, then the rendered sentence, indented -- and throws
+// the structured fields away in the rendering. Container Apps forwards stdout to
+// Log Analytics a line at a time, so today one log entry arrives as two rows,
+// neither of which carries `Outcome` as anything a query could group by. Naming
+// the outcomes consistently would then buy nothing: the names would be inside
+// prose.
+//
+// With the JSON formatter each entry is one line, and every placeholder in a
+// message template is a field beside the message. "How often was it unreachable
+// last week" becomes a query over `Outcome` rather than a substring search over a
+// sentence somebody may reword -- which is what #64 means by readable without
+// grepping, and it is the property that survives the process dying every quarter
+// of an hour with its counters inside it.
+//
+// Indented = false is not cosmetic: multi-line JSON would be several rows again,
+// which is the exact failure being fixed.
+//
+// Development keeps the human formatter. There the reader is a person watching a
+// terminal, the log is not being queried, and JSON one line at a time is worse to
+// read than the sentence it replaces.
+//
+// What this does not do, deliberately: add a logging package. AddJsonConsole is
+// in the framework, it configures the console provider that is already there
+// rather than adding a second one, and nothing here depends on Serilog or on an
+// OpenTelemetry exporter. Those become worth discussing when there is somewhere
+// to export to.
+//
+// One function rather than two copies, because there are two places here that
+// configure a console -- this one and the startup factory further down -- and a
+// timestamp format written twice is a format that ends up written two ways.
+static void AsJson(JsonConsoleFormatterOptions options)
+{
+    // Indented = false is not cosmetic: multi-line JSON is several rows again,
+    // which is the exact failure being fixed.
+    options.JsonWriterOptions = new JsonWriterOptions { Indented = false };
+
+    // Container Apps stamps its own timestamp on each row, so this is a duplicate
+    // -- and it is the only one of the two that says which clock it came from, and
+    // it stays unambiguous when a line is copied out of a query into an issue. UTC,
+    // per CLAUDE.md; ISO 8601, so it sorts as text.
+    options.TimestampFormat = "yyyy-MM-dd'T'HH:mm:ss.fff'Z'";
+    options.UseUtcTimestamp = true;
+}
+
+if (!builder.Environment.IsDevelopment())
+{
+    builder.Logging.AddJsonConsole(AsJson);
+}
+
 // #52. Everything about which provider, and what happens when there is none, is
 // in AuthenticationSetup -- including the reason this cannot be a `?? throw` for
 // a missing Authority the way the connection string above is. The short version:
@@ -273,8 +346,30 @@ builder.Services
 // ILogger<T> to resolve yet. CreateBootstrapLogger-style plumbing would be the
 // tidy answer and is a dependency; a factory built here, used once and disposed
 // is four lines.
+// The formatter has to be chosen here as well, and finding that out took reading
+// the Production log rather than the code: this factory is built by hand, so it
+// knows nothing about the AddJsonConsole above, which configures the *host's*
+// logging. Without this line the two startup lines from AuthenticationSetup --
+// including the error saying registration is closed, which is exactly the kind of
+// line a query wants -- arrive in the deployed log as the two-line human format
+// while everything after them is JSON.
+//
+// One line above this is still neither: the `Console.WriteLine` for a missing
+// Categorizer:BaseUrl. It is deliberate and it stays -- it exists for efbundle,
+// which runs this file with no logging pipeline configured at all.
 using (var startupLoggerFactory = LoggerFactory.Create(logging =>
-    logging.AddConfiguration(builder.Configuration.GetSection("Logging")).AddConsole()))
+{
+    logging.AddConfiguration(builder.Configuration.GetSection("Logging"));
+
+    if (builder.Environment.IsDevelopment())
+    {
+        logging.AddConsole();
+    }
+    else
+    {
+        logging.AddJsonConsole(AsJson);
+    }
+}))
 {
     builder.Services.AddLandMoneyAuthentication(
         builder.Configuration,

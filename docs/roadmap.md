@@ -911,7 +911,21 @@ the thing that produced the number can be shown.
 
 - [ ] Redis: identical input must not be billed twice
 - [ ] pgvector: find similar past transactions
-- [ ] Token and cost accounting per request
+- [x] Token and cost accounting per request -- #64, 2026-08-29. The Python
+      adapter logs one `model_call` line per call carrying the outcome, the
+      elapsed time, the input and output tokens off `message.usage`, and the
+      cost when a price is configured. **No price is written into the code**:
+      a rate changes without this repository noticing, and a stale figure in a
+      log is worse than an absent one because it is believed. Tokens are the
+      fact and the money is the multiplication
+- [x] What the categorizer is actually doing, in production -- #64,
+      2026-08-29. Nine named outcomes recorded on every exit of
+      `CategorizerClient`, a `Meter` nothing reads yet, and one summary line
+      per window in which anything happened. Measured against the running
+      stack: a stopped categorizer and three saves reads as **3 timed out, 0
+      unreachable**, p95 2051ms -- which is the number that could not be
+      stated at all the day before. A metrics endpoint is deliberately still
+      open
 - [ ] Graceful degradation: the AI service is down, the app still works
 - [x] Evals run in CI on every PR -- #58, 2026-08-28. `python evals/score.py
       --check` compares the run against `evals/baseline.json` and exits 2 when

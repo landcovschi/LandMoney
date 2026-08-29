@@ -2090,6 +2090,157 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   the client converts it to null before sending, and the server refusing it is
   what says so if that ever stops.
 
+- **Observability for the categorizer: nine named outcomes, a `Meter` nothing
+  reads yet, and one summary line per window -- decided 2026-08-29** (#64).
+  `src/LandMoney.Web/Categorizing/` gained `CategorizerOutcome.cs`,
+  `CategorizerMetrics.cs` and `CategorizerSummary.cs`; the Python adapter gained a
+  `model_call` line per call. 42 new tests, and they still need no Postgres, no
+  Docker and no network.
+
+  **What it fixes is an absence, and it is the third time this project has met the
+  same shape.** #39 chose "a failed categorizer is a null category and never a
+  failed save", #61 found that the deployed application had therefore stored
+  *every* transaction with no category for weeks with nothing red anywhere, and
+  #62 wrote the sentence down again for the import path. The fallback is right and
+  it is exactly what hides its own failure. The general form, now recorded for the
+  third time: **a dependency the application is designed to run without is a
+  dependency whose absence nothing reports** -- unless something counts.
+
+  **`not-configured` is a counted outcome for that reason.** It is what the
+  deployed app did on every save between #39 and #61, and a number on that line is
+  the difference between "the categorizer answers nothing" and "there is no
+  categorizer". The two are one `null` in the database.
+
+  **Nine outcomes, not four, and this is the half of #64 easiest to skip.** The
+  issue says the four `catch` branches "already separate exactly these cases", and
+  they do not: an abstention, a refused status and an answer that breaks the
+  contract are ordinary returns and nothing is thrown. Counting only exceptions
+  would have left the normal case invisible and the abstention indistinguishable
+  from a failure -- the exact thing the issue's third acceptance test forbids. The
+  three that are not exceptions are `abstained`, `refused`, `unusable`; the ninth
+  is `abandoned`, the caller's own cancellation, which is rethrown and counted on
+  the way past because it is a fact about the browser's ten-second budget rather
+  than about the categorizer.
+
+  **Two consumers, one recording path.** Every exit calls
+  `CategorizerMetrics.Record`, which writes to a `System.Diagnostics.Metrics`
+  Meter *and* to an in-process tally. Nothing reads the Meter today; a metrics
+  endpoint -- the second step #64 explicitly defers -- becomes an OpenTelemetry
+  package and a line in `Program.cs`, attaching a second listener to the same
+  instruments with no call site touched. What lost: hand-rolled counters only
+  (cheaper, and makes that later step a rewrite of nine call sites), and the Meter
+  only (standard, and answers nothing today on a machine with no Prometheus and in
+  a container app with no scrape).
+
+  **The log is the durable record and the counters are a convenience**, which
+  falls out of `--min-replicas 0` rather than from taste: this process dies after
+  about fourteen idle minutes (#35), so anything in memory describes at most one
+  replica's afternoon. Hence windows rather than running totals -- deltas still add
+  up across replicas, where "since start" names a moment nothing records -- and
+  hence the summary being silent when nothing happened, on a service one person
+  uses weekly.
+
+  **`AddJsonConsole` outside Development, and it is not about the categorizer at
+  all.** The default console formatter writes *two* lines per entry and renders the
+  structured fields into prose; Container Apps forwards stdout a line at a time, so
+  one entry arrives in Log Analytics as two rows, neither carrying `Outcome` as
+  anything a query can group by. Naming the outcomes consistently would then have
+  bought nothing -- the names would be inside sentences. `Indented = false` is
+  required for the same reason and not for tidiness. Development keeps the human
+  formatter, because there the reader is a person watching a terminal.
+
+  **What the formatter change made visible, and was deliberately not fixed in the
+  same pass:** `AuthenticationSetup`'s "no invite code is configured" error uses
+  `{Key}` twice in one template, so its JSON row carries the key `Key` twice. A
+  parser keeps one of them and nothing breaks, and it is one line in a file this
+  change has no other business in -- mentioned rather than fixed, per this file's
+  own rule about adjacent problems.
+
+  **The p95 is over every call including the ones that failed**, which is #64's
+  second trap answered rather than met: a latency figure covering only the
+  successes is precisely the one that hides a two-second connect timeout. Measured
+  in a unit test as arithmetic -- ten calls at 10ms and one at 2000ms give a p50 of
+  10 and a p95 of 2000, against a mean of 191 that describes no call that happened.
+  Nearest-rank, so every number printed is a duration that occurred.
+
+  **The `source` tag is bounded and the log line is not.** A source is a string
+  another process chooses, so tagging it verbatim would let a misbehaving service
+  mint one time series per request; anything outside `rules`/`model`/`human`
+  becomes `other` in the dimension and stays verbatim in the log. That is #64's
+  cardinality trap one field along from the description it is written about -- and
+  the description never appears in either, on both sides of the wire.
+
+  **Which side is authoritative, since #64 asks for it to be decided rather than
+  discovered: the Python service is authoritative for what the model did, the .NET
+  client for what the user got.** It follows from what each can observe. A call
+  that answers at seven seconds is billed, and is a `failed`/`answered` line in the
+  service and a `timeout` in the client -- both correct. A request that never
+  arrives is a `timeout` in the client and nothing at all in the service. So "how
+  often does the model answer" is `anthropic_predictor.py`'s number and "how often
+  did a save get a category" is `CategorizerClient`'s, and neither is a correction
+  of the other.
+
+  **Tokens and cost, and no price in the code.** The adapter logs
+  `outcome=... model=... elapsed_ms=... input_tokens=... output_tokens=...
+  cost_usd=...`, with the cost computed only when
+  `CATEGORIZER_PRICE_INPUT_PER_MTOK` and `CATEGORIZER_PRICE_OUTPUT_PER_MTOK` are
+  both set. The published rate for `claude-opus-5` on 2026-08-29 is 5.00 and 25.00
+  USD per million; writing those two numbers into the file would produce a figure
+  that stays confident and becomes wrong, because a price changes without this
+  repository noticing and a stale number in a log is worse than an absent one --
+  it is believed. Tokens are the fact, the money is the multiplication. A missing
+  usage field reads as `unknown` rather than `0`, for the same reason.
+
+  **An unparseable price does not stop the service**, which is deliberately the
+  opposite of `main.py`'s unrecognised `CATEGORIZER_PREDICTOR`, and the difference
+  is what each mistake costs. There, the wrong value serves the rules while the
+  deployment believes a model is running. Here the worst case is one field missing
+  from a diagnostic, and taking a categorizer off the air over that would be
+  protecting an arithmetic convenience with an outage. Half a price -- one of the
+  two set -- is an error line, because silence there looks identical to never
+  having tried.
+
+  **The Python half is `key=value` and not JSON**, unlike the .NET half, and the
+  asymmetry is on purpose: uvicorn owns the logging configuration in that process,
+  so a JSON formatter means a `dictConfig` reformatting every line the server
+  writes too. The .NET side took the formatter because its fields become rows in
+  Log Analytics; this side has no such consumer today.
+
+  **A `BackgroundService` does not run `ExecuteAsync` inline, and finding that out
+  cost four red tests.** `StartAsync` queues it to the thread pool, so a test that
+  starts the service and immediately stops it cancels the body before it has
+  executed one statement -- and the failure reads as "it logged nothing", which
+  sends the reader to the rendering code. The service now writes one line naming
+  the interval when it starts, which is both the only place the interval in force
+  is recorded and the signal a test waits for. `StopAsync` also does not observe
+  ExecuteAsync's exception -- it uses `Task.WhenAny` -- so a summary that threw
+  would fail as an empty log; the test helper awaits `ExecuteTask` afterwards to
+  surface the real error.
+
+  **Verified against the running stack, which is where the interesting half is.**
+  Categorizer stopped, three saves: each 201 in about 2.0 s, and the line reads
+  *3 recorded -- 0 suggested, 0 abstained, 3 timed out, **0 unreachable**, p50
+  2009ms, p95 2051ms*. That is #64's first acceptance test and the one it says is easy to
+  get wrong, since a stopped container leaves the SYN unanswered rather than
+  refusing it (#39). Categorizer restarted, two saves the rules decline: *2 recorded
+  -- 2 abstained, 0 timed out, p95 18ms*, which is the third acceptance test -- the
+  same `null` on the wire, two different numbers here. Then a description the rules
+  match: `Categorizer suggested: groceries by rules in 4ms`.
+
+  **What is not automated, said plainly.** That the timer fires on its configured
+  interval: driving a `PeriodicTimer` needs a clock whose `CreateTimer` is fake,
+  which is `Microsoft.Extensions.TimeProvider.Testing` -- the package CLAUDE.md
+  keeps out because a frozen clock is six lines. The shutdown report reaches the
+  same rendering deterministically, so what the interval alone can break is a
+  summary that never arrives, which looks exactly like an application nobody used.
+  It was watched by hand for three windows instead.
+
+  **Still open, deliberately: a metrics endpoint**, which #64 names as its own
+  step. The instruments exist and nothing scrapes them; the counters die with the
+  replica. Also open: nothing counts on the *server* side of the .NET application
+  -- there is no `/health` or `/metrics` reporting on dependencies, so the only
+  way to ask this application what the categorizer is doing is to read its log.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as

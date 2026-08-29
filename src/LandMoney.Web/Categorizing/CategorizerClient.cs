@@ -29,7 +29,16 @@ public sealed record CategorySuggestion(string Category, string Source);
 // about it. Every failure below is caught, logged and turned into null, which is
 // why Category has been nullable since #1. The only exception it lets past is the
 // caller's own cancellation -- see the `when` clause.
-public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient> logger)
+//
+// **Every exit below records an outcome -- #64.** There are nine of them and only
+// four are exceptions, which is the half of that issue easiest to miss: an
+// abstention, a refused status and an answer that breaks the contract are all
+// ordinary returns, and counting only the `catch` blocks would leave the normal
+// case invisible and the abstention indistinguishable from a failure. The words
+// are `CategorizerOutcome`'s and never free text, so the same event is called the
+// same thing in the log line, in the metric tag and in the summary.
+public sealed class CategorizerClient(
+    HttpClient http, CategorizerMetrics metrics, ILogger<CategorizerClient> logger)
 {
     // The path is absolute on purpose. HttpClient resolves a relative path
     // against BaseAddress with URI rules rather than string concatenation: with a
@@ -69,11 +78,24 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
         // instead of through the network.
         if (http.BaseAddress is null)
         {
+            // No duration, because nothing was timed: this is the one outcome
+            // where no call was made. Recording a zero instead would fill the
+            // histogram with instant successes and pull every percentile down,
+            // which is the shape of lie #64's second trap is about.
+            //
+            // It is counted rather than passed over in silence, and this is the
+            // number most worth having: it is what the deployed application did on
+            // every single save between #39 and #61, and nothing anywhere reported
+            // it. A figure on this line separates "the categorizer answers nothing"
+            // from "there is no categorizer".
+            metrics.Record(CategorizerOutcome.NotConfigured, source: null, elapsed: null);
             return null;
         }
 
-        // Only read on the timeout path below, and it is there because #59 gave this
-        // client two clocks. Without it the log names `http.Timeout` and is wrong
+        // Read on every path since #64 -- a latency figure that covered only the
+        // calls that succeeded would hide the two-second connect timeout, which is
+        // the one the p95 exists to show. It arrived for the timeout path, because
+        // #59 gave this client two clocks. Without it the log names `http.Timeout` and is wrong
         // whenever the *connect* budget was the one that fired -- measured: a save
         // against an unreachable categorizer gave up after 2.15 s and reported
         // "did not answer within 00:00:08". A log line that misnames which limit
@@ -92,8 +114,9 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
                 // on this side rather than anything to show a user -- the status
                 // is what a log needs in order to find it.
                 logger.LogWarning(
-                    "Categorizer answered {StatusCode}; storing the transaction with no category.",
-                    (int)response.StatusCode);
+                    "Categorizer {Outcome}: answered {StatusCode}; storing the transaction with no category.",
+                    CategorizerOutcome.Refused, (int)response.StatusCode);
+                metrics.Record(CategorizerOutcome.Refused, source: null, Stopwatch.GetElapsedTime(started));
                 return null;
             }
 
@@ -104,6 +127,18 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
             // it is not a warning and not an error.
             if (body?.Category is not { Length: > 0 } category)
             {
+                // Counted, and counted under its own name. On the wire this is the
+                // same `null` a dead service produces, and #64's third acceptance
+                // test is that the two numbers must never be one number: a
+                // categorizer that declines everything and a categorizer that is
+                // not answering look identical from the database and are entirely
+                // different problems.
+                //
+                // Still no log line. An abstention is the baseline working as
+                // designed on roughly a third of the labelled set, and a warning
+                // per save would be noise that trains a reader to skip the ones
+                // that matter. The count is the record.
+                metrics.Record(CategorizerOutcome.Abstained, source: null, Stopwatch.GetElapsedTime(started));
                 return null;
             }
 
@@ -117,9 +152,10 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
             if (category.Length > Transaction.CategoryMaxLength)
             {
                 logger.LogWarning(
-                    "Categorizer answered a category of {Length} characters, over the {Max} the column holds; "
-                    + "storing the transaction with no category.",
-                    category.Length, Transaction.CategoryMaxLength);
+                    "Categorizer {Outcome}: answered a category of {Length} characters, over the {Max} "
+                    + "the column holds; storing the transaction with no category.",
+                    CategorizerOutcome.Unusable, category.Length, Transaction.CategoryMaxLength);
+                metrics.Record(CategorizerOutcome.Unusable, source: null, Stopwatch.GetElapsedTime(started));
                 return null;
             }
 
@@ -137,9 +173,10 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
             if (body.Source is not { Length: > 0 } source)
             {
                 logger.LogWarning(
-                    "Categorizer answered the category {Category} without naming a source; "
+                    "Categorizer {Outcome}: answered the category {Category} without naming a source; "
                     + "storing the transaction with no category.",
-                    category);
+                    CategorizerOutcome.Unusable, category);
+                metrics.Record(CategorizerOutcome.Unusable, source: null, Stopwatch.GetElapsedTime(started));
                 return null;
             }
 
@@ -149,9 +186,15 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
             if (source.Length > Transaction.CategorySourceMaxLength)
             {
                 logger.LogWarning(
-                    "Categorizer named a source of {Length} characters, over the {Max} the column holds; "
-                    + "storing the transaction with no category.",
-                    source.Length, Transaction.CategorySourceMaxLength);
+                    "Categorizer {Outcome}: named a source of {Length} characters, over the {Max} "
+                    + "the column holds; storing the transaction with no category.",
+                    CategorizerOutcome.Unusable, source.Length, Transaction.CategorySourceMaxLength);
+                // Deliberately not tagged with the source it sent. It is over a
+                // hundred characters of something this application does not
+                // recognise, and a metric dimension is the last place to put a
+                // string another process chose -- #64's first trap, which is about
+                // the description and is the same trap here.
+                metrics.Record(CategorizerOutcome.Unusable, source: null, Stopwatch.GetElapsedTime(started));
                 return null;
             }
 
@@ -160,7 +203,16 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
             // application the author of a value another process chose, and the
             // vocabulary is already closed at the end that owns it -- `Source` is a
             // StrEnum in contracts.py, so `Model` cannot leave that service.
-            logger.LogInformation("Categorizer suggested {Category} by {Source}.", category, source);
+            // {Source} verbatim here and bounded in the metric, which is the split
+            // #64's cardinality trap forces: a value another process chose may be
+            // read in a log line, where one more distinct string costs one more
+            // line, and may not become a dimension, where it costs one more series
+            // for ever. CategorizerMetrics.Label is where the bounding happens.
+            var elapsed = Stopwatch.GetElapsedTime(started);
+            logger.LogInformation(
+                "Categorizer {Outcome}: {Category} by {Source} in {ElapsedMs:F0}ms.",
+                CategorizerOutcome.Suggested, category, source, elapsed.TotalMilliseconds);
+            metrics.Record(CategorizerOutcome.Suggested, source, elapsed);
             return new CategorySuggestion(category, source);
         }
         // The timeout, and recognising it takes the `when` clause. HttpClient
@@ -184,11 +236,32 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
         // Categorizer:TimeoutSeconds to go and look at.
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
+            var elapsed = Stopwatch.GetElapsedTime(started);
             logger.LogWarning(
-                "Categorizer did not answer; gave up after {Elapsed} (overall timeout {Timeout}, "
+                "Categorizer {Outcome}: no answer, gave up after {ElapsedMs:F0}ms (overall timeout {Timeout}, "
                 + "so a shorter connect timeout fired if that is less). Storing the transaction with no category.",
-                Stopwatch.GetElapsedTime(started), http.Timeout);
+                CategorizerOutcome.Timeout, elapsed.TotalMilliseconds, http.Timeout);
+            // #64 names this as the outcome easiest to label wrongly, and the
+            // labelling is done by the `when` clause above rather than here. A
+            // stopped container leaves the SYN unanswered instead of refusing it
+            // (#39, measured), so it expires a clock and arrives on this branch --
+            // "the categorizer is stopped" counts as three timeouts, not as three
+            // unreachables, and that is the correct answer rather than a rounding
+            // of one.
+            metrics.Record(CategorizerOutcome.Timeout, source: null, elapsed);
             return null;
+        }
+        // The caller went away. The exception is rethrown -- saving a transaction
+        // for a request that no longer exists is what the clause above exists to
+        // prevent -- and counted on the way past, because the call was made and
+        // paid for. A number that rises here is a fact about the browser client's
+        // ten-second budget or about somebody closing a tab, and not about the
+        // categorizer; separating it from a timeout is what stops it being read as
+        // one.
+        catch (OperationCanceledException)
+        {
+            metrics.Record(CategorizerOutcome.Abandoned, source: null, Stopwatch.GetElapsedTime(started));
+            throw;
         }
         // Unreachable, refused, DNS failure, connection reset. The expected one
         // under compose is the service being stopped, which is the acceptance test
@@ -196,7 +269,10 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
         catch (HttpRequestException exception)
         {
             logger.LogWarning(
-                exception, "Categorizer is unreachable; storing the transaction with no category.");
+                exception,
+                "Categorizer {Outcome}: storing the transaction with no category.",
+                CategorizerOutcome.Unreachable);
+            metrics.Record(CategorizerOutcome.Unreachable, source: null, Stopwatch.GetElapsedTime(started));
             return null;
         }
         // A 200 whose body is not the contract: malformed JSON (JsonException), or
@@ -206,7 +282,10 @@ public sealed class CategorizerClient(HttpClient http, ILogger<CategorizerClient
         catch (Exception exception) when (exception is JsonException or NotSupportedException)
         {
             logger.LogWarning(
-                exception, "Categorizer answered something unreadable; storing the transaction with no category.");
+                exception,
+                "Categorizer {Outcome}: the body was not the contract; storing the transaction with no category.",
+                CategorizerOutcome.Unreadable);
+            metrics.Record(CategorizerOutcome.Unreadable, source: null, Stopwatch.GetElapsedTime(started));
             return null;
         }
     }

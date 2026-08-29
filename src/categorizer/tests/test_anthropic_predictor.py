@@ -17,12 +17,20 @@ empty answer, a very long answer, and an exception from the client.
 """
 
 import json
+import logging
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
-from categorizer.anthropic_predictor import AnthropicPredictor
+from categorizer.anthropic_predictor import (
+    PRICE_INPUT_ENV,
+    PRICE_OUTPUT_ENV,
+    AnthropicPredictor,
+    Prices,
+    Usage,
+    _prices_from,
+)
 from categorizer.categories import CATEGORIES, NO_PREDICTION
 from categorizer.contracts import CategorizeRequest, Category, Source
 
@@ -63,14 +71,31 @@ def thinking_block() -> SimpleNamespace:
     return SimpleNamespace(type="thinking", thinking="")
 
 
-def answering(category: str, *, with_thinking: bool = True) -> SimpleNamespace:
+def answering(
+    category: str, *, with_thinking: bool = True, usage: object | None = None
+) -> SimpleNamespace:
     blocks = [thinking_block()] if with_thinking else []
-    return SimpleNamespace(content=[*blocks, text_block(json.dumps({"category": category}))])
+    message = SimpleNamespace(content=[*blocks, text_block(json.dumps({"category": category}))])
+
+    # Absent unless a test asks for it, which is deliberate: every fixture here
+    # predates #64, and a response carrying no usage at all is the case the reader
+    # has to survive. `_usage_from` is written for exactly that.
+    if usage is not None:
+        message.usage = usage
+
+    return message
 
 
-def predictor_for(*answers: object) -> tuple[AnthropicPredictor, StubClient]:
+def usage_of(input_tokens: int, output_tokens: int) -> SimpleNamespace:
+    """The two fields this adapter reads off `message.usage`."""
+    return SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def predictor_for(
+    *answers: object, prices: Prices | None = None
+) -> tuple[AnthropicPredictor, StubClient]:
     client = StubClient(*answers)
-    return AnthropicPredictor(client, model="claude-opus-5"), client
+    return AnthropicPredictor(client, model="claude-opus-5", prices=prices), client
 
 
 def a_transaction(description: str = "linella chisinau", amount: str = "312.40") -> CategorizeRequest:
@@ -340,3 +365,142 @@ def test_one_transaction_is_one_call():
     predictor.categorize(a_transaction())
 
     assert len(client.messages.calls) == 1
+
+
+# --- what the call cost and what it did -- #64 --------------------------------
+#
+# `_prices_from` is imported by its underscored name on purpose. It is the one
+# piece of #64's Python half that is a pure function of the environment, and the
+# only other way to reach it is `from_env`, which constructs a real
+# `anthropic.Anthropic` -- the one thing every test in this file exists to avoid.
+
+
+def call_lines(caplog) -> list[str]:
+    """The per-call lines, found by their prefix rather than by position."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("model_call ")
+    ]
+
+
+def test_the_tokens_the_response_reports_are_logged(caplog):
+    """The fact, as opposed to the money. Tokens come from the response and stay
+    true whatever anyone believes the price to be."""
+    caplog.set_level(logging.INFO)
+    predictor, _ = predictor_for(answering("groceries", usage=usage_of(1200, 8)))
+
+    predictor.categorize(a_transaction())
+
+    line = call_lines(caplog)[0]
+    assert "input_tokens=1200" in line
+    assert "output_tokens=8" in line
+
+
+def test_a_response_that_reports_no_usage_is_unknown_and_not_zero():
+    """Zero tokens and no idea how many are different claims, and only one of them
+    survives being added up by something else."""
+    assert Usage() == Usage(None, None)
+    assert Prices(5.0, 25.0).cost_of(Usage()) is None
+
+
+def test_the_cost_is_the_tokens_times_the_configured_price():
+    """The published rate for claude-opus-5 on 2026-08-29: 5 USD and 25 USD per
+    million. Written here as arguments rather than as a default in the module, so
+    that the day the price moves this stays a statement about arithmetic instead of
+    a stale figure pretending to be one."""
+    assert Prices(5.0, 25.0).cost_of(Usage(1_000, 100)) == pytest.approx(0.0075)
+
+
+def test_an_unpriced_predictor_still_reports_its_tokens(caplog):
+    """Which is the whole reason there is no default price. A deployment that never
+    set one is not left blind -- it is left without the multiplication."""
+    caplog.set_level(logging.INFO)
+    predictor, _ = predictor_for(answering("groceries", usage=usage_of(900, 7)))
+
+    predictor.categorize(a_transaction())
+
+    line = call_lines(caplog)[0]
+    assert "input_tokens=900" in line
+    assert "cost_usd=unpriced" in line
+
+
+def test_a_priced_predictor_reports_what_the_call_cost(caplog):
+    caplog.set_level(logging.INFO)
+    predictor, _ = predictor_for(
+        answering("groceries", usage=usage_of(1_000, 100)), prices=Prices(5.0, 25.0)
+    )
+
+    predictor.categorize(a_transaction())
+
+    assert "cost_usd=0.007500" in call_lines(caplog)[0]
+
+
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [
+        (answering("groceries"), "answered"),
+        (answering(NO_PREDICTION), "abstained"),
+        (answering("takeaway"), "unusable"),
+        (RuntimeError("connection reset"), "failed"),
+    ],
+)
+def test_the_four_things_that_can_happen_are_four_words(answer, outcome, caplog):
+    """**The split this half of #64 is for.** From the .NET side all four of these
+    are `category: null` -- three arrive as a 200 and one as a 500 -- so only this
+    process can say which. `abstained` is the model declining a row it was told it
+    may decline; `unusable` is an answer thrown away for being outside the
+    vocabulary, and it wants a look at the prompt rather than at the network."""
+    caplog.set_level(logging.INFO)
+    predictor, _ = predictor_for(answer)
+
+    predictor.categorize(a_transaction())
+
+    assert f"outcome={outcome}" in call_lines(caplog)[0]
+
+
+def test_nothing_about_the_transaction_reaches_the_log(caplog):
+    """#64's first trap, held at the place where it would actually be broken. A
+    description is the user's own spending and a log line is where it would sit for
+    ever, so the per-call line carries the model, the clock and the tokens, and
+    nothing that says which purchase it was about."""
+    caplog.set_level(logging.DEBUG)
+    predictor, _ = predictor_for(answering("groceries", usage=usage_of(10, 2)))
+
+    predictor.categorize(a_transaction(description="darwin chisinau", amount="847.19"))
+
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "darwin" not in logged
+    assert "847.19" not in logged
+
+
+# --- the prices, read from the environment ------------------------------------
+
+
+def test_no_prices_configured_is_no_prices_and_no_complaint():
+    assert _prices_from({}) is None
+
+
+def test_both_prices_configured_is_a_price():
+    assert _prices_from({PRICE_INPUT_ENV: "5", PRICE_OUTPUT_ENV: "25"}) == Prices(5.0, 25.0)
+
+
+def test_half_a_price_is_no_price_and_says_so(caplog):
+    """Somebody in the middle of doing this. Reporting nothing in silence would look
+    exactly like never having tried."""
+    caplog.set_level(logging.ERROR)
+
+    assert _prices_from({PRICE_INPUT_ENV: "5"}) is None
+    assert PRICE_OUTPUT_ENV in caplog.text
+
+
+def test_a_price_that_is_not_a_number_does_not_stop_the_service(caplog):
+    """The opposite of how main.py treats an unrecognised CATEGORIZER_PREDICTOR, and
+    the difference is what each mistake costs. A wrong predictor serves the baseline
+    while the deployment believes a model is running; a wrong price leaves one field
+    out of a log line. Taking the categorizer off the air over the second would be
+    protecting an arithmetic convenience with an outage."""
+    caplog.set_level(logging.ERROR)
+
+    assert _prices_from({PRICE_INPUT_ENV: "five dollars", PRICE_OUTPUT_ENV: "25"}) is None
+    assert caplog.records

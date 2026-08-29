@@ -1,8 +1,10 @@
-﻿using System.Net;
+﻿using System.Diagnostics.Metrics;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using LandMoney.Web.Categorizing;
 using LandMoney.Web.Models;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace LandMoney.Web.Tests.Categorizing;
@@ -46,7 +48,8 @@ public class CategorizerClientTests
 
     private static CategorizerClient ClientThat(
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond,
-        TimeSpan? timeout = null)
+        TimeSpan? timeout = null,
+        CategorizerMetrics? metrics = null)
     {
         var http = new HttpClient(new StubHandler(respond))
         {
@@ -56,11 +59,28 @@ public class CategorizerClientTests
             Timeout = timeout ?? TimeSpan.FromSeconds(30),
         };
 
-        // NullLogger rather than a spy. What is asserted here is the return value,
-        // and a test that also pinned the log message would fail on a reworded
-        // sentence, which is not a behaviour change.
-        return new CategorizerClient(http, NullLogger<CategorizerClient>.Instance);
+        // NullLogger rather than a spy. What is asserted here is the return value
+        // and the outcome recorded beside it, and a test that also pinned the log
+        // message would fail on a reworded sentence, which is not a behaviour
+        // change. The outcome word is the part that is promised to stay still --
+        // that is what CategorizerOutcome is for -- and it is asserted through the
+        // metrics rather than through the prose that carries it.
+        return new CategorizerClient(http, metrics ?? NewMetrics(), NullLogger<CategorizerClient>.Instance);
     }
+
+    /// <summary>A metrics instance of its own, so one test cannot see another's counts.</summary>
+    // The provider is deliberately not disposed. IMeterFactory owns the Meter and
+    // disposes it with the container, and instruments on a disposed Meter silently
+    // stop recording -- which would turn every assertion below into "zero calls,
+    // and the test passes only if it expected zero". A handful of undisposed
+    // containers is what a test run can afford; a metric that records nothing and
+    // says nothing is not.
+    private static CategorizerMetrics NewMetrics(TimeProvider? time = null) =>
+        new(new ServiceCollection().AddMetrics().BuildServiceProvider().GetRequiredService<IMeterFactory>(),
+            time ?? TimeProvider.System);
+
+    private static long Counted(CategorizerWindow window, string outcome) =>
+        window.ByOutcome.GetValueOrDefault(outcome);
 
     private static Task<HttpResponseMessage> Json(string body, HttpStatusCode status = HttpStatusCode.OK)
         => Task.FromResult(new HttpResponseMessage(status)
@@ -265,10 +285,24 @@ public class CategorizerClientTests
             return Json("""{"category":"eating-out","source":"rules"}""");
         }));
         // Deliberately not setting BaseAddress at all.
-        var client = new CategorizerClient(http, NullLogger<CategorizerClient>.Instance);
+        var metrics = NewMetrics();
+        var client = new CategorizerClient(http, metrics, NullLogger<CategorizerClient>.Instance);
 
         Assert.Null(await Ask(client));
         Assert.False(called);
+
+        // #64: counted under its own name, and not timed. This is what the deployed
+        // application did on every save between #39 and #61 -- an absent
+        // categorizer, storing nothing, reporting nothing -- so the whole value of
+        // the outcome is that it is a number somebody can look at.
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.NotConfigured));
+
+        // No call was made, so there is no duration to attribute to it. A zero here
+        // would be an instant success in the histogram, dragging every percentile
+        // towards nothing.
+        Assert.Equal(0, window.Measured);
     }
 
     // --- the clock ------------------------------------------------------------
@@ -340,5 +374,170 @@ public class CategorizerClientTests
         var amount = json.RootElement.GetProperty("amount");
         Assert.Equal(JsonValueKind.Number, amount.ValueKind);
         Assert.Equal(42.50m, amount.GetDecimal());
+    }
+
+    // --- what it counts -- #64 ------------------------------------------------
+    //
+    // Every test above asserts that the answer is null; none of them can tell you
+    // *why*, which is the whole of what #64 is about. On the wire an abstention, a
+    // dead service and a body nobody can read are one value. These are the tests
+    // that keep them apart.
+
+    [Fact]
+    public async Task A_suggestion_is_counted_under_the_source_that_produced_it()
+    {
+        var metrics = NewMetrics();
+        var client = ClientThat((_, _) => Json("""{"category":"eating-out","source":"model"}"""), metrics: metrics);
+
+        await Ask(client);
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Suggested));
+        Assert.Equal(1, window.BySource["model"]);
+
+        // The call was timed, which is what makes a p95 possible at all.
+        Assert.Equal(1, window.Measured);
+    }
+
+    [Fact]
+    public async Task An_abstention_is_not_counted_as_a_failure()
+    {
+        // #64's third acceptance test, and the reason the outcome vocabulary exists
+        // rather than a boolean. Both of these answer null; one is the baseline
+        // declining on a row it was never going to know, the other is a service that
+        // is not there. Counting them together would produce a "failure rate" of a
+        // third that nobody could act on.
+        var metrics = NewMetrics();
+
+        await Ask(ClientThat((_, _) => Json("""{"category":null,"source":"rules"}"""), metrics: metrics));
+        await Ask(ClientThat(
+            (_, _) => Task.FromException<HttpResponseMessage>(new HttpRequestException("connection refused")),
+            metrics: metrics));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(2, window.Calls);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Abstained));
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Unreachable));
+
+        // And neither is the other. Written as two assertions rather than one
+        // because the failure this is guarding against is a later refactor folding
+        // the two branches together, which would show up as a 2 on one line and a 0
+        // on the other -- a test asserting only inequality would still pass.
+        Assert.Equal(0, Counted(window, CategorizerOutcome.Suggested));
+        Assert.Equal(0, Counted(window, CategorizerOutcome.Timeout));
+    }
+
+    [Fact]
+    public async Task A_service_that_never_answers_counts_as_a_timeout_and_never_as_unreachable()
+    {
+        // **#64's first acceptance test**, and the one it says is easy to get
+        // wrong: stop the categorizer, save three transactions, and the numbers must
+        // say three timeouts rather than three unreachables. #39 measured why -- a
+        // stopped container leaves the SYN unanswered instead of refusing it, so the
+        // failure is a clock expiring and not a connection being refused.
+        //
+        // The stub reproduces that shape rather than the symptom: it never answers,
+        // and the client's own timeout is what ends the call.
+        var metrics = NewMetrics();
+        var client = ClientThat(
+            (_, cancellationToken) => Task.Delay(Timeout.Infinite, cancellationToken)
+                .ContinueWith(_ => new HttpResponseMessage(), TaskScheduler.Default),
+            timeout: TimeSpan.FromMilliseconds(50),
+            metrics: metrics);
+
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.Null(await Ask(client));
+        }
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(3, Counted(window, CategorizerOutcome.Timeout));
+        Assert.Equal(0, Counted(window, CategorizerOutcome.Unreachable));
+
+        // The three of them are in the latency figures too. A p95 computed only over
+        // the calls that worked is exactly the number that hides a timeout, which is
+        // #64's second trap.
+        Assert.Equal(3, window.Measured);
+        Assert.True(window.P95Ms >= 50, $"p95 was {window.P95Ms}ms, which cannot include a 50ms timeout.");
+    }
+
+    [Fact]
+    public async Task A_refused_status_and_an_unreadable_body_are_different_numbers()
+    {
+        // Two of the four things that can be wrong with an answer, and they send a
+        // reader to different places: a 502 is something between here and there, a
+        // body that will not parse is a contract that has moved.
+        var metrics = NewMetrics();
+
+        await Ask(ClientThat((_, _) => Json("{}", HttpStatusCode.BadGateway), metrics: metrics));
+        await Ask(ClientThat((_, _) => Json("{not json"), metrics: metrics));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Refused));
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Unreadable));
+    }
+
+    [Theory]
+    [InlineData("""{"category":"eating-out"}""")]
+    [InlineData("""{"category":"eating-out","source":""}""")]
+    public async Task An_answer_that_breaks_the_contract_is_counted_as_unusable(string body)
+    {
+        // Not "unreadable": the body parsed perfectly. The service answered
+        // something this application refuses to store, which is a bug on one side
+        // or the other and not a network event -- and it is invisible in a count
+        // that only knows about exceptions, because nothing was thrown.
+        var metrics = NewMetrics();
+
+        Assert.Null(await Ask(ClientThat((_, _) => Json(body), metrics: metrics)));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Unusable));
+        Assert.Equal(0, Counted(window, CategorizerOutcome.Unreadable));
+    }
+
+    [Fact]
+    public async Task A_caller_who_gives_up_is_counted_separately_and_still_gets_its_exception()
+    {
+        // The call was made and paid for, so it is counted; the exception still
+        // escapes, because saving a transaction for a request whose caller has gone
+        // is what the `when` clause exists to prevent. Kept apart from Timeout
+        // because a number rising here is a fact about the browser's ten-second
+        // budget rather than about the categorizer.
+        var metrics = NewMetrics();
+        var client = ClientThat((_, _) => Json("""{"category":"eating-out","source":"rules"}"""), metrics: metrics);
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Ask(client, cts.Token));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Abandoned));
+        Assert.Equal(0, Counted(window, CategorizerOutcome.Timeout));
+    }
+
+    [Fact]
+    public async Task A_source_this_application_does_not_know_does_not_become_a_new_dimension()
+    {
+        // #64's first trap, one field along from the description it is written
+        // about: `source` is a string another process chooses, so tagging it
+        // verbatim would let a misbehaving service mint a time series per request.
+        // The answer is still stored and the log line still names it -- only the
+        // dimension is bounded.
+        var metrics = NewMetrics();
+        var client = ClientThat((_, _) => Json("""{"category":"eating-out","source":"wizard"}"""), metrics: metrics);
+
+        Assert.Equal(new CategorySuggestion("eating-out", "wizard"), await Ask(client));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, window.BySource["other"]);
+        Assert.False(window.BySource.ContainsKey("wizard"));
     }
 }

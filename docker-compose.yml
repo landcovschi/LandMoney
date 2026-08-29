@@ -76,6 +76,14 @@ services:
       # that changes, the key is a Container Apps secret referenced by name, the
       # same road the connection string takes (#36).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+      # #64. Unset by default, and empty is the same as unset: the per-call log
+      # line then reports tokens and `cost_usd=unpriced`. There is no default in
+      # code on purpose -- a price moves without this repository noticing, and a
+      # confident stale figure is worse than a missing one. `.env.example` carries
+      # today's published rate to copy in.
+      CATEGORIZER_PRICE_INPUT_PER_MTOK: ${CATEGORIZER_PRICE_INPUT_PER_MTOK:-}
+      CATEGORIZER_PRICE_OUTPUT_PER_MTOK: ${CATEGORIZER_PRICE_OUTPUT_PER_MTOK:-}
     ports:
       # Published so the host's `dotnet run` can reach it, and bound to
       # 127.0.0.1 for the same reason postgres is. The app *container* does not
