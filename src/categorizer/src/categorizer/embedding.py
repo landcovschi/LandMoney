@@ -175,9 +175,15 @@ class VoyageEmbedder:
            every vector in a batch against the wrong description, and the only
            symptom is retrieval that returns unrelated rows.
         5. Refuse a response whose length is not `len(texts)`, or any vector whose
-           length is not `self._dimensions`, by raising. A short vector poisons
-           the store permanently and pgvector would refuse it later with an error
-           naming the column rather than the call.
+           length is not `self._dimensions`, by raising **`ValueError`**. A short
+           vector poisons the store permanently and pgvector would refuse it later
+           with an error naming the column rather than the call.
+
+           `ValueError` specifically, because `tests/test_embedding.py` asserts
+           that type and it has to: the first draft of those tests said
+           `pytest.raises(Exception)` and passed against this very stub, since
+           `NotImplementedError` is an `Exception` -- and `RuntimeError` is no
+           better, because `NotImplementedError` subclasses that too.
         6. Return the vectors.
         """
         raise NotImplementedError
