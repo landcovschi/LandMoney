@@ -92,10 +92,16 @@ def usage_of(input_tokens: int, output_tokens: int) -> SimpleNamespace:
 
 
 def predictor_for(
-    *answers: object, prices: Prices | None = None
+    *answers: object,
+    prices: Prices | None = None,
+    cache: object | None = None,
+    model: str = "claude-opus-5",
 ) -> tuple[AnthropicPredictor, StubClient]:
     client = StubClient(*answers)
-    return AnthropicPredictor(client, model="claude-opus-5", prices=prices), client
+    return (
+        AnthropicPredictor(client, model=model, prices=prices, cache=cache),
+        client,
+    )
 
 
 def a_transaction(description: str = "linella chisinau", amount: str = "312.40") -> CategorizeRequest:
@@ -510,3 +516,204 @@ def test_a_price_that_is_not_a_number_does_not_stop_the_service(caplog):
 
     assert _prices_from({PRICE_INPUT_ENV: "five dollars", PRICE_OUTPUT_ENV: "25"}) is None
     assert caplog.records
+
+
+# --- the cache -- #65 ---------------------------------------------------------
+#
+# `FakeCache` inherits nothing from `AnswerCache`, which is the Protocol being
+# structural for the third time in this project after `Predictor` and
+# `MessagesClient`. The real one is tested against a stub Redis in
+# `test_cache.py`; what these tests are about is the adapter's half of the
+# bargain -- which calls are made, which are not, and what is never stored.
+
+
+class FakeCache:
+    """A dict with the two methods, and a count of how often it was asked."""
+
+    def __init__(self) -> None:
+        self.entries: dict[str, object] = {}
+        self.reads = 0
+
+    def get(self, key: str) -> object | None:
+        self.reads += 1
+        return self.entries.get(key)
+
+    def put(self, key: str, answer: object) -> None:
+        self.entries[key] = answer
+
+
+class BrokenCache:
+    """A Redis that is down, in the only shape the adapter can tell apart: the real
+    `RedisCache` swallows everything and answers a miss, so from here a dead cache
+    and a cold key are the same event -- which is exactly the promise being asserted."""
+
+    def get(self, key: str) -> object | None:
+        return None
+
+    def put(self, key: str, answer: object) -> None:
+        return None
+
+
+def test_the_same_description_twice_makes_one_upstream_call(caplog):
+    """**#65's first acceptance test, and the whole issue in one function.**
+
+    Two identical transactions, one stub answer -- and the second `categorize` would
+    raise IndexError out of `StubMessages.create` if it reached the client at all,
+    so this cannot pass by accident.
+    """
+    caplog.set_level(logging.INFO)
+    cache = FakeCache()
+    predictor, client = predictor_for(answering("groceries", usage=usage_of(1200, 8)), cache=cache)
+
+    first = predictor.categorize(a_transaction())
+    second = predictor.categorize(a_transaction())
+
+    assert first == second
+    assert len(client.messages.calls) == 1
+    # #65's second acceptance test: the cost log shows one charge, not two. A
+    # `model_call` line is a call having been made, so counting the lines is
+    # counting the charges.
+    assert len(call_lines(caplog)) == 1
+
+
+def test_a_different_description_is_a_different_call():
+    """The other half of the same property, and the one that would fail if the key
+    were built from something too coarse -- the model and the prompt alone, say."""
+    cache = FakeCache()
+    predictor, client = predictor_for(answering("groceries"), answering("transport"), cache=cache)
+
+    predictor.categorize(a_transaction("linella"))
+    predictor.categorize(a_transaction("bolt ride"))
+
+    assert len(client.messages.calls) == 2
+
+
+def test_the_same_description_under_a_different_model_is_a_different_call():
+    """One cache shared by two models must not serve one's answers as the other's.
+
+    Asserted through the adapter rather than against `key_for` because this is where
+    it would break: the key is built from `self._model`, and a constant typed in
+    here instead would pass every test in `test_cache.py`.
+    """
+    cache = FakeCache()
+    opus, opus_client = predictor_for(answering("groceries"), cache=cache, model="claude-opus-5")
+    sonnet, sonnet_client = predictor_for(
+        answering("groceries"), cache=cache, model="claude-sonnet-5"
+    )
+
+    opus.categorize(a_transaction())
+    sonnet.categorize(a_transaction())
+
+    assert len(opus_client.messages.calls) == 1
+    assert len(sonnet_client.messages.calls) == 1
+
+
+def test_an_abstention_is_cached():
+    """It is an answer and it was paid for. The alternative -- treating `unknown` as
+    nothing to remember -- would bill full price, for ever, for every description the
+    model has already said it cannot place, which on a real statement is the largest
+    repeated group there is."""
+    cache = FakeCache()
+    predictor, client = predictor_for(answering(NO_PREDICTION), cache=cache)
+
+    predictor.categorize(a_transaction())
+    second = predictor.categorize(a_transaction())
+
+    assert len(client.messages.calls) == 1
+    assert second.category is None
+    assert second.source == Source.MODEL
+
+
+def test_a_failed_call_is_not_cached():
+    """A network blip must not become a month of them.
+
+    The second call here answers normally, so a cached failure would show up as this
+    predictor insisting there is no category for a description it can perfectly well
+    categorise -- and the TTL, not anything anybody does, is what would end it.
+    """
+    cache = FakeCache()
+    predictor, client = predictor_for(
+        RuntimeError("connection reset by peer"), answering("groceries"), cache=cache
+    )
+
+    assert predictor.categorize(a_transaction()).category is None
+    assert predictor.categorize(a_transaction()).category == Category.GROCERIES
+    assert len(client.messages.calls) == 2
+
+
+def test_an_unusable_answer_is_not_cached():
+    """The same argument one step along: `takeaway` is not something the model said
+    that is worth keeping, it is something this adapter threw away. Caching it would
+    freeze a prompt or schema fault into every future answer for that description."""
+    cache = FakeCache()
+    predictor, client = predictor_for(answering("takeaway"), answering("eating-out"), cache=cache)
+
+    assert predictor.categorize(a_transaction()).category is None
+    assert predictor.categorize(a_transaction()).category == Category.EATING_OUT
+    assert len(client.messages.calls) == 2
+
+
+def test_the_stored_entry_carries_what_the_call_cost():
+    """#65's second bullet. Tokens and money beside the answer, so a hit can name
+    what it saved rather than leaving somebody to work it out from a price list that
+    has since moved."""
+    cache = FakeCache()
+    predictor, _ = predictor_for(
+        answering("groceries", usage=usage_of(1200, 8)), prices=Prices(5.0, 25.0), cache=cache
+    )
+
+    predictor.categorize(a_transaction())
+    stored = next(iter(cache.entries.values()))
+
+    assert stored.answer == "groceries"
+    assert (stored.input_tokens, stored.output_tokens) == (1200, 8)
+    assert stored.cost_usd == pytest.approx((1200 * 5.0 + 8 * 25.0) / 1_000_000)
+
+
+def test_nothing_about_the_transaction_is_stored():
+    """The key is a digest and the value is an answer, so a dump of this Redis says
+    what was categorised as what and never what was bought. #64 made that rule for
+    log lines; this is where it would be far easier to break, because storing the
+    description is what would make the entries readable by hand."""
+    cache = FakeCache()
+    predictor, _ = predictor_for(answering("groceries"), cache=cache)
+
+    predictor.categorize(a_transaction("darwin chisinau", amount="847.19"))
+    key, stored = next(iter(cache.entries.items()))
+
+    assert "darwin" not in key and "847.19" not in key
+    assert "darwin" not in stored.to_json() and "847.19" not in stored.to_json()
+
+
+def test_a_cache_that_is_down_means_call_the_model_and_never_no_category():
+    """#65's third trap, from the adapter's side. `BrokenCache` never remembers
+    anything, so every call is a miss -- and every answer is still correct."""
+    predictor, client = predictor_for(
+        answering("groceries"), answering("groceries"), cache=BrokenCache()
+    )
+
+    assert predictor.categorize(a_transaction()).category == Category.GROCERIES
+    assert predictor.categorize(a_transaction()).category == Category.GROCERIES
+    assert len(client.messages.calls) == 2
+
+
+def test_with_no_cache_the_adapter_asks_nothing_and_bills_every_call():
+    """The default, and what every test above this section runs under."""
+    predictor, client = predictor_for(answering("groceries"), answering("groceries"))
+
+    predictor.categorize(a_transaction())
+    predictor.categorize(a_transaction())
+
+    assert len(client.messages.calls) == 2
+
+
+def test_a_hit_is_served_without_the_model_being_reachable_at_all():
+    """The saving stated as strongly as it can be: the second predictor's client
+    raises on any call, and the answer still arrives."""
+    cache = FakeCache()
+    warm, _ = predictor_for(answering("groceries"), cache=cache)
+    warm.categorize(a_transaction())
+
+    cold, _ = predictor_for(RuntimeError("the network is gone"), cache=cache)
+
+    assert cold.categorize(a_transaction()).category == Category.GROCERIES

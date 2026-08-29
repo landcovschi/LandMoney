@@ -28,10 +28,11 @@ dotnet tool restore
 dotnet ef database update --project src\LandMoney.Web
 ```
 
-`docker compose up -d` brings up **Postgres and the categorizer** -- the two
-things the application talks to. The app itself is not in that set on purpose:
-it is run from the host, where the debugger and the fast rebuild are. See
-"Running the whole stack in containers" below for the other way.
+`docker compose up -d` brings up **Postgres, the categorizer and Redis** -- the
+two things the application talks to, and the one the categorizer talks to. The
+app itself is not in that set on purpose: it is run from the host, where the
+debugger and the fast rebuild are. See "Running the whole stack in containers"
+below for the other way.
 
 The connection string lives in user-secrets and is not in any committed file;
 `Program.cs` fails at startup with the command to set it if it is missing.
@@ -132,6 +133,20 @@ is the only process that can see it: `CATEGORIZER_PRICE_INPUT_PER_MTOK` and
 set the per-call line still reports the tokens. There is no price in the code on
 purpose -- a rate moves without this repository noticing, and a stale figure in a
 log is worse than a missing one.
+
+**The same money is not spent twice (#65).** With the model answering, its answers
+are cached in Redis, keyed on the model, the effort, the prompt's digest and the
+exact text the model was shown -- nothing is normalised on the way to a key, so
+`LINELLA` and `linella` are two calls, and any folding would have to happen where
+the model sees it too. What a call cost is stored beside the answer, and one
+`cache` line per lookup carries the running hit rate.
+
+Nothing is cached with the **rules** answering, which is the everyday state: only
+the model adapter ever builds a cache, so no connection is opened and `redis`
+merely sits there. A Redis that is down means the model is called, never that a
+transaction loses its category -- and after one failure the cache stops asking for
+thirty seconds, because a stopped container swallows connections rather than
+refusing them and the wait was showing up on every save.
 
 **Signing in needs one setting, and it is a secret.** Accounts live in this
 application's own database -- ASP.NET Core Identity, a username and a password,

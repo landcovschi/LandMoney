@@ -1393,6 +1393,32 @@ az containerapp create --resource-group rg-landmoney --name landmoney-categorize
   money: `model` means an `ANTHROPIC_API_KEY` as a Container Apps secret and one
   Claude call per saved transaction. That is a decision with a bill attached and
   it is not this step's.
+
+  **And since #65 it is two decisions with two bills.** The model path caches its
+  answers in Redis so that an identical description is not billed twice, and
+  **there is no Redis in this resource group** -- deliberately, because a cache in
+  front of a predictor that is not running is a monthly charge for nothing.
+  `docker-compose.yml` has one for local work; the deployed categorizer has
+  `CATEGORIZER_REDIS_URL` unset and therefore no cache, which is the correct and
+  free state while it runs the rules.
+
+  So flipping this variable to `model` is three things and not one: the key as a
+  secret, a cache, and the price variables of #64 if the cost line is to mean
+  anything. `ci.yml`'s `Check the categorizer` step refuses a deployment that is
+  `model` with no `CATEGORIZER_REDIS_URL`, because that combination is billed per
+  save, forever, and looks exactly like a working deployment.
+
+  What the cache would cost, read on 2026-08-29 and to be re-read rather than
+  trusted: **Azure Cache for Redis Basic C0** (250 MB, no SLA, a single node) is
+  around **16 USD a month** -- which is the same order as the whole Postgres bill
+  slice 3 is facing when the free year ends (#34), for a service one person uses
+  weekly. Two alternatives worth pricing at the same time: a `redis:8-alpine`
+  container app of its own with internal ingress and `--min-replicas 1` (cheaper,
+  and it is then a database with no backups that must not scale to zero), or an
+  Azure Cache for Redis in the *free* tier if one exists on the day. The honest
+  third option is no cache at all and a per-call bill, which for weekly use may
+  simply be smaller than 16 USD -- **that arithmetic is the thing to do before
+  provisioning anything**, and it needs the token counts #64 already logs.
 - **No registry credentials**, for the reason step 10 gives: the package is
   public. It is a *second* package, and #24 recorded that ghcr.io makes a new one
   private by default -- **measured here, and it was already public**, listing its
@@ -1559,6 +1585,16 @@ input_tokens=... output_tokens=... cost_usd=...` line per call, and it says
 in the code, deliberately, because a stale one would be believed. None of this
 appears today: the deployed categorizer is pinned to `CATEGORIZER_PREDICTOR=rules`
 (step 16), so there are no tokens to count until that changes.
+
+**The other line to look for on that day is `cache`** -- one per lookup, carrying
+`outcome=hit|miss`, what the hit did not spend, and the running `hit_rate=`. It is
+how #65's promise is checked in production rather than believed: a hit rate that
+is zero after a fortnight means the key is being built from something that varies
+per request, and a stream of `failures=` means Redis is unreachable and every call
+is being billed. Neither shows up anywhere else, because both answer correctly.
+
+    ContainerAppConsoleLogs_CL
+    | where ContainerName_s == 'landmoney-categorizer' and Log_s startswith 'cache '
 
 Which side to believe when they disagree, decided in #64: **this service is
 authoritative for what the model did, and the .NET app for what the user got.** A

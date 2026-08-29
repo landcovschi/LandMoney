@@ -80,8 +80,9 @@ src/categorizer/
   rules.py            109 ordered substrings. Moved from evals/, unchanged
   contracts.py        request and response -- records with DataAnnotations
   predictor.py        Protocol (= interface) + the rules implementation
-  prompt.py           what the model is told, and the schema it answers into
+  prompt.py           what the model is told, its digest, and the answer schema
   anthropic_predictor.py   the model behind the same Protocol -- #59
+  cache.py            the answer cache, on the model path only -- #65
   main.py             FastAPI: POST /categorize, GET /health
 tests/
 ```
@@ -140,3 +141,68 @@ A word outside the eleven is an abstention, not a twelfth category and not a
 mapping: `food` stays `food` and is refused. The prompt's schema constrains the
 answer to the eleven plus `unknown`, and the adapter checks anyway, because the
 schema is a property of one route and the check is a property of the adapter.
+
+## The answer cache -- #65
+
+Identical input must not be billed twice. `CATEGORIZER_REDIS_URL` turns it on;
+`docker-compose.yml` already points it at the `redis` service, so there is nothing
+to set.
+
+**Only the model path has one.** `cache_from_env` is called from
+`AnthropicPredictor.from_env` and nowhere else, so with the rules answering, no
+connection is opened and nothing here is read -- a network hop in front of a free
+in-memory substring scan would make it slower and add a second thing that can be
+down.
+
+The key is a sha256 of four things, and each one is in it for a reason that has
+already cost somebody something somewhere:
+
+| part | what it prevents |
+| --- | --- |
+| the model id | a cheaper model serving the expensive one's answers under its own name |
+| the effort | raising `CATEGORIZER_EFFORT` and measuring no change, because the old answers came back |
+| `prompt.FINGERPRINT` | the first prompt edit serving yesterday's answers for ever |
+| the exact text the model was shown | nothing -- it *is* the input, byte for byte |
+
+**Nothing is normalised to build a key**, and that is the sharp edge of this
+feature rather than a missed optimisation. `LINELLA` and `linella` are two keys,
+because folding them would be a rule living in the cache path and nowhere else --
+the same drift as the `.replace("-", " ")` mutation #39 caught by hand, which
+looks like an improvement and quietly makes the recorded baseline a number about
+code that no longer runs. The day folding is genuinely wanted it belongs in
+`_user_message`, where the model sees it too and the eval number moves in the same
+commit.
+
+**Redis being down means "call the model", never "no category".** Every failure is
+swallowed, counted and logged; the answer is unaffected.
+
+What is stored is the answer and what the call cost -- tokens in, tokens out, and
+the money, as billed at the time. **Nothing about the transaction:** the key is a
+digest and the value is an answer, so a dump of this Redis says what was
+categorised as what and never what was bought.
+
+One line per lookup carries the running hit rate, because a cache nobody measured
+is a cache nobody knows is working:
+
+```
+cache outcome=hit elapsed_ms=1 saved_now_usd=0.001234 stored_model=claude-opus-5 hits=7 misses=3 failures=0 hit_rate=70.0% saved_usd=0.008638
+```
+
+The totals are in-process and this container scales to zero, so they describe one
+replica's afternoon -- the log line is the durable record and the last line a
+replica writes is its whole story. A hit produces no `model_call` line, on purpose:
+that line means a call was made, and counting them is counting the charges.
+
+**A failed call and an unusable answer are never cached** -- neither is something
+the model said, and storing one would freeze a network blip or a schema fault into
+every future answer for that description. An abstention *is* cached: `unknown` is
+an answer, it was paid for, and asking again buys the same word at the same price.
+
+`CATEGORIZER_CACHE_TTL_SECONDS` defaults to thirty days. It bounds memory rather
+than staleness -- the key already carries everything that would make an answer
+stale.
+
+**`evals/score.py` does not use the cache unless asked** (`--cache`). A scored run
+is meant to be a measurement of the model, and a number produced by replaying calls
+that happened days ago under a `.env` nobody remembers is not one -- two identical
+runs would stop being evidence, because the second would be reading the first.

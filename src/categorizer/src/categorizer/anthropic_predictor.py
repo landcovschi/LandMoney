@@ -21,9 +21,10 @@ import time
 from decimal import Decimal
 from typing import Any, Final, Mapping, NamedTuple, Protocol
 
+from categorizer.cache import AnswerCache, CachedAnswer, cache_from_env, key_for
 from categorizer.categories import KNOWN, NO_PREDICTION
 from categorizer.contracts import CategorizeRequest, CategorizeResponse, Category, Source
-from categorizer.prompt import RESPONSE_SCHEMA, SYSTEM_PROMPT
+from categorizer.prompt import FINGERPRINT, RESPONSE_SCHEMA, SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -140,11 +141,17 @@ class AnthropicPredictor:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         effort: str = DEFAULT_EFFORT,
         prices: Prices | None = None,
+        cache: AnswerCache | None = None,
     ) -> None:
         self._client = client
         self._model = model
         self._max_tokens = max_tokens
         self._effort = effort
+        # None means every call is billed, and that is the default rather than a
+        # degraded state -- #65 adds a cache to the *model* path and nothing else.
+        # An argument for the same reason the client is one: a test that wanted a
+        # cache has to say so, so no test can reach a real Redis by forgetting.
+        self._cache = cache
         # An argument rather than something read from the environment in here, for
         # the same reason the client is: a test names the configuration it is
         # testing instead of mutating the process. None means unpriced, which is
@@ -220,6 +227,11 @@ class AnthropicPredictor:
             model=env.get("CATEGORIZER_MODEL", DEFAULT_MODEL),
             effort=env.get("CATEGORIZER_EFFORT", DEFAULT_EFFORT),
             prices=_prices_from(env),
+            # The only place a cache is ever built -- #65. It is inside the model
+            # adapter's factory rather than in `main.py` so that the rules path
+            # cannot reach Redis even by a later edit: `RulesPredictor` is
+            # constructed on a branch that never runs this line.
+            cache=cache_from_env(env),
         )
 
     def categorize(self, request: CategorizeRequest) -> CategorizeResponse:
@@ -254,11 +266,44 @@ class AnthropicPredictor:
         # counted there and unknowable here. So "how often does the model answer" is
         # this file's number, and "how often did a save get a category" is
         # CategorizerClient's. Neither is a correction of the other.
+        # **The exact string the model is shown, built once and used twice** -- it
+        # goes on the wire and it is what the cache key is a digest of. That is
+        # #65's sharpest trap answered structurally rather than by remembering:
+        # there is no second construction of this text to normalise differently,
+        # so the key cannot drift from the input even by a well-meaning edit.
+        shown = _user_message(request)
+
+        # Built whether or not there is a cache, which is a sha256 of about a hundred
+        # bytes -- a microsecond, against a call that takes two seconds. The
+        # alternative is an Optional key and a second `is not None` at both of the
+        # two places below, to save an amount of work this method cannot measure.
+        key = key_for(
+            model=self._model,
+            effort=self._effort,
+                # The prompt's own digest, from prompt.py, which is also what
+                # `evals/score.py` prints above a score. An edited prompt therefore
+                # changes every key in the same commit that changes the label on the
+                # number -- so the first run after an edit measures the new prompt
+                # rather than replaying answers to the old one.
+            prompt_fingerprint=FINGERPRINT,
+            user_message=shown,
+        )
+
+        if self._cache is not None:
+            cached = self._cache.get(key)
+            if cached is not None:
+                # No `model_call` line here, and that is deliberate: that line means
+                # a call was made, and on a hit there was none. The cache logs its
+                # own line with the hit rate and what this hit did not spend, so the
+                # two never have to be subtracted from each other to get either
+                # number. `self.stats` is where a hit is counted -- see cache.py.
+                return _category_of(cached.answer)
+
         started = time.perf_counter()
         usage = Usage()
 
         try:
-            answer, usage = self._ask(request)
+            answer, usage = self._ask(shown)
         # **Broad on purpose, and this is the paragraph to read before narrowing
         # it.** This method sits on the path where a user's transaction is being
         # saved, and #39's promise is that categorising can never cost that row.
@@ -293,6 +338,32 @@ class AnthropicPredictor:
             self._log_call("unusable", started, usage)
             return None
 
+        # Stored here rather than at either of the two returns below, because both
+        # of them are the model having answered and both cost the same money.
+        # **An abstention is an answer**: asking again would buy the same `unknown`
+        # at the same price, and the row is a miss in #60's score either way.
+        #
+        # What is deliberately never stored is above this line: `failed` -- the call
+        # raised -- and `unusable` -- the answer was thrown away. Neither is
+        # something the model said, and caching either would freeze a network blip
+        # or a bad response for the whole TTL, turning a transient failure into a
+        # month of them. A miss costs one call; a poisoned entry costs every call.
+        if self._cache is not None:
+            self._cache.put(
+                key,
+                CachedAnswer(
+                    answer,
+                    self._model,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    # What it cost *when it was made*, not what the same tokens
+                    # would cost today. A price change must not rewrite what a
+                    # past call was billed -- the same reasoning that keeps the
+                    # price out of the code in #64.
+                    self._cost_of(usage),
+                ),
+            )
+
         if answer == NO_PREDICTION:
             self._log_call("abstained", started, usage)
             return None
@@ -314,7 +385,7 @@ class AnthropicPredictor:
         cardinality and the same rule holds harder here: the description is the
         user's own spending, and a log line is where it would sit for ever.
         """
-        cost = self._prices.cost_of(usage) if self._prices else None
+        cost = self._cost_of(usage)
 
         logger.info(
             "model_call outcome=%s model=%s effort=%s elapsed_ms=%.0f "
@@ -331,12 +402,20 @@ class AnthropicPredictor:
             "unpriced" if cost is None else f"{cost:.6f}",
         )
 
-    def _ask(self, request: CategorizeRequest) -> tuple[str | None, Usage]:
+    def _cost_of(self, usage: Usage) -> float | None:
+        """What one call cost, or None when nothing here can say.
+
+        One expression, read by the log line and by the cache entry, so a cached
+        saving and a logged charge can never be two different arithmetics.
+        """
+        return self._prices.cost_of(usage) if self._prices else None
+
+    def _ask(self, shown: str) -> tuple[str | None, Usage]:
         message = self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _user_message(request)}],
+            messages=[{"role": "user", "content": shown}],
             # Both keys live inside output_config: `format` constrains the answer to
             # the schema, `effort` controls how hard the model thinks about it.
             #
@@ -356,6 +435,17 @@ class AnthropicPredictor:
         # `async def` -- see main.py), so that is a real race and not a theoretical
         # one.
         return _answer_from(message), _usage_from(message)
+
+
+def _category_of(answer: str) -> Category | None:
+    """A stored or freshly-given answer as the response's field.
+
+    The sentinel stops here exactly as it does in `RulesPredictor`: `unknown` is
+    not one of the eleven and must never reach the .NET column. `Category(...)`
+    cannot raise on a cached value, because `CachedAnswer.from_json` refuses
+    anything outside the vocabulary before it gets this far.
+    """
+    return None if answer == NO_PREDICTION else Category(answer)
 
 
 def _prices_from(env: Mapping[str, str]) -> Prices | None:

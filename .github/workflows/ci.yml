@@ -192,6 +192,14 @@ jobs:
       # pytest exits 5 when it collected nothing, so a tests folder that has
       # been deleted or moved out from under testpaths is red here rather than
       # green with nothing run.
+      #
+      # **No `services: redis:` here, and that is a property being protected
+      # rather than a corner cut.** #65 put a cache on the model path, and its
+      # tests reach it through a stub client the same way the model's tests reach
+      # `anthropic.Anthropic` -- so a test that forgot to pass one fails to
+      # construct instead of quietly connecting to whatever is listening on 6379.
+      # A service container here would make that failure invisible on the one
+      # machine where it is cheapest to catch.
       - name: Test the categorizer
         working-directory: src/categorizer
         run: uv run --no-sync pytest
@@ -916,10 +924,34 @@ jobs:
             exit 1
           fi
 
+          # **The model is only deployed with a cache in front of it** -- #65.
+          # `rules` is what is deployed today (step 16) and costs nothing, so
+          # this asserts nothing most of the time. It exists for the day somebody
+          # flips one variable in the portal: without a Redis the model is billed
+          # once per saved transaction with no memory at all, which is the whole
+          # of what slice 5's first line says must not happen -- and it would be
+          # invisible, because every answer would still be correct.
+          predictor=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --query "properties.template.containers[0].env[?name=='CATEGORIZER_PREDICTOR'].value | [0]" \
+            -o tsv --only-show-errors)
+          cache=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --query "properties.template.containers[0].env[?name=='CATEGORIZER_REDIS_URL'].value | [0]" \
+            -o tsv --only-show-errors)
+
+          if [ "$predictor" = "model" ] && [ -z "$cache" ]; then
+            echo "::error::the categorizer runs the model with no CATEGORIZER_REDIS_URL -- every call is billed twice; see step 16 of docs/deploy-azure.md"
+            exit 1
+          fi
+
           {
             echo '### Categorizer'
             echo
             echo "- image: $image"
             echo "- ingress: internal, https://$internal"
             echo "- the app points at it: yes"
+            echo "- predictor: ${predictor:-(unset -- the image default, rules)}"
+            # Whether, never where -- a connection string is not summary material.
+            echo "- answer cache: $([ -n "$cache" ] && echo configured || echo none)"
           } >> "$GITHUB_STEP_SUMMARY"

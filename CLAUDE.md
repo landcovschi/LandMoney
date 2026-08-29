@@ -2260,6 +2260,165 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   -- there is no `/health` or `/metrics` reporting on dependencies, so the only
   way to ask this application what the categorizer is doing is to read its log.
 
+- **The answer cache: Redis, on the model path and nowhere else -- decided
+  2026-08-29** (#65). `src/categorizer/src/categorizer/cache.py` holds the key, the
+  entry and the client; `redis:8-alpine` joins `docker-compose.yml`; one new
+  dependency, `redis>=8.1`, and the image went from 203 MB to 206 MB. 54 new Python
+  tests, none of which opens a socket.
+
+  **This is the day `CLAUDE.md`'s "a database gets added when it has a job" is
+  satisfied, and not a day earlier.** There was nothing to cache while the answer
+  came from 109 substrings in memory, which is why #65 says out loud that it
+  depends on the adapter and must not be started before it.
+
+  **The cache lives inside `AnthropicPredictor` rather than wrapping `Predictor`,
+  and that is the decision the shape hangs off.** A `CachingPredictor` decorator is
+  the classic answer and it was what the port existed for; it loses because a
+  decorator sees only `CategorizeResponse`, and #65's second bullet is that what a
+  call cost -- tokens in, tokens out, money -- is recorded **beside the answer**. The
+  usage lives inside the adapter and would have to be smuggled out through the port
+  to reach a wrapper, which is a port widened for one implementation's benefit. The
+  price of the route taken is that `AnthropicPredictor` now has two jobs; what it
+  buys, besides the cost, is that "the rules never touch Redis" is structural rather
+  than a wiring rule in `main.py` that a later edit could get wrong.
+
+  **Nothing is normalised to build a key, and that is the sharp edge rather than a
+  missed optimisation.** `key_for` is a sha256 of the model id, the effort, the
+  prompt fingerprint and **the exact string the model is shown**, byte for byte --
+  and `_category_for` builds that string once and uses it for both, so the key
+  cannot drift from the input even by a well-meaning edit. `LINELLA` and `linella`
+  are two keys and two calls. Folding them would be a rule living in the cache path
+  and nowhere else, which is the mutation #39 caught by hand wearing a different
+  coat: it looks like an improvement, and it silently makes the recorded baseline a
+  number about code that no longer runs. The day folding is genuinely wanted it
+  belongs in `_user_message`, where the model sees it too and the eval number moves
+  in the same commit.
+
+  **The prompt's digest moved into `prompt.py` as `FINGERPRINT`**, computed exactly
+  as `evals/score.py` computed it and still printing `sha256:c8ad9d9fd16f`, which is
+  how the move is known to have been a move. It is now one fact with two consumers:
+  the header above a score, and every cache key. So a prompt edit re-labels the
+  number and invalidates every stored answer in the same commit, with nothing to
+  remember -- which is #65's second trap, where the first prompt change otherwise
+  serves yesterday's answers for ever.
+
+  **`evals/score.py` does not use the cache unless `--cache` is passed**, and the
+  environment is erased rather than merely not read: the sanctioned way to run the
+  scorer is `set -a; . ./.env; set +a`, which exports a Redis URL that is there for
+  the service's benefit. A scored run is meant to be a measurement, and #60's
+  evidence was "two identical runs" -- which stops being evidence the moment the
+  second one can read the first.
+
+  **A failed call and an unusable answer are never stored; an abstention is.**
+  Neither of the first two is something the model said, and caching one would freeze
+  a network blip or a schema fault into every future answer for that description,
+  ended only by the TTL. `unknown` is an answer, it was paid for, and asking again
+  buys the same word at the same price -- and on a real statement the descriptions
+  the model cannot place are the largest repeated group there is.
+
+  **Redis being down means "call the model", never "no category"** -- the third
+  place in this chain that promise is made, after `AnthropicPredictor` and
+  `CategorizerClient`. Every failure is swallowed, counted and logged with its
+  traceback. Which makes it, per #64, the third place where an absence has to be
+  counted or nobody would ever know: `failures` is kept apart from `misses`
+  precisely because both end in a model call and only one is worth an alarm.
+
+  **The measurement that changed the design.** With the container stopped, a lookup
+  and then a write each paid the connect timeout in full -- a stopped container
+  leaves the SYN unanswered rather than refusing it, which is #39's finding about the
+  categorizer arriving one service along -- so a dead Redis added **1055 ms to every
+  save**, on the path where a user's transaction is being written. After a failure
+  the cache now stops asking for thirty seconds: measured again, **531 ms once and
+  then 0 ms per save**. It is deliberately not a circuit breaker library and has no
+  half-open state or failure threshold: one failure is enough evidence for something
+  whose whole job is to be faster than the alternative. What it costs is that a
+  Redis which comes back is unused for up to thirty seconds -- misses, never wrong
+  answers.
+
+  **What is measured, against a real Redis with a stubbed model** (a stub because
+  the cache is what is being verified, and a stub can be *counted* where a paid call
+  cannot): the same description twice is **one** upstream call, one `model_call`
+  line and two `cache` lines; a different description and the same description in
+  capitals are each a new call; a second process finds the warm answer and makes no
+  call at all; 20 hits take 16 ms. Over HTTP against the compose stack with the
+  **rules** answering, five requests opened **zero** Redis connections, wrote zero
+  keys and logged not one cache line -- #65's third acceptance test, asked of Redis
+  rather than of the code. And from inside the compose network the container reaches
+  `redis` by service name: 37 ms cold, 0 ms warm.
+
+  **A hit produces no `model_call` line, on purpose.** That line means a call was
+  made, so counting them is counting the charges -- which is #65's second acceptance
+  test. The cache writes its own line per lookup carrying `outcome=`, what that hit
+  did not spend, and the running `hit_rate=`; the totals are in-process and this
+  container scales to zero, so the log is the durable record and the last line a
+  replica writes is its whole story. Same shape as #64's .NET tally, for the same
+  reason.
+
+  **Nothing about the transaction is stored.** The key is a digest and the value is
+  an answer, so a dump of this Redis says what was categorised as what and never what
+  was bought. #64 made that rule for log lines; this is where it would be far easier
+  to break, because storing the description is exactly what would make the entries
+  readable by hand.
+
+  **The cost is stored as billed at the time**, not recomputed from today's prices --
+  the same argument that keeps the price out of the code in #64, one step along: a
+  price change must not rewrite what a past call was charged.
+
+  **Three arguments in `docker-compose.yml` that are decisions rather than tuning.**
+  `--save "" --appendonly no`, because a cache whose loss costs one model call should
+  not write disk, and no volume for the same reason. `--maxmemory 64mb`, so a runaway
+  cannot take the machine. And `--maxmemory-policy allkeys-lru`, because the default
+  is `noeviction`, which answers a full cache with an error on **every** SET -- which
+  this service would swallow and log for ever while never caching anything again,
+  which is precisely the silent failure #65 exists to end. **Nothing `depends_on` it**:
+  a Redis that is not up yet is a cache miss, and making the categorizer wait for it
+  would turn an optimisation into a start-up dependency.
+
+  **`CATEGORIZER_REDIS_URL` is defaulted on in compose although the everyday loop
+  runs the rules**, which is safe by construction rather than by care --
+  `cache_from_env` is called from `AnthropicPredictor.from_env` and nowhere else, so
+  the rules branch never reads it. Switching one variable to `model` then gets the
+  cache with no second edit.
+
+  **`redis>=8.1`, and the major is load-bearing for the fifth time** after #22, #24,
+  #39 and #59: from memory this is 5.x, and 8.1.0 is what PyPI answered on the day.
+  What lost: `redis[hiredis]`, a native build in an image that has none, to parse one
+  short JSON string; the RESP protocol by hand, which is pooling, timeouts and
+  reconnection written here instead; and a dict in memory, which loses to the issue
+  itself -- this container scales to zero (#61), so a process-local cache is empty
+  again about fourteen minutes after anybody stops using it, which is exactly the
+  fortnightly spending session this is meant to make cheap.
+
+  **No Redis is deployed, deliberately, and it is a cost line rather than an
+  oversight.** The deployed categorizer runs `rules` (#61), and a cache in front of a
+  predictor that is not running is a monthly charge for nothing. So flipping that
+  variable is now three things and not one -- the key as a secret, a cache, and #64's
+  price variables -- and `ci.yml` refuses a deployment that is `model` with no
+  `CATEGORIZER_REDIS_URL`, because that combination is billed per save for ever and
+  looks exactly like a working deployment. What the cache would cost, read on
+  2026-08-29 and to be re-read rather than trusted: **Azure Cache for Redis Basic C0
+  is around 16 USD a month**, the same order as the whole Postgres bill slice 3 faces
+  when the free year ends (#34), for a service one person uses weekly. The
+  arithmetic to do *before* provisioning anything is whether the per-call bill is
+  simply smaller than that -- and #64 already logs the tokens it needs.
+
+  **Checked by breaking it, per #21: fourteen mutations, one at a time, reverted
+  from a file copy rather than from memory.** All fourteen were caught. Four are
+  worth keeping. Folding case in the key is the one this whole feature is shaped
+  around and it dies on a parametrised test that exists for nothing else. Leaving
+  `decode_responses=True` out of the client is the one that would have shipped
+  looking correct -- a cache that is green, correct and never hits -- and it is
+  caught by asserting the kwargs the client is built with, because no stub can see
+  it. Leaving failures out of the hit-rate denominator reports a healthy 100% for a
+  Redis that answered once and was down all day. And caching an answer the adapter
+  threw away is the mutation somebody would actually write while tidying, since it
+  reads as one more thing worth remembering.
+
+  **CI gains no Redis service container, and that is a property being protected.**
+  The tests reach the cache through a stub client the same way #59's reach the SDK,
+  so a test that forgot to pass one fails to construct rather than quietly connecting
+  to whatever is listening on 6379.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as

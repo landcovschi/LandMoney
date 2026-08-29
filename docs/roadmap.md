@@ -909,7 +909,17 @@ the thing that produced the number can be shown.
 
 ## Slice 5 -- operations
 
-- [ ] Redis: identical input must not be billed twice
+- [x] Redis: identical input must not be billed twice -- #65, 2026-08-29. The
+      model's answers are cached in Redis, keyed on the model id, the effort, the
+      prompt's digest and **the exact text the model was shown**, with nothing
+      normalised -- a fold that existed only in the cache path would be #39's
+      caught mutation in a new coat. What a call cost is stored beside the answer,
+      and one line per lookup carries the running hit rate. **Only the model path
+      has a cache**: measured over HTTP with the rules answering, five requests
+      opened zero Redis connections and wrote zero keys. A dead Redis is a model
+      call and never a missing category -- and after the first failure it stops
+      asking for thirty seconds, which took a stopped container from **1055 ms
+      added to every save** down to 531 ms once and 0 ms after
 - [ ] pgvector: find similar past transactions
 - [x] Token and cost accounting per request -- #64, 2026-08-29. The Python
       adapter logs one `model_call` line per call carrying the outcome, the

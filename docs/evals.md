@@ -404,6 +404,18 @@ measured instead of silently agreeing.
 missed, provided that is said out loud; nothing was tuned, and the number below
 is the first and only configuration that was run.
 
+**Both runs were live calls, and since #65 that is something the scorer enforces
+rather than something the day happened to be.** The service now caches model
+answers in Redis so an identical description is not billed twice, and
+`score.py` erases `CATEGORIZER_REDIS_URL` from the environment it hands the
+adapter unless `--cache` is passed. It has to erase rather than merely not pass
+it, because the sanctioned way to run this with a real key is
+`set -a; . ./.env; set +a`, which exports everything in the file. The reason is
+the sentence above about two identical runs: they stop being evidence of anything
+the moment the second one can read the first. A cached run is still worth having
+after a change to the *scorer* -- that is what the flag is for -- and it is never
+what a recorded number may come from.
+
 ### The number
 
 ```
