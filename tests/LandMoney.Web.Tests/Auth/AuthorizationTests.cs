@@ -116,6 +116,28 @@ public class AuthorizationTests
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    // #67. The suggestion endpoint is inside the group RequireAuthorization is
+    // applied to, and this is the assertion that it stayed there. It matters more
+    // than the shape of the endpoint suggests: it is the one route in this
+    // application that spends money on behalf of whoever calls it, since against a
+    // model every request is a charge, and it writes nothing -- so an unauthorized
+    // one would leave no trace anywhere except a bill.
+    //
+    // The body is one that would be answered if it reached the handler, which is
+    // what makes a 200 here as bad as a 500.
+    [Fact]
+    public async Task An_anonymous_category_suggestion_is_refused()
+    {
+        using var app = TestApp.WithInviteCode();
+        using var client = app.CreateNonFollowingClient();
+
+        var response = await client.PostAsJsonAsync(
+            "/api/transactions/category-suggestion",
+            new { amount = 42.50m, currency = "EUR", description = "Lidl" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     // The behaviour that changed when sign-in became a form. Under OpenID Connect
     // this endpoint required authorization and answered 302 to the provider; now it
     // has to serve the shell to a signed-out visitor, because the shell is what

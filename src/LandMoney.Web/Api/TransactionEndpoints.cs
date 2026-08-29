@@ -63,6 +63,23 @@ public static class TransactionEndpoints
         group.MapPatch("/{id:guid}", UpdateCategoryAsync)
             .AddEndpointFilter<ValidationFilter<UpdateCategoryRequest>>();
 
+        // #67. A POST that writes nothing, which is the one thing about it worth
+        // arguing over. A GET reads better for a question -- it is idempotent, it
+        // is cacheable, and "does not write anything" is exactly what the method
+        // means -- and it lost twice over. The description would travel in a query
+        // string, so one person's spending would be written into every access log
+        // between here and the process, which is the rule #64 keeps for log lines
+        // and metric tags arriving at a URL. And a GET is a top-level navigation, so
+        // the SameSite=Lax cookie is sent with it: AuthenticationSetup.cs records
+        // two CSRF locks and a JSON POST keeps both, where a GET keeps neither.
+        //
+        // The literal segment cannot be shadowed by the PATCH above -- different
+        // method, and {id:guid} would not match this word in any case -- but it is
+        // registered after it deliberately, so the file reads in the order #20
+        // established: the specific routes, then the parameterised one.
+        group.MapPost("/category-suggestion", SuggestCategoryAsync)
+            .AddEndpointFilter<ValidationFilter<CategorySuggestionRequest>>();
+
         return group;
     }
 
@@ -164,6 +181,48 @@ public static class TransactionEndpoints
         // it to point at -- a URL that 404s would be worse than an absent header.
         // The cast picks the string? overload; without it the call is ambiguous.
         return TypedResults.Created((string?)null, ToResponse(transaction));
+    }
+
+    /// <summary>#67. What the categorizer would say, for a transaction nobody has saved.</summary>
+    // The only endpoint in this application that touches neither Postgres nor
+    // anything on disk: it takes three fields, asks one question and answers it.
+    // Worth knowing because it is also the only one whose behaviour can be checked
+    // end to end without a database -- and because it means a suggestion cannot
+    // slow, lock or fail a save. #67's "a suggestion must never delay or block the
+    // save" is answered structurally here rather than by care: there is no save on
+    // this path to delay.
+    //
+    // **It does not remember the answer, and the save asks again.** So what the
+    // screen shows and what the row ends up holding are two calls, not one. The
+    // alternative was to let the client send back the category it was shown, which
+    // is one call instead of two and guarantees they agree -- and it lost on
+    // provenance: a client that can send a category can send a source, and a row
+    // claiming `model` because a browser said so is precisely the hole
+    // transactions.category_source was added in #59 to close. UpdateCategoryRequest
+    // makes the same call in the same words, and the rules agreeing is what makes
+    // the two answers agree in practice: the deployed predictor is deterministic
+    // (#61), and the model's is keyed on exactly these three fields in the cache
+    // #65 built.
+    //
+    // The currency is uppercased here, which looks cosmetic and is not: CreateAsync
+    // does it before it asks, so a preview that did not would send a different
+    // string, miss that cache and be able to answer differently from the save that
+    // follows it.
+    private static async Task<Ok<CategorySuggestionResponse>> SuggestCategoryAsync(
+        CategorySuggestionRequest request,
+        CategorizerClient categorizer,
+        CancellationToken cancellationToken)
+    {
+        var answer = await categorizer.PreviewCategoryAsync(
+            request.Description,
+            request.Amount,
+            request.Currency.ToUpperInvariant(),
+            cancellationToken);
+
+        // Answered whole rather than reduced to a category, because the absence of
+        // one has two meanings on this path and only one of them is worth showing.
+        // See CategorySuggestionResponse.
+        return TypedResults.Ok(new CategorySuggestionResponse(answer.Category, answer.Source));
     }
 
     private static async Task<Ok<IReadOnlyList<TransactionResponse>>> ListAsync(

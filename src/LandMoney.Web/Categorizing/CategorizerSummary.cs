@@ -103,7 +103,7 @@ public sealed class CategorizerSummary(
             // than "calls" below, because a window of one is common on a service
             // used weekly and "1 calls" is the sort of thing that makes a reader
             // trust a number less than it deserves.
-            "Categorizer over the last {WindowSeconds:F0}s: {Calls} recorded -- "
+            "Categorizer over the last {WindowSeconds:F0}s: {Calls} recorded ({ByKind}) -- "
             + "{Suggested} suggested ({BySource}), {Abstained} abstained, {Refused} refused, "
             + "{Timeout} timed out, {Unreachable} unreachable, {Unreadable} unreadable, "
             + "{Unusable} unusable, {NotConfigured} with no categorizer configured, "
@@ -111,6 +111,7 @@ public sealed class CategorizerSummary(
             + "Latency over {Measured} of them: p50 {P50Ms:F0}ms, p95 {P95Ms:F0}ms, max {MaxMs:F0}ms.",
             window.Length.TotalSeconds,
             window.Calls,
+            ByKind(window),
             Count(window, CategorizerOutcome.Suggested),
             BySource(window),
             Count(window, CategorizerOutcome.Abstained),
@@ -142,6 +143,19 @@ public sealed class CategorizerSummary(
 
     private static long Count(CategorizerWindow window, string outcome) =>
         window.ByOutcome.GetValueOrDefault(outcome);
+
+    /// <summary>What asked for those calls, as one field. #67.</summary>
+    // Every kind is printed, including the ones that did not happen, which is the
+    // opposite of what BySource below does. The reason for the difference is who
+    // owns the vocabulary: there are exactly two kinds and this application chose
+    // both, so "preview=0" is a fact worth reading -- it says the screen asked for
+    // nothing, which after #67 shipped is a symptom. A source that did not answer
+    // is not a fact about anything, because the set of producers belongs to the
+    // other process.
+    private static string ByKind(CategorizerWindow window) =>
+        string.Join(
+            ", ",
+            CategorizerKind.All.Select(kind => $"{kind}={window.ByKind.GetValueOrDefault(kind)}"));
 
     /// <summary>The suggested calls split by who produced them, as one field.</summary>
     // A string rather than a placeholder per source, because the set is decided by

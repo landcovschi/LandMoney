@@ -15,6 +15,41 @@ namespace LandMoney.Web.Categorizing;
 // check separately.
 public sealed record CategorySuggestion(string Category, string Source);
 
+/// <summary>Everything one call produced: who answered, and what they said.</summary>
+// #67. The save path has never needed this -- an abstention and a dead service
+// both mean "store no category", which is why <see cref="CategorySuggestion"/>?
+// was enough for two issues. A suggestion shown while a description is typed
+// needs them apart: the issue asks for "no idea" to be *visible*, because it is a
+// normal answer on roughly a third of the labelled set, and for a categorizer
+// that is not there to be *invisible*. Both are the same null in the database and
+// the same null on the wire from the Python service, so the distinction has to be
+// carried here or it is lost.
+//
+// Three states, and the source is what separates them:
+//
+//   Category and Source set -- a suggestion.
+//   Source set, Category null -- something answered and declined to categorise.
+//   both null -- there was no answer this application will use: nothing is
+//     configured, nothing is there, it was too slow, or it broke its own contract.
+//
+// The last line is why an unusable body reports as no answer rather than as an
+// abstention. A category over the column's width is not a declining service, but
+// it is not an answer either, and "rules had no idea" is a sentence this
+// application would be inventing.
+public sealed record CategorizerAnswer(string? Category, string? Source)
+{
+    /// <summary>Nothing to be had, however that came about.</summary>
+    public static readonly CategorizerAnswer Nothing = new(null, null);
+
+    /// <summary>The suggestion, when there is a category and something to credit it to.</summary>
+    // What the save path takes, and the reason that path did not have to change
+    // for #67: it asks for the same shape it has always asked for, and the two
+    // fields are non-null together or absent together the way #59 requires --
+    // a category whose producer cannot be named is not stored.
+    public CategorySuggestion? Suggestion =>
+        Category is not null && Source is not null ? new CategorySuggestion(Category, Source) : null;
+}
+
 /// <summary>Asks the Python categorizer for a category, and never lets it stop a save.</summary>
 // A typed client -- registered with AddHttpClient&lt;CategorizerClient&gt;, so the
 // HttpClient handed in is a short-lived wrapper over a pooled, rotated
@@ -55,17 +90,46 @@ public sealed class CategorizerClient(
     // about the library's version, and the contract is a fact about the service.
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    /// <summary>The suggestion, or null if there is not one to be had.</summary>
+    /// <summary>The suggestion for a transaction about to be stored, or null.</summary>
     /// <remarks>
     /// Null covers four different events and the caller treats them the same: the
     /// predictor abstained, the service answered something unusable, it could not
     /// name what produced the answer, or it was not there at all. Only the first is
     /// visible in a response, and nothing stores which it was.
     /// </remarks>
+    // Kept at exactly the signature #39 gave it, although #67 made the inside
+    // answer something richer. The create path wants a suggestion or nothing, and
+    // handing it a three-state answer to unpack would put the question "did the
+    // service answer" at a call site that has nothing to do with it.
     public async Task<CategorySuggestion?> SuggestCategoryAsync(
         string description,
         decimal amount,
         string currency,
+        CancellationToken cancellationToken)
+        => (await AskAsync(description, amount, currency, CategorizerKind.Save, cancellationToken))
+            .Suggestion;
+
+    /// <summary>What the categorizer says about a description being typed. #67.</summary>
+    /// <remarks>
+    /// Nothing here is stored, so this is the one caller that can tell an
+    /// abstention from an absence and has a reason to: the first is shown as "no
+    /// idea", which is a real answer, and the second is shown as nothing at all.
+    /// </remarks>
+    public Task<CategorizerAnswer> PreviewCategoryAsync(
+        string description,
+        decimal amount,
+        string currency,
+        CancellationToken cancellationToken)
+        => AskAsync(description, amount, currency, CategorizerKind.Preview, cancellationToken);
+
+    // One body for both, and the two public methods above are the only places the
+    // kind is chosen -- so a call site cannot label a save as a preview, which is
+    // the mistake that would quietly make #64's numbers describe something else.
+    private async Task<CategorizerAnswer> AskAsync(
+        string description,
+        decimal amount,
+        string currency,
+        string kind,
         CancellationToken cancellationToken)
     {
         // No base address means no categorizer is configured, which Program.cs
@@ -88,8 +152,8 @@ public sealed class CategorizerClient(
             // every single save between #39 and #61, and nothing anywhere reported
             // it. A figure on this line separates "the categorizer answers nothing"
             // from "there is no categorizer".
-            metrics.Record(CategorizerOutcome.NotConfigured, source: null, elapsed: null);
-            return null;
+            metrics.Record(CategorizerOutcome.NotConfigured, source: null, kind, elapsed: null);
+            return CategorizerAnswer.Nothing;
         }
 
         // Read on every path since #64 -- a latency figure that covered only the
@@ -114,50 +178,13 @@ public sealed class CategorizerClient(
                 // on this side rather than anything to show a user -- the status
                 // is what a log needs in order to find it.
                 logger.LogWarning(
-                    "Categorizer {Outcome}: answered {StatusCode}; storing the transaction with no category.",
-                    CategorizerOutcome.Refused, (int)response.StatusCode);
-                metrics.Record(CategorizerOutcome.Refused, source: null, Stopwatch.GetElapsedTime(started));
-                return null;
+                    "Categorizer {Kind} {Outcome}: answered {StatusCode}; there is no category.",
+                    kind, CategorizerOutcome.Refused, (int)response.StatusCode);
+                metrics.Record(CategorizerOutcome.Refused, source: null, kind, Stopwatch.GetElapsedTime(started));
+                return CategorizerAnswer.Nothing;
             }
 
             var body = await response.Content.ReadFromJsonAsync<CategorizeResponse>(Json, cancellationToken);
-
-            // Abstention. A 200 with a null category is the baseline working as
-            // designed -- it declines on roughly a third of the labelled set -- so
-            // it is not a warning and not an error.
-            if (body?.Category is not { Length: > 0 } category)
-            {
-                // Counted, and counted under its own name. On the wire this is the
-                // same `null` a dead service produces, and #64's third acceptance
-                // test is that the two numbers must never be one number: a
-                // categorizer that declines everything and a categorizer that is
-                // not answering look identical from the database and are entirely
-                // different problems.
-                //
-                // Still no log line. An abstention is the baseline working as
-                // designed on roughly a third of the labelled set, and a warning
-                // per save would be noise that trains a reader to skip the ones
-                // that matter. The count is the record.
-                metrics.Record(CategorizerOutcome.Abstained, source: null, Stopwatch.GetElapsedTime(started));
-                return null;
-            }
-
-            // The one guard here that is not about the network, and the one that
-            // would otherwise break the promise this class exists for.
-            // Transaction.Category is MaxLength(100); a service answering
-            // something longer would make SaveChangesAsync throw, and the
-            // transaction the user typed would be lost to a failed guess about it.
-            // Refusing the answer keeps the failure inside the part that is
-            // allowed to fail.
-            if (category.Length > Transaction.CategoryMaxLength)
-            {
-                logger.LogWarning(
-                    "Categorizer {Outcome}: answered a category of {Length} characters, over the {Max} "
-                    + "the column holds; storing the transaction with no category.",
-                    CategorizerOutcome.Unusable, category.Length, Transaction.CategoryMaxLength);
-                metrics.Record(CategorizerOutcome.Unusable, source: null, Stopwatch.GetElapsedTime(started));
-                return null;
-            }
 
             // #59. A category whose producer cannot be named is refused outright,
             // and this is the guard that most looks like over-caution and is not.
@@ -170,14 +197,25 @@ public sealed class CategorizerClient(
             // Note this is reachable only if the service breaks its own contract:
             // contracts.py declares `source` non-optional and FastAPI will not
             // serialise a response without it.
-            if (body.Source is not { Length: > 0 } source)
+            //
+            // **It moved above the abstention in #67, and the order is the
+            // contract.** `source` is what says something answered at all, so it
+            // has to be established before the answer is read -- an abstention
+            // this application cannot attribute is indistinguishable from a
+            // service that is not there, which is exactly the distinction the
+            // preview path exists to make. What that changes, on a path
+            // FastAPI cannot produce: a 200 carrying neither a category nor a
+            // source is now `unusable` rather than `abstained`. That is the more
+            // truthful of the two -- an answer with nothing in it is a broken
+            // contract, not a predictor declining.
+            if (body?.Source is not { Length: > 0 } source)
             {
                 logger.LogWarning(
-                    "Categorizer {Outcome}: answered the category {Category} without naming a source; "
-                    + "storing the transaction with no category.",
-                    CategorizerOutcome.Unusable, category);
-                metrics.Record(CategorizerOutcome.Unusable, source: null, Stopwatch.GetElapsedTime(started));
-                return null;
+                    "Categorizer {Kind} {Outcome}: answered the category {Category} without naming a "
+                    + "source; the answer is refused.",
+                    kind, CategorizerOutcome.Unusable, body?.Category);
+                metrics.Record(CategorizerOutcome.Unusable, source: null, kind, Stopwatch.GetElapsedTime(started));
+                return CategorizerAnswer.Nothing;
             }
 
             // The same guard as the one above, for the same reason, against a
@@ -186,16 +224,66 @@ public sealed class CategorizerClient(
             if (source.Length > Transaction.CategorySourceMaxLength)
             {
                 logger.LogWarning(
-                    "Categorizer {Outcome}: named a source of {Length} characters, over the {Max} "
-                    + "the column holds; storing the transaction with no category.",
-                    CategorizerOutcome.Unusable, source.Length, Transaction.CategorySourceMaxLength);
+                    "Categorizer {Kind} {Outcome}: named a source of {Length} characters, over the {Max} "
+                    + "the column holds; the answer is refused.",
+                    kind, CategorizerOutcome.Unusable, source.Length, Transaction.CategorySourceMaxLength);
                 // Deliberately not tagged with the source it sent. It is over a
                 // hundred characters of something this application does not
                 // recognise, and a metric dimension is the last place to put a
                 // string another process chose -- #64's first trap, which is about
                 // the description and is the same trap here.
-                metrics.Record(CategorizerOutcome.Unusable, source: null, Stopwatch.GetElapsedTime(started));
-                return null;
+                metrics.Record(CategorizerOutcome.Unusable, source: null, kind, Stopwatch.GetElapsedTime(started));
+                return CategorizerAnswer.Nothing;
+            }
+
+            // Abstention. A 200 with a null category is the baseline working as
+            // designed -- it declines on roughly a third of the labelled set -- so
+            // it is not a warning and not an error.
+            if (body.Category is not { Length: > 0 } category)
+            {
+                // Counted, and counted under its own name. On the wire this is the
+                // same `null` a dead service produces, and #64's third acceptance
+                // test is that the two numbers must never be one number: a
+                // categorizer that declines everything and a categorizer that is
+                // not answering look identical from the database and are entirely
+                // different problems.
+                //
+                // Still no log line. An abstention is the baseline working as
+                // designed on roughly a third of the labelled set, and a warning
+                // per save would be noise that trains a reader to skip the ones
+                // that matter. The count is the record.
+                //
+                // **`source: null` although the source is known here, and returned
+                // one line down.** The tally it feeds is rendered beside the
+                // suggested count -- "8 suggested (rules=8)" -- so it answers "what
+                // produced the categories", and counting declines in it would make
+                // that line report more producers than categories. The word still
+                // reaches the caller, which is where #67 needs it.
+                metrics.Record(CategorizerOutcome.Abstained, source: null, kind, Stopwatch.GetElapsedTime(started));
+                return new CategorizerAnswer(null, source);
+            }
+
+            // The one guard here that is not about the network, and the one that
+            // would otherwise break the promise this class exists for.
+            // Transaction.Category is MaxLength(100); a service answering
+            // something longer would make SaveChangesAsync throw, and the
+            // transaction the user typed would be lost to a failed guess about it.
+            // Refusing the answer keeps the failure inside the part that is
+            // allowed to fail.
+            if (category.Length > Transaction.CategoryMaxLength)
+            {
+                logger.LogWarning(
+                    "Categorizer {Kind} {Outcome}: answered a category of {Length} characters, over the {Max} "
+                    + "the column holds; the answer is refused.",
+                    kind, CategorizerOutcome.Unusable, category.Length, Transaction.CategoryMaxLength);
+                metrics.Record(CategorizerOutcome.Unusable, source: null, kind, Stopwatch.GetElapsedTime(started));
+
+                // Nothing, and not an abstention carrying the source. The service
+                // did answer and could be named, so an argument for reporting
+                // "{source} had no idea" exists -- and it would be this application
+                // putting words in another process's mouth. It had an idea; this
+                // side will not use it.
+                return CategorizerAnswer.Nothing;
             }
 
             // Stored verbatim, neither trimmed nor lower-cased, which is the same
@@ -210,10 +298,10 @@ public sealed class CategorizerClient(
             // for ever. CategorizerMetrics.Label is where the bounding happens.
             var elapsed = Stopwatch.GetElapsedTime(started);
             logger.LogInformation(
-                "Categorizer {Outcome}: {Category} by {Source} in {ElapsedMs:F0}ms.",
-                CategorizerOutcome.Suggested, category, source, elapsed.TotalMilliseconds);
-            metrics.Record(CategorizerOutcome.Suggested, source, elapsed);
-            return new CategorySuggestion(category, source);
+                "Categorizer {Kind} {Outcome}: {Category} by {Source} in {ElapsedMs:F0}ms.",
+                kind, CategorizerOutcome.Suggested, category, source, elapsed.TotalMilliseconds);
+            metrics.Record(CategorizerOutcome.Suggested, source, kind, elapsed);
+            return new CategorizerAnswer(category, source);
         }
         // The timeout, and recognising it takes the `when` clause. HttpClient
         // implements Timeout by cancelling the request, so what surfaces is
@@ -238,9 +326,9 @@ public sealed class CategorizerClient(
         {
             var elapsed = Stopwatch.GetElapsedTime(started);
             logger.LogWarning(
-                "Categorizer {Outcome}: no answer, gave up after {ElapsedMs:F0}ms (overall timeout {Timeout}, "
-                + "so a shorter connect timeout fired if that is less). Storing the transaction with no category.",
-                CategorizerOutcome.Timeout, elapsed.TotalMilliseconds, http.Timeout);
+                "Categorizer {Kind} {Outcome}: no answer, gave up after {ElapsedMs:F0}ms (overall timeout "
+                + "{Timeout}, so a shorter connect timeout fired if that is less). There is no category.",
+                kind, CategorizerOutcome.Timeout, elapsed.TotalMilliseconds, http.Timeout);
             // #64 names this as the outcome easiest to label wrongly, and the
             // labelling is done by the `when` clause above rather than here. A
             // stopped container leaves the SYN unanswered instead of refusing it
@@ -248,8 +336,8 @@ public sealed class CategorizerClient(
             // "the categorizer is stopped" counts as three timeouts, not as three
             // unreachables, and that is the correct answer rather than a rounding
             // of one.
-            metrics.Record(CategorizerOutcome.Timeout, source: null, elapsed);
-            return null;
+            metrics.Record(CategorizerOutcome.Timeout, source: null, kind, elapsed);
+            return CategorizerAnswer.Nothing;
         }
         // The caller went away. The exception is rethrown -- saving a transaction
         // for a request that no longer exists is what the clause above exists to
@@ -260,7 +348,7 @@ public sealed class CategorizerClient(
         // one.
         catch (OperationCanceledException)
         {
-            metrics.Record(CategorizerOutcome.Abandoned, source: null, Stopwatch.GetElapsedTime(started));
+            metrics.Record(CategorizerOutcome.Abandoned, source: null, kind, Stopwatch.GetElapsedTime(started));
             throw;
         }
         // Unreachable, refused, DNS failure, connection reset. The expected one
@@ -270,10 +358,10 @@ public sealed class CategorizerClient(
         {
             logger.LogWarning(
                 exception,
-                "Categorizer {Outcome}: storing the transaction with no category.",
-                CategorizerOutcome.Unreachable);
-            metrics.Record(CategorizerOutcome.Unreachable, source: null, Stopwatch.GetElapsedTime(started));
-            return null;
+                "Categorizer {Kind} {Outcome}: there is no category.",
+                kind, CategorizerOutcome.Unreachable);
+            metrics.Record(CategorizerOutcome.Unreachable, source: null, kind, Stopwatch.GetElapsedTime(started));
+            return CategorizerAnswer.Nothing;
         }
         // A 200 whose body is not the contract: malformed JSON (JsonException), or
         // a content type the reader will not take, such as an HTML error page from
@@ -283,10 +371,10 @@ public sealed class CategorizerClient(
         {
             logger.LogWarning(
                 exception,
-                "Categorizer {Outcome}: the body was not the contract; storing the transaction with no category.",
-                CategorizerOutcome.Unreadable);
-            metrics.Record(CategorizerOutcome.Unreadable, source: null, Stopwatch.GetElapsedTime(started));
-            return null;
+                "Categorizer {Kind} {Outcome}: the body was not the contract; there is no category.",
+                kind, CategorizerOutcome.Unreadable);
+            metrics.Record(CategorizerOutcome.Unreadable, source: null, kind, Stopwatch.GetElapsedTime(started));
+            return CategorizerAnswer.Nothing;
         }
     }
 }

@@ -15,11 +15,21 @@ public class CategorizerMetricsTests
         new(new ServiceCollection().AddMetrics().BuildServiceProvider().GetRequiredService<IMeterFactory>(),
             TimeProvider.System);
 
-    private static void RecordCalls(CategorizerMetrics metrics, string outcome, params double[] milliseconds)
+    private static void RecordCalls(
+        CategorizerMetrics metrics,
+        string outcome,
+        params double[] milliseconds)
+        => RecordCalls(metrics, outcome, CategorizerKind.Save, milliseconds);
+
+    private static void RecordCalls(
+        CategorizerMetrics metrics,
+        string outcome,
+        string kind,
+        params double[] milliseconds)
     {
         foreach (var ms in milliseconds)
         {
-            metrics.Record(outcome, source: null, TimeSpan.FromMilliseconds(ms));
+            metrics.Record(outcome, source: null, kind, TimeSpan.FromMilliseconds(ms));
         }
     }
 
@@ -97,7 +107,7 @@ public class CategorizerMetricsTests
         // milliseconds -- a healthy-looking number for the least healthy state
         // there is.
         var metrics = NewMetrics();
-        metrics.Record(CategorizerOutcome.NotConfigured, source: null, elapsed: null);
+        metrics.Record(CategorizerOutcome.NotConfigured, source: null, CategorizerKind.Save, elapsed: null);
 
         var window = metrics.TakeWindow();
 
@@ -142,5 +152,45 @@ public class CategorizerMetricsTests
         Assert.Equal(1025, window.Calls);
         Assert.Equal(1024, window.Measured);
         Assert.Equal(1, window.Dropped);
+    }
+
+    [Fact]
+    public void The_two_paths_are_counted_apart_and_the_outcomes_are_not()
+    {
+        // #67. A preview fails in the same nine ways a save does, so the outcomes
+        // are one set of counters -- what could not be recovered from anywhere else
+        // is how many calls each path made, because from here on the previews are
+        // the majority and against the model each of them is a charge.
+        var metrics = NewMetrics();
+        RecordCalls(metrics, CategorizerOutcome.Suggested, CategorizerKind.Save, 10);
+        RecordCalls(metrics, CategorizerOutcome.Suggested, CategorizerKind.Preview, 10, 12, 14);
+        RecordCalls(metrics, CategorizerOutcome.Abstained, CategorizerKind.Preview, 8);
+
+        var window = metrics.TakeWindow();
+
+        Assert.NotNull(window);
+        Assert.Equal(5, window.Calls);
+        Assert.Equal(1, window.ByKind[CategorizerKind.Save]);
+        Assert.Equal(4, window.ByKind[CategorizerKind.Preview]);
+
+        // Both paths, in one number, on purpose: four suggestions happened and only
+        // one of them became a row.
+        Assert.Equal(4, window.ByOutcome[CategorizerOutcome.Suggested]);
+    }
+
+    [Fact]
+    public void A_window_with_only_saves_in_it_still_knows_what_a_preview_is()
+    {
+        // The half of the rendering that is easy to get wrong: an absent kind has
+        // to read as zero rather than as absent, because "the screen asked for
+        // nothing" is a symptom after #67 shipped and is invisible if the field is
+        // simply missing from the line.
+        var metrics = NewMetrics();
+        RecordCalls(metrics, CategorizerOutcome.Suggested, CategorizerKind.Save, 10);
+
+        var window = metrics.TakeWindow();
+
+        Assert.NotNull(window);
+        Assert.Equal(0, window.ByKind.GetValueOrDefault(CategorizerKind.Preview));
     }
 }

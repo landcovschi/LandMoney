@@ -2574,6 +2574,144 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   with retrieval either: 53 calls to move a number by at most 1.1 points is the
   reading to buy **after** #47, not before.
 
+- **The suggestion while typing: `POST /api/transactions/category-suggestion`, a
+  400 ms debounce, and a badge under the description field -- decided 2026-08-29**
+  (#67). `src/LandMoney.Web/Categorizing/CategorizerKind.cs` names what asked;
+  `src/landmoney.client/src/hooks/useCategorySuggestion.ts` is the client half.
+  34 new tests, and they still need no Postgres, no Docker and no network.
+
+  **What it fixes is that the one visibly intelligent thing in this application was
+  invisible.** The category arrived after the save, in a table row, with nothing
+  saying anything had thought about it.
+
+  **A POST that writes nothing, and the method is the decision.** A GET reads
+  better for a question -- idempotent, cacheable, and "does not write anything" is
+  what it means -- and it loses twice. The description would travel in a query
+  string and into every access log between the browser and the process, which is
+  #64's rule about keeping the user's spending out of a log, arriving at a URL. And
+  a GET is a top-level navigation, so the `SameSite=Lax` cookie goes with it: #52
+  records two CSRF locks and a JSON POST keeps both where a GET keeps neither.
+
+  **The browser may not call the categorizer**, which is what forces an endpoint
+  here at all: it is internal-only with no public ingress (#61), and it is
+  unauthenticated, so anything that could reach it directly would be somebody
+  else's Anthropic bill.
+
+  **`CategorizerClient` had to learn a distinction the save path never needed, and
+  it is the substance of the change.** An abstention and a dead service are both
+  null there, correctly -- neither stores a category. Here they are two different
+  screens: "no idea" is a normal answer on roughly a third of the labelled set and
+  has to be *visible*, while a categorizer that is not running has to be
+  *invisible*, because there is nothing the person typing could do about it. On the
+  wire from the Python service both are one `null`, so `CategorizerAnswer` carries
+  who answered beside what they said, and **the source is what says something
+  answered at all**. That is why the source guard moved above the abstention: on a
+  path FastAPI cannot produce -- a 200 with neither field -- the outcome is now
+  `unusable` rather than `abstained`, which is the more truthful of the two.
+
+  An answer this side refuses (a category longer than the column) reports as
+  *nothing* rather than as an abstention, although the source is right there. It
+  had an idea; this side will not use it, and "rules had no idea" would be this
+  application putting words in another process's mouth.
+
+  **The save asks again, and does not take the answer from the browser.** So the
+  screen and the row are two calls. What lost is one call and a guarantee they
+  agree -- and it lost on provenance: a client that can send a category can send a
+  source, and a row claiming `model` because a browser said so is exactly the hole
+  `transactions.category_source` was added in #59 to close. `UpdateCategoryRequest`
+  already makes the same call in the same words. What makes the two answers agree
+  in practice is that the deployed predictor is deterministic (#61) and the model's
+  is keyed on these three fields in #65's cache -- which is why the endpoint
+  uppercases the currency before asking, exactly as `CreateAsync` does. A preview
+  sending `eur` would miss the entry the save writes under `EUR`, pay twice, and be
+  free to answer differently.
+
+  **The calls are now counted by what asked for them**, which is #64 being kept
+  honest rather than an addition to it. From here on the previews are the majority
+  and against the model each one is a charge, so "12 recorded" without the split
+  would read as twelve transactions. `kind` is a dimension and not a second set of
+  counters: a preview fails in the same nine ways a save does. What that
+  deliberately does not do is split the *outcomes* by kind -- "did saves get
+  categories" is a query over the per-call lines, which carry both words, and the
+  number that could not be recovered from anywhere else is in the summary. Every
+  kind is printed including a zero, unlike `BySource`, because there are exactly
+  two and both are this application's: `preview=0` says the screen asked for
+  nothing, which after this shipped is a symptom.
+
+  **`CategorySuggestionRequest` copies `CreateTransactionRequest`'s rules and has
+  no date.** The date is absent because a day tells a predictor nothing and a field
+  an endpoint does not read is a field a caller can be refused for getting wrong --
+  a mistyped year would otherwise stop the suggestion appearing for a reason
+  unrelated to the description. The rules are copied because they exist here for a
+  different reason: not to protect a column, but to keep the outbound request
+  inside what `CategorizeRequest` in `contracts.py` accepts, since an amount waved
+  through here comes back as a 422 that reads like the categorizer misbehaving.
+  Shared constants were the alternative and remove the literal duplication without
+  removing the risk, which is a rule added to one and forgotten on the other;
+  `CategorySuggestionRequestTests` reads both types by reflection and fails naming
+  them, which is the answer `CategoriesTests` already gives to the same problem.
+
+  **On the client: no `asking` state and no `failed` state**, and both absences are
+  decisions. A failure shows exactly what a suggestion nobody asked for shows,
+  which is nothing -- #67's third acceptance test, and the same promise
+  `CategorizerClient` makes on the server. A "thinking..." line would flash for
+  four milliseconds against the deployed rules and would sit on screen for the
+  whole timeout against a categorizer that is not there, then vanish: an indicator
+  asking the reader to wait for something they are never going to be given.
+
+  **The out-of-order response is answered by the effect's cleanup**, which aborts
+  the request the previous keystroke started, and by an `aborted` check before the
+  `setState` -- the one gap the abort itself does not close, where the response has
+  already resolved. StrictMode's double-run is the free test of it and costs no
+  request at all, because the first run's debounce timer is cleared before it
+  fires. The dependencies are the three values and never an object built from them:
+  a literal is a new reference every render, and the effect would fire on every
+  keystroke anywhere in the form.
+
+  **The previous suggestion stays visible while a newer one is on the way**, which
+  is the one thing here that is deliberately a beat out of date. Clearing per
+  keystroke flickers, and nothing is stored from this path -- the answer that
+  decides the row is the server's at save time.
+
+  **5 seconds, not the client's usual 10.** That constant is a backstop against a
+  hang; this is a deadline on an answer whose whole value is that it arrives while
+  the description is still on screen. What it costs, said out loud: the first
+  request after an idle spell pays a cold start (23.3 s for the app, #35, and the
+  categorizer scales to zero too, #61), so it times out and the field shows
+  nothing.
+
+  **This is the first endpoint in the application that can be tested end to end**,
+  because it touches no database -- routing, the authorization group, binding,
+  `ValidationFilter`, the handler and `CategorizerClient` are asserted against
+  bytes. Two seams are stubbed for opposite reasons: the categorizer to control
+  what it answers, and authentication because the alternative is `UserManager`,
+  which is Postgres, which is the property #22 defends. `TestApp` gained a
+  `With(services)` hook for it. What that does not check is that a real cookie is
+  accepted, the client's debounce and aborts, and a preview agreeing with the save.
+
+  **Checked by breaking it, per #21: seven mutations, one at a time, reverted with
+  `git checkout` from the commit rather than from memory.** All seven were caught.
+  Two are worth keeping: dropping `ToUpperInvariant` in the handler, which is
+  invisible against the rules and silently doubles the model's bill; and reporting
+  an unusable answer as an abstention, which is the tidy-looking version of putting
+  words in another process's mouth. **No mutation was run against the React half,
+  because there is nothing to run it with** -- this client has no test framework,
+  so the debounce, the abort and the three rendered states are checked by reading
+  and by hand.
+
+  **`Lidl` is not a rule, and #67's own acceptance test says to type it.** Measured
+  against the running compose stack: `{"category":null,"source":"rules"}`. So the
+  first acceptance test as written shows *"No suggestion -- rules"*, which is the
+  second acceptance test rather than the first; `coffee at the cafe` is the
+  description that demonstrates a suggestion. #61 recorded this exact trap about
+  its own acceptance test and it was written into the next issue anyway, which is
+  worth more as a note about how these are read than about the categorizer.
+
+  **Nothing rate-limits the endpoint**, and the only thing between this screen and
+  an unbounded number of model calls is that a person types slowly. Acceptable
+  while registration needs an invite code and the deployed categorizer runs the
+  rules (#61); it is the first thing to revisit when either stops being true.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as

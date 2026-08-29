@@ -162,3 +162,38 @@ export interface ImportResult {
 
   problems: readonly ImportRowProblem[]
 }
+
+/** What `POST /api/transactions/category-suggestion` accepts. #67. */
+// Three fields and no date, mirroring `CategorySuggestionRequest` in C#. The day
+// money was spent tells a predictor nothing, and a field the endpoint does not
+// read is a field this form could be refused for getting wrong -- a mistyped year
+// would otherwise stop the suggestion appearing for a reason that has nothing to
+// do with the description.
+//
+// The amount is a number here, where the form holds it as a string. That is the
+// same conversion `NewTransaction` needs and it happens in the same place, once,
+// at the edge -- see useCategorySuggestion, which refuses to ask at all until the
+// text is something the server would accept.
+export interface CategorySuggestionQuery {
+  amount: number
+  currency: string
+  description: string
+}
+
+/** What it answers: who answered, and what they said. */
+// **The source is what says something answered**, and reading it any other way
+// loses the distinction the endpoint exists to carry:
+//
+//   { category: 'groceries', source: 'rules' }  a suggestion
+//   { category: null, source: 'rules' }         it answered, and had no idea
+//   { category: null, source: null }            nothing answered
+//
+// The middle one is a normal answer on roughly a third of the labelled set, so a
+// screen that renders nothing for it looks broken every third transaction. The
+// last one is a categorizer that is not running, and it has to be invisible --
+// there is nothing the person typing could do about it, and #67 asks for the field
+// to show nothing extra in exactly that case.
+export interface CategorySuggestion {
+  category: string | null
+  source: string | null
+}
