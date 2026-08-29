@@ -211,8 +211,9 @@ public sealed class CategorizerClient(
             if (body?.Source is not { Length: > 0 } source)
             {
                 logger.LogWarning(
-                    "Categorizer {Kind} {Outcome}: answered without naming a source; the answer is refused.",
-                    kind, CategorizerOutcome.Unusable);
+                    "Categorizer {Kind} {Outcome}: answered the category {Category} without naming a "
+                    + "source; the answer is refused.",
+                    kind, CategorizerOutcome.Unusable, body?.Category);
                 metrics.Record(CategorizerOutcome.Unusable, source: null, kind, Stopwatch.GetElapsedTime(started));
                 return CategorizerAnswer.Nothing;
             }
