@@ -155,38 +155,72 @@ class VoyageEmbedder:
         return self._dimensions
 
     def embed(self, texts: Sequence[str], *, kind: InputKind) -> list[list[float]]:
-        """One request for however many texts, in the order they were given.
+        """One request for however many texts, answered in the order they went in.
 
-        TODO(owner): the body. The spec, in order, and every step is there because
-        of a way this fails quietly rather than for tidiness:
+        Two things here are not obvious and both fail quietly rather than loudly.
 
-        1. An empty `texts` returns `[]` **without a request**. A POST with an
-           empty input is a round trip that can only fail, and the caller that
-           produces it is a corpus loader with nothing to load.
-        2. POST `EMBED_URL` with `headers={"Authorization": f"Bearer {self._api_key}"}`
-           and `json={"input": list(texts), "model": self._model,
-           "input_type": kind, "output_dimension": self._dimensions}`.
-           `input_type` is the parameter the `InputKind` comment above is about.
-        3. `raise_for_status()`, then `.json()`.
-        4. **Sort `data` by its `index` field before reading the embeddings.** The
-           response is a list of `{"embedding": [...], "index": n}` and the order
-           is not promised -- this is the Batches lesson (key by id, never by
-           position) arriving at a second endpoint. Getting it wrong mislabels
-           every vector in a batch against the wrong description, and the only
-           symptom is retrieval that returns unrelated rows.
-        5. Refuse a response whose length is not `len(texts)`, or any vector whose
-           length is not `self._dimensions`, by raising **`ValueError`**. A short
-           vector poisons the store permanently and pgvector would refuse it later
-           with an error naming the column rather than the call.
+        **The response is sorted by its own `index` before being read.** Voyage
+        answers with a list of `{"embedding": [...], "index": n}` and does not
+        promise the order -- the same "key by id, never by position" rule the
+        Batches API has, arriving at a second endpoint. Read positionally, a batch
+        pairs every vector with the wrong description, and there is no exception
+        and no log line: retrieval simply starts returning unrelated rows.
 
-           `ValueError` specifically, because `tests/test_embedding.py` asserts
-           that type and it has to: the first draft of those tests said
-           `pytest.raises(Exception)` and passed against this very stub, since
-           `NotImplementedError` is an `Exception` -- and `RuntimeError` is no
-           better, because `NotImplementedError` subclasses that too.
-        6. Return the vectors.
+        **A response of the wrong shape is `ValueError` and never a shrug.** A
+        short vector is accepted happily by an in-memory store and refused by
+        pgvector much later, with a message naming the column rather than this
+        call -- and a re-embed of everything is the only way back. `ValueError`
+        rather than something broader because `tests/test_embedding.py` has to
+        assert a type narrow enough to exclude `NotImplementedError`; its first
+        draft said `Exception` and went green against an unwritten body, and
+        `RuntimeError` is no better since `NotImplementedError` subclasses it.
         """
-        raise NotImplementedError
+        # A POST with an empty input is a round trip that can only fail, and the
+        # caller that produces one is a corpus loader with nothing to load. On the
+        # save path it is the difference between "no examples" costing nothing and
+        # costing the full two-second timeout.
+        if not texts:
+            return []
+
+        response = self._client.post(
+            EMBED_URL,
+            # The key travels in this header and nowhere else -- never the URL,
+            # which is what ends up in a traceback, an error message and a proxy's
+            # access log. `Content-Type` is not set here because httpx2 sets it
+            # from `json=`, and stating it twice is how the two come to disagree.
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            json={
+                "input": list(texts),
+                "model": self._model,
+                # The parameter the `InputKind` comment above is about.
+                "input_type": kind,
+                "output_dimension": self._dimensions,
+            },
+        )
+        response.raise_for_status()
+
+        data = response.json().get("data", [])
+
+        # Counted before the sort, not after. A response missing a row still sorts
+        # perfectly well and would come back one vector short, which the caller
+        # then zips against its descriptions -- the same off-by-one the sort itself
+        # exists to prevent, arriving by a different door.
+        if len(data) != len(texts):
+            raise ValueError(
+                f"Asked {self._model} to embed {len(texts)} texts "
+                f"and got {len(data)} vectors back."
+            )
+
+        vectors = [row["embedding"] for row in sorted(data, key=lambda row: row["index"])]
+
+        wrong = next((v for v in vectors if len(v) != self._dimensions), None)
+        if wrong is not None:
+            raise ValueError(
+                f"{self._model} answered with a vector of {len(wrong)} dimensions "
+                f"where {self._dimensions} were asked for."
+            )
+
+        return vectors
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "VoyageEmbedder | None":

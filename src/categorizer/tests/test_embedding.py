@@ -79,12 +79,22 @@ class StubHttp:
         return StubResponse(self._payload, self._error)
 
 
-def body_of(count: int, dimensions: int = 4, *, shuffled: bool = False) -> dict:
+def body_of(
+    count: int, dimensions: int = DEFAULT_DIMENSIONS, *, shuffled: bool = False
+) -> dict:
     """A response shaped like Voyage's, with each vector carrying its own index.
 
-    Every vector is distinguishable -- row `i` is `[i, i, i, i]` -- so a test can
+    Every vector is distinguishable -- row `i` is `[i, i, ...]` -- so a test can
     say which description a vector was paired with rather than merely that some
     floats came back.
+
+    **The default width is the embedder's, and it started at a convenient 4.**
+    That was a bug in this helper rather than in the code, and the body found it
+    the first time it ran: a four-float vector against a request for 1024 is
+    exactly what step 5 refuses, so six tests failed with the width error. Worth
+    leaving written down, because it is the mirror of the defect this file found
+    in itself an hour earlier -- a suite written before the body is not thereby
+    correct, it is merely written first.
     """
     data = [
         {"embedding": [float(i)] * dimensions, "index": i} for i in range(count)
@@ -193,7 +203,10 @@ def test_the_vectors_come_back_in_the_order_the_texts_went_in() -> None:
 
     vectors = embedder(http).embed(["a", "b", "c"], kind="document")
 
-    assert vectors == [[0.0] * 4, [1.0] * 4, [2.0] * 4]
+    # The first float identifies the row; the width is asserted separately so a
+    # failure says which of the two went wrong.
+    assert [vector[0] for vector in vectors] == [0.0, 1.0, 2.0]
+    assert all(len(vector) == DEFAULT_DIMENSIONS for vector in vectors)
 
 
 def test_a_response_out_of_order_is_sorted_by_its_index() -> None:
@@ -211,7 +224,7 @@ def test_a_response_out_of_order_is_sorted_by_its_index() -> None:
 
     vectors = embedder(http).embed(["a", "b", "c"], kind="document")
 
-    assert vectors == [[0.0] * 4, [1.0] * 4, [2.0] * 4]
+    assert [vector[0] for vector in vectors] == [0.0, 1.0, 2.0]
 
 
 def test_too_few_vectors_is_refused() -> None:
