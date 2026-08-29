@@ -23,7 +23,7 @@ import json
 import tempfile
 import unittest
 from collections import Counter
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -42,8 +42,10 @@ from score import (  # noqa: I001 -- must come first
     Report,
     Row,
     build_predictor,
+    build_store,
     check,
     load,
+    main,
     render_confusion,
     render_misses,
     score,
@@ -653,6 +655,123 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("parcel by post", listing)
         self.assertIn("other", listing)
         self.assertIn(NO_PREDICTION, listing)
+
+
+class RetrievalTests(unittest.TestCase):
+    """#66's guards, all of which refuse rather than produce a wrong number.
+
+    Nothing here embeds anything or calls a model: the lexical store needs no
+    network. The refusals are the point. Each one is a way of printing a
+    percentage that looks fine and means something other than what it says, which
+    is the failure this whole folder exists to make impossible.
+    """
+
+    HEADER = "occurred_at,amount,currency,description,category\n"
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+
+    def csv_of(self, name: str, rows: str) -> Path:
+        path = Path(self.directory.name) / name
+        path.write_text(self.HEADER + rows, encoding="utf-8")
+        return path
+
+    def test_the_corpus_and_the_set_may_not_be_the_same_file(self) -> None:
+        """The overlap trap, and it is the one that produces a beautiful lie.
+
+        Passing one path twice reads as a reasonable thing to do. Every row would
+        then retrieve itself as its own nearest neighbour, at a similarity of
+        exactly 1.0, carrying its own gold label -- and the run would score close
+        to 100% while measuring nothing whatsoever. #66 names this and the answer
+        is a refusal rather than a sentence in a README.
+        """
+        path = self.csv_of("both.csv", "2026-08-01,10.00,MDL,linella,groceries\n")
+
+        with redirect_stderr(io.StringIO()) as err:
+            code = main(
+                ["--set", str(path), "--corpus", str(path), "--retrieval", "lexical"]
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIn("retrieve itself", err.getvalue())
+
+    def test_retrieval_without_a_corpus_is_refused(self) -> None:
+        path = self.csv_of("set.csv", "2026-08-01,10.00,MDL,linella,groceries\n")
+
+        with redirect_stderr(io.StringIO()) as err:
+            code = main(["--set", str(path), "--retrieval", "lexical"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("--corpus", err.getvalue())
+
+    def test_retrieval_with_the_rules_is_refused(self) -> None:
+        """A corpus changes nothing the rules do, so accepting one would lie.
+
+        `rules.predict` is a substring scan over the description and reads nothing
+        else. A run that accepted --retrieval and printed 56.1% would be a
+        with-retrieval measurement of a predictor that has no retrieval -- the
+        same confusion `baseline.json`'s `predictor` key was added in #60 to stop,
+        arriving through a second knob.
+        """
+        path = self.csv_of("set.csv", "2026-08-01,10.00,MDL,linella,groceries\n")
+        corpus = self.csv_of("corpus.csv", "2026-07-01,9.00,MDL,kaufland,groceries\n")
+
+        with redirect_stderr(io.StringIO()) as err:
+            code = main(
+                [
+                    "--set", str(path),
+                    "--corpus", str(corpus),
+                    "--retrieval", "lexical",
+                    "--predictor", "rules",
+                ]
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIn("--predictor model", err.getvalue())
+
+    def test_off_is_the_default_and_builds_no_store(self) -> None:
+        self.assertIsNone(build_store("off", None, {}))
+
+    def test_a_corpus_is_held_to_the_same_rules_as_an_eval_set(self) -> None:
+        """A label outside the vocabulary is an error in the corpus too.
+
+        Otherwise the model is shown a twelfth category as a worked example, by
+        rows it has been told to treat as the person's own confirmed labels --
+        the closed vocabulary broken through the one door that does not go past
+        the eval set's loader.
+        """
+        corpus = self.csv_of("corpus.csv", "2026-07-01,9.00,MDL,kaufland,food\n")
+
+        with self.assertRaises(EvalSetError):
+            build_store("lexical", corpus, {})
+
+    def test_show_examples_scores_nothing_and_costs_nothing(self) -> None:
+        """#66's inspection, and it stops before a predictor is built.
+
+        "A retrieval step nobody can look at is untestable" -- and looking at it
+        must not cost one API call per row, or nobody will look. Note the
+        `--predictor model` in the arguments: it is accepted and never used, which
+        is what makes this free.
+        """
+        path = self.csv_of("set.csv", "2026-08-01,10.00,MDL,linella centru,groceries\n")
+        corpus = self.csv_of("corpus.csv", "2026-07-01,9.00,MDL,linella,groceries\n")
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = main(
+                [
+                    "--set", str(path),
+                    "--corpus", str(corpus),
+                    "--retrieval", "lexical",
+                    "--show-examples",
+                    "--predictor", "model",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("linella", out.getvalue())
+        self.assertIn("groceries", out.getvalue())
 
 
 if __name__ == "__main__":

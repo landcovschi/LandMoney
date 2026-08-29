@@ -119,6 +119,15 @@ REQUIRED_BASELINE_KEYS = ("set", "predictor", "rows", "accuracy", "macro_recall"
 # passed on the command line.
 PREDICTORS = ("rules", "model")
 
+# #66's off switch, and it is the first argument of the three that has to be
+# repeatable after the fact: "turning retrieval off is one setting, so the
+# comparison stays repeatable". Spelt out here rather than imported from
+# `retrieval.MODES` for the same reason PREDICTORS is not read from `main.py` --
+# that switch decides what a deployment serves, this one decides what a
+# measurement measures, and a scorer taking either from the ambient environment
+# would produce a number whose meaning depended on a variable nobody passed.
+RETRIEVAL_MODES = ("off", "lexical", "vector")
+
 # Mirrors numeric(18,2) on the Postgres column and DecimalScaleAttribute on the
 # .NET side. The eval set is meant to be rows the application could have stored.
 MAX_SCALE = 2
@@ -468,6 +477,47 @@ def render(report: Report, path: Path, predictor: str) -> str:
     return "\n".join(lines)
 
 
+def render_examples_for(rows: list[Row], store: object, corpus: Path | None) -> str:
+    """What retrieval chooses for every row, and nothing about whether it is right.
+
+    #66: "the examples chosen for a given description can be inspected -- a
+    retrieval step nobody can look at is untestable." This is that, and it costs
+    no API call: the lexical store needs no network at all, and the vector store
+    spends embeddings, which are free under Voyage's tier.
+
+    It reads the store directly rather than the predictor, so what is printed is
+    the retrieval itself rather than a reconstruction of it. Both stores are
+    deterministic, so this is the same answer the scored run will get.
+
+    The gold label of each row is printed beside its neighbours on purpose. It is
+    the fastest way to see the failure mode that matters -- five confident
+    neighbours all agreeing on the wrong category -- which a list of scores alone
+    hides completely.
+    """
+    from categorizer.retrieval import DEFAULT_EXAMPLE_COUNT
+
+    lines = [
+        f"Corpus   : {corpus}",
+        f"Store    : {store.label}",
+        f"Rows     : {len(rows)}, showing up to {DEFAULT_EXAMPLE_COUNT} neighbours each",
+        "",
+    ]
+
+    for row in rows:
+        lines.append(f"{row.description}  [{row.category}]")
+        found = store.nearest(row.description, k=DEFAULT_EXAMPLE_COUNT)
+        if not found:
+            lines.append("    (nothing similar enough)")
+        for neighbour in found:
+            lines.append(
+                f"    {neighbour.score:.3f}  {neighbour.example.description}"
+                f"  -> {neighbour.example.category}"
+            )
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
 def render_confusion(report: Report) -> str:
     """The full matrix: rows are the true category, columns what was predicted.
 
@@ -629,8 +679,60 @@ class ModelCallFailed(logging.Handler):
         self.count += 1
 
 
+def build_store(mode: str, corpus: Path | None, env: Mapping[str, str]):
+    """The example store for a scored run, or None -- #66.
+
+    **The corpus is a separate file and is never the set being scored.** That is
+    the issue's second trap and the reason this takes a path rather than reusing
+    `rows`: a nearest-neighbour lookup that can return the row it is answering is
+    a lie with a very good percentage. `--corpus evals/transactions.csv --set
+    evals/holdout.csv` is the pairing #66 was built around, and the two files are
+    disjoint by construction rather than by an exclusion rule somebody has to
+    remember.
+
+    Loaded through the same `load` the eval set uses, so a corpus is held to the
+    same rules -- a label outside the vocabulary is an error here too. And loaded
+    *before* the predictor is built, for the reason `total` is passed in below:
+    when a run costs money, a malformed file must fail before the first call
+    rather than after the fifty-third.
+    """
+    if mode == "off":
+        return None
+
+    if corpus is None:
+        raise EvalSetError(
+            Path("--corpus"),
+            [f"--retrieval {mode} needs --corpus, a labelled CSV to retrieve from."],
+        )
+
+    from categorizer.retrieval import Example, LexicalStore, VectorStore
+
+    examples = [Example(row.description, row.category) for row in load(corpus)]
+
+    if mode == "lexical":
+        return LexicalStore(examples)
+
+    from categorizer.embedding import VoyageEmbedder
+
+    embedder = VoyageEmbedder.from_env(env)
+    if embedder is None:
+        raise EvalSetError(
+            Path("--retrieval vector"),
+            ["VOYAGE_API_KEY is not set, so there is nothing to embed with."],
+        )
+
+    # One request for the whole corpus, before any row is scored. A per-row
+    # failure here would be indistinguishable from the model declining, which is
+    # the confusion `ModelCallFailed` exists to prevent one layer along.
+    return VectorStore.build(examples, embedder)
+
+
 def build_predictor(
-    name: str, env: Mapping[str, str], total: int, use_cache: bool = False
+    name: str,
+    env: Mapping[str, str],
+    total: int,
+    use_cache: bool = False,
+    store: object | None = None,
 ) -> tuple[Callable[[Row], str], str]:
     """The predictor and the label that says what it was, for the header.
 
@@ -644,6 +746,17 @@ def build_predictor(
     call rather than after the fifty-third.
     """
     if name == "rules":
+        if store is not None:
+            # Refused rather than ignored. `rules.predict` is a substring scan that
+            # reads nothing but the description, so a corpus would change nothing at
+            # all -- and a run that accepted --retrieval and produced the baseline
+            # number would be a with-retrieval measurement of a predictor that has
+            # no retrieval, recorded under the wrong name. The same failure #60's
+            # `predictor` key in baseline.json exists to prevent.
+            raise EvalSetError(
+                Path("--retrieval"),
+                ["--retrieval needs --predictor model; the rules read only the description."],
+            )
         return (
             lambda row: predict_by_rules(row.description),
             f"substring rules ({len(RULES)} of them), "
@@ -660,7 +773,7 @@ def build_predictor(
     from categorizer.anthropic_predictor import AnthropicPredictor
     from categorizer.cache import REDIS_URL_ENV
     from categorizer.contracts import CategorizeRequest
-    from categorizer.prompt import FINGERPRINT
+    from categorizer.prompt import fingerprint
 
     # **The cache is off unless it is asked for, and that is #65's second trap
     # aimed at the one place it bites hardest.** The service caches because the
@@ -679,7 +792,7 @@ def build_predictor(
     if not use_cache:
         env = {**env, REDIS_URL_ENV: ""}
 
-    predictor = AnthropicPredictor.from_env(env)
+    predictor = AnthropicPredictor.from_env(env, examples=store)
     done = 0
 
     def predict(row: Row) -> str:
@@ -716,8 +829,17 @@ def build_predictor(
     # sha256:c8ad9d9fd16f, which is how the move is known to have been a move.
     return (
         predict,
+        # The fingerprint printed is the one that matches the run: with a store
+        # attached every row is answered under the with-examples prompt, and a
+        # header naming the base digest would label the number with instructions
+        # the model was not sent. `predictor.retrieval` is read off the store
+        # itself rather than off the mode that built it, so it cannot claim an
+        # embedding model that did not answer -- #66's last trap, since changing
+        # that model invalidates every vector.
         f"{predictor.model}, effort={predictor.effort}, "
-        f"prompt.py sha256:{FINGERPRINT}, cache={'on' if use_cache else 'off'}",
+        f"prompt.py sha256:{fingerprint(store is not None)}, "
+        f"retrieval={predictor.retrieval}, "
+        f"cache={'on' if use_cache else 'off'}",
     )
 
 
@@ -748,6 +870,28 @@ def main(argv: list[str] | None = None) -> int:
         "every row is a live call). Nothing on the rules path reads this",
     )
     parser.add_argument(
+        "--retrieval",
+        choices=RETRIEVAL_MODES,
+        default=RETRIEVAL_MODES[0],
+        help="#66. 'lexical' retrieves by trigram overlap and is free; 'vector' "
+        "embeds with Voyage and needs VOYAGE_API_KEY. Both need --corpus "
+        "(default: off)",
+    )
+    parser.add_argument(
+        "--corpus",
+        type=Path,
+        default=None,
+        help="the labelled CSV the examples are drawn from. Must not be --set: a "
+        "lookup that can return the row being scored is a lie with a very good "
+        "percentage",
+    )
+    parser.add_argument(
+        "--show-examples",
+        action="store_true",
+        help="print what retrieval would choose for every row in --set and stop, "
+        "scoring nothing. Free for --retrieval lexical",
+    )
+    parser.add_argument(
         "--confusion",
         action="store_true",
         help="also print the full confusion matrix",
@@ -776,6 +920,42 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # #66's second trap, refused rather than documented. The corpus and the set
+    # being scored must not overlap, and the commonest way to make them overlap is
+    # to pass the same path twice -- which reads as a reasonable thing to do until
+    # you notice every row retrieves itself and scores 100%.
+    if args.corpus is not None and args.corpus.resolve() == args.path.resolve():
+        print(
+            f"--corpus and --set are both {args.path}.",
+            "Every row would retrieve itself as its own nearest neighbour, and the",
+            "run would score close to 100% while measuring nothing at all.",
+            sep="\n",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        store = build_store(args.retrieval, args.corpus, os.environ)
+    except EvalSetError as error:
+        print(f"Cannot retrieve from {error.path}:", file=sys.stderr)
+        for problem in error.problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
+
+    if args.show_examples:
+        # #66's second acceptance test -- "the examples chosen for a given
+        # description can be inspected" -- and it deliberately stops here rather
+        # than scoring. A retrieval step nobody can look at is untestable, and
+        # looking at it should not cost one API call per row.
+        if store is None:
+            print(
+                "--show-examples needs --retrieval lexical or vector.",
+                file=sys.stderr,
+            )
+            return 1
+        print(render_examples_for(rows, store, args.corpus))
+        return 0
+
     failures = ModelCallFailed()
     if args.predictor == "model":
         # Only on the model path. The rules cannot fail, and turning logging on
@@ -786,8 +966,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         predictor, label = build_predictor(
-            args.predictor, os.environ, len(rows), use_cache=args.cache
+            args.predictor, os.environ, len(rows), use_cache=args.cache, store=store
         )
+    except EvalSetError as error:
+        for problem in error.problems:
+            print(problem, file=sys.stderr)
+        return 1
     except ImportError as error:
         print(
             f"--predictor {args.predictor} needs the categorizer's dependencies: {error}",
