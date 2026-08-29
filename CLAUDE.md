@@ -2712,6 +2712,108 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   while registration needs an invite code and the deployed categorizer runs the
   rules (#61); it is the first thing to revisit when either stops being true.
 
+- **The month at a glance: totals by category, in the client, from the rows that
+  are already there -- decided 2026-08-29** (#68).
+  `src/landmoney.client/src/summary.ts` does the adding,
+  `src/landmoney.client/src/money.ts` holds the one conversion that makes it
+  legal, and `components/MonthSummary.tsx` is the screen. **No .NET code changed
+  at all**, and no new dependency.
+
+  **What it fixes: the application categorised spending and then never used a
+  category for anything.** A list sorted by date answers "what did I buy"; it
+  does not answer "where does the money go", which is the only reason the
+  categorizer exists. Five issues of AI work were visible in exactly one table
+  column.
+
+  **Nothing was summed on the server, and that is the decision the shape hangs
+  off.** #68 allows either -- "sum on the server in `decimal`, or sum in minor
+  units on the client" -- and names the client route's own cost in the same
+  breath. What decided it is that `GET /api/transactions` is fetched whole (#3,
+  no paging, no limit), so the client already holds every row: the summary is one
+  pass over the array the table below it is about to render. **The totals and the
+  rows are therefore incapable of disagreeing**, which makes #68's first
+  acceptance test true by construction rather than by checking it once. A
+  `GROUP BY` endpoint would have bought a second round trip, a third contract to
+  keep in step with `api/types.ts` by hand, and a window in which the two halves
+  of the screen were fetched at different moments.
+
+  **What it costs is the trap the issue names, and it is written into the
+  component rather than solved:** it stops being fine *silently*. The day
+  `/api/transactions` grows a page, this screen keeps rendering and starts
+  describing the page rather than the month -- no error, no warning, a plausible
+  number. The fix that day is the server-side sum, not a bigger page.
+
+  **The arithmetic is in integer minor units, and what that is worth was measured
+  rather than asserted.** `toMinorUnits` is the only conversion in the client and
+  every addition goes through it, because `api/types.ts` promises the amount
+  round-trips exactly *as long as nothing does arithmetic with it*. The honest
+  finding is smaller than the rule sounds: two million two-decimal amounts summing
+  to about a billion drift by **2.9e-6** as doubles, and the double total and the
+  exact total render to the same two-decimal string at every point along the way
+  -- because every input is already a two-decimal value, so the exact sum never
+  sits on a rounding boundary a millionth could push it over. So this is a
+  coincidence being turned into a property, not a bug being fixed. Worth saying
+  plainly, because the opposite claim was the first thing written in that comment
+  and it was wrong.
+
+  **Currencies are the outer grouping and not a column**, which is #68's first
+  trap answered by the type rather than by care: every total in `CurrencyTotals`
+  lives inside a `currency`, so there is nowhere on the screen a number mixing EUR
+  and MDL could go. A flat list of `{currency, category, total}` rows carries the
+  same facts and leaves that addition one `reduce` away. **The currency blocks are
+  ordered by transaction count and deliberately not by their totals** -- ranking
+  500 MDL above 400 EUR is the same mistake as adding them, and a count is a count
+  in any currency.
+
+  **The month is a string prefix, never a parsed date.** `occurredAt` is already
+  "2026-08-19" and `new Date("2026-08-19")` is UTC midnight, so west of UTC every
+  row on the 1st would be counted in the previous month -- #17's day boundary
+  arriving in a filter. The current month comes off the **local** clock, which is
+  the calendar the reader is looking at, and is read during render rather than
+  frozen in state so a tab left open across midnight on the 31st is one reload
+  away from being right.
+
+  **A category with no spending this month is absent rather than zero**, and that
+  falls out of building the rows from the transactions instead of from
+  `Categories.All`. Starting from the eleven would have to remember to drop the
+  empty ones, and would show eleven rows in a month with three purchases in it.
+
+  **`formatAmount` moved out of `TransactionList` into `money.ts`.** Not tidying:
+  `minimumFractionDigits: 2` is a decision about this application's column rather
+  than about the currency -- the yen has no minor unit and an amount stored as
+  12.34 would *display* as 12 -- and a second copy of that would have agreed by
+  luck.
+
+  **An empty month renders as an empty month; an empty account does not.** #68
+  asks for the first, and somebody who has spent nothing since the 1st should see
+  that said. The second is not a month problem, and rendering it would stack
+  "Nothing recorded this month." on top of the list's "Nothing recorded yet" --
+  the same fact twice, and only one of them says what to do about it.
+
+  **Nothing here is covered by a test, and that is the honest status rather than
+  an omission.** This client still has no test framework, which #67 recorded for
+  its own debounce; the .NET suite is untouched at 260 green because no .NET code
+  changed. `summariseMonth` and `monthOf` were pulled into `summary.ts` -- out of
+  the component file, which the fast-refresh lint rule objected to and which is
+  the smaller reason -- so that the pure half is one dependency away from being
+  testable rather than a refactor away.
+
+  **Verified against the running stack, and the one gap in that is named.** Ten
+  transactions were posted through the real API on a fresh account: seven EUR and
+  two MDL in August, one EUR in July. The screen reports EUR 7 transactions
+  totalling 299.83 -- uncategorised 129.99, groceries 123.80, eating-out 46.03,
+  transport 0.01 -- and MDL 2 transactions totalling 290.00, with July's 999.99
+  absent from both. Each figure was added by hand off the list below it. What was
+  **not** done is opening the signed-in page in a browser, because signing in
+  means typing a password: the components were mounted against the rows the real
+  API returned, in the order `App.tsx` renders them, which checks everything
+  except that a real session reaches them.
+
+  **The caption was reworded after looking at it.** Intl renders a currency with
+  no symbol as its code, so "MDL -- MDL 290.00 in total" was the first version and
+  reads like a bug, while "EUR -- €299.83" has the same shape and hides it. The
+  count now sits between them.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as

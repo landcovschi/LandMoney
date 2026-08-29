@@ -688,6 +688,106 @@ button:not(.link)[aria-busy='true']::after {
   color: var(--danger);
 }
 
+/* --- the month at a glance (#68) ------------------------------------------- */
+
+/* Reuses .entry for the card, like the import form, so the three blocks above the
+   list read as the same kind of object. What .entry gives it that matters here is
+   the column and the gap: one card can hold several tables, one per currency, and
+   they need to be spaced apart rather than run together. */
+
+/* Not .transactions, and the duplication is deliberate rather than lazy. That
+   class carries a whole second layout for widths below 640px, where each row is
+   redrawn as a card -- correct for four columns of mixed content, and wrong for
+   three short ones that fit on a phone as they are. Sharing the class would mean
+   unpicking that layout here, which is more rules than declaring the few below. */
+.summary-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+/* The currency and its total, sitting above the table it governs. Set stronger
+   than the list's caption because this one is not a label for the table -- it is
+   the number the table breaks down, and it has to be readable on its own. */
+.summary-table caption {
+  text-align: left;
+  padding-bottom: var(--space-2);
+  color: var(--text-strong);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.summary-table th,
+.summary-table td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The column headers. Same treatment as the list's, without the sunken
+   background: there is no card edge here for a header band to sit against. */
+.summary-table thead th {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* A row header is a <th>, so without this it would inherit the uppercase, letter-
+   spaced treatment above and every category would shout. It is a value, and it is
+   drawn as one; only the element is a header. */
+.summary-table tbody th {
+  font-weight: 400;
+  color: var(--text-strong);
+}
+
+.summary-table tbody tr:last-child th,
+.summary-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.summary-table .numeric {
+  text-align: right;
+
+  /* 1% plus nowrap is the table idiom for "as narrow as the content": a
+     percentage too small to honour collapses to the minimum, so the two number
+     columns take what they need and the category column takes the rest. */
+  width: 1%;
+  white-space: nowrap;
+}
+
+.summary-table td.numeric {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The total is what the table is for; the count is context for it. */
+.summary-table td.numeric:last-child {
+  color: var(--text-strong);
+  font-weight: 500;
+}
+
+.summary-table td.numeric:first-of-type {
+  color: var(--text-muted);
+}
+
+/* The absence of a category, as a row rather than as a gap. Muted and italic
+   rather than the dashed .tag-empty token the list uses: that pill reads as an
+   outline waiting to be filled, which is right beside one transaction and wrong
+   as the label of a row that may be the largest number on the screen. The dotted
+   underline is the only hint that the title says which of the three reasons it
+   is. */
+.summary-uncategorised {
+  color: var(--text-muted);
+  font-style: italic;
+  text-decoration: underline dotted var(--border);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
 /* --- narrow ---------------------------------------------------------------- */
 
 /* One breakpoint, and everything stacks. Two columns of half-width inputs on a

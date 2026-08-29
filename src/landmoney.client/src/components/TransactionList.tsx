@@ -1,4 +1,5 @@
 import type { Transaction } from '../api/types'
+import { formatAmount } from '../money'
 import { CategoryCell } from './CategoryCell'
 
 /**
@@ -180,50 +181,20 @@ export function TransactionList({
       {/*
         No total row, and this is a rule rather than an omission: the table mixes
         currencies, so a column adding EUR to MDL produces a number that means
-        nothing at all. A subtotal per currency would be correct and is not what
-        #6 asked for -- it goes in when someone wants it, next to a note saying
-        which currency each line is.
+        nothing at all. A subtotal per currency would be correct, and #68 is where
+        somebody wanted one -- it went into MonthSummary above this table rather
+        than into a <tfoot> here. Two reasons. This table is every transaction ever
+        recorded and the question was about the current month, so a footer would be
+        answering a different one; and a total per currency inside a table sorted by
+        date has no row to sit under. The rule this comment states is unchanged:
+        nothing in this element adds two currencies together.
       */}
     </table>
   )
 }
 
-// One Intl.NumberFormat per currency, kept rather than rebuilt per row.
-// Constructing one is the expensive part -- it loads the locale's data -- and a
-// hundred rows would otherwise build a hundred of them on every render. The C#
-// parallel is holding on to a NumberFormatInfo instead of calling
-// CultureInfo.GetCultureInfo inside the loop.
-const formatters = new Map<string, Intl.NumberFormat>()
-
-function formatAmount(amount: number, currency: string): string {
-  let formatter = formatters.get(currency)
-
-  if (!formatter) {
-    // The constructor throws RangeError on a currency that is not three
-    // ASCII letters, and cannot be reached with one: the server validates
-    // "^[A-Za-z]{3}$" and upper-cases before storing. Note what it does *not*
-    // check -- that the code is a real ISO 4217 currency. "XYZ" is stored and
-    // formatted here as "XYZ 12.34", which is the honest thing to do with it.
-    formatter = new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency,
-
-      // Both pinned to 2, rather than left to the currency's own minor unit,
-      // which is what style: 'currency' uses by default. The default is right
-      // about the currency and wrong about this column: the yen has zero
-      // decimal places, so an amount stored as 12.34 would be *displayed* as
-      // 12 -- the value rounded away on its way to the screen, which is exactly
-      // what #6 forbids. numeric(18,2) holds two places whatever the currency
-      // is, so the screen shows two.
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })
-
-    formatters.set(currency, formatter)
-  }
-
-  // Formatting, not arithmetic. The double that came out of JSON.parse is
-  // rendered to two decimal places and never added to anything -- which is the
-  // condition under which its exactness holds.
-  return formatter.format(amount)
-}
+// formatAmount used to live here, as a private function with the whole argument
+// for `minimumFractionDigits: 2` written above it. It moved to ../money.ts in #68,
+// when the summary table needed the same number: the rule is a decision about this
+// application's column rather than about the currency, and two copies of it would
+// agree by luck. The reasoning moved with it and is not repeated here.

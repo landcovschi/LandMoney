@@ -951,6 +951,24 @@ the thing that produced the number can be shown.
       unreachable**, p95 2051ms -- which is the number that could not be
       stated at all the day before. A metrics endpoint is deliberately still
       open
+- [x] The month at a glance, by category -- #68, 2026-08-29. The application
+      categorised spending and then never used the categories for anything; this
+      is the smallest screen that pays them back. Totals for the current month,
+      by category, largest first, **grouped by currency and never summed across
+      one** -- there is no line anywhere on the page where a total of EUR plus
+      MDL could go. Uncategorised is a row like any other and is honest about
+      being three different things: an abstention, an import, or a categorizer
+      that was not running. **No endpoint and no server code**: the list is
+      already fetched whole, so the summary adds up the very array the table
+      below it renders, which makes "the totals equal the rows" true by
+      construction rather than by checking -- and is the thing that stops being
+      fine silently the day `GET /api/transactions` grows paging. The one piece
+      of arithmetic in this client happens in integer minor units, in
+      `money.ts`, and what that is worth was **measured rather than asserted**:
+      two million two-decimal amounts drift by 2.9e-6 as doubles and render to
+      the same string, so this is a coincidence being turned into a property
+      rather than a bug being fixed
+
 - [x] The categorizer is visible while a transaction is typed -- #67,
       2026-08-29. `POST /api/transactions/category-suggestion` answers what the
       categorizer would say for a description that is not saved yet, and a badge

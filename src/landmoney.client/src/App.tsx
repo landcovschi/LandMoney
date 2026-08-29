@@ -9,6 +9,7 @@ import {
 import type { NewTransaction } from './api/types'
 import { ImportForm } from './components/ImportForm'
 import { LoginForm } from './components/LoginForm'
+import { MonthSummary } from './components/MonthSummary'
 import { TransactionForm } from './components/TransactionForm'
 import { TransactionList, type ListState } from './components/TransactionList'
 import './App.css'
@@ -294,6 +295,26 @@ function App() {
             blinks through "Loading..." rather than holding the previous rows.
           */}
           <ImportForm onImported={reload} />
+
+          {/*
+            #68. Between the import and the list, and rendered off the very array
+            the list is about to draw rather than off a fetch of its own -- which
+            is what makes the totals and the rows below them incapable of
+            disagreeing. It is also why there is nothing to show while the list is
+            loading or has failed: the component underneath already says both of
+            those things, once.
+
+            The second half of the condition is about a screen rather than about
+            the data. An empty *month* is a real state and MonthSummary renders it
+            -- somebody who has spent nothing since the 1st should see that said
+            rather than see nothing. An empty *account* is not a month problem, and
+            without this it would stack "Nothing recorded this month." on top of
+            the list's "Nothing recorded yet", which is the same fact twice and
+            only one of them tells the reader what to do about it.
+          */}
+          {list.status === 'ready' && list.transactions.length > 0 && (
+            <MonthSummary transactions={list.transactions} />
+          )}
 
           <TransactionList
             state={list}
