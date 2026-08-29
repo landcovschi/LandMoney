@@ -19,12 +19,24 @@ import json
 import logging
 import time
 from decimal import Decimal
-from typing import Any, Final, Mapping, NamedTuple, Protocol
+from typing import Any, Final, Mapping, NamedTuple, Protocol, Sequence
 
 from categorizer.cache import AnswerCache, CachedAnswer, cache_from_env, key_for
 from categorizer.categories import KNOWN, NO_PREDICTION
 from categorizer.contracts import CategorizeRequest, CategorizeResponse, Category, Source
-from categorizer.prompt import FINGERPRINT, RESPONSE_SCHEMA, SYSTEM_PROMPT
+from categorizer.prompt import (
+    RESPONSE_SCHEMA,
+    fingerprint,
+    render_examples,
+    system_prompt,
+)
+from categorizer.retrieval import (
+    DEFAULT_EXAMPLE_COUNT,
+    ExampleStore,
+    Neighbour,
+    example_count_from,
+    neighbours_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,11 +154,20 @@ class AnthropicPredictor:
         effort: str = DEFAULT_EFFORT,
         prices: Prices | None = None,
         cache: AnswerCache | None = None,
+        examples: ExampleStore | None = None,
+        example_count: int = DEFAULT_EXAMPLE_COUNT,
     ) -> None:
         self._client = client
         self._model = model
         self._max_tokens = max_tokens
         self._effort = effort
+        # None means no retrieval, which is #66's off switch reaching the one place
+        # it changes anything. An argument rather than something read from the
+        # environment in here, for the reason the client and the cache are: a test
+        # that wanted retrieval has to say so, so no test can reach a real Voyage or
+        # a real Postgres by forgetting.
+        self._examples = examples
+        self._example_count = example_count
         # None means every call is billed, and that is the default rather than a
         # degraded state -- #65 adds a cache to the *model* path and nothing else.
         # An argument for the same reason the client is one: a test that wanted a
@@ -173,8 +194,24 @@ class AnthropicPredictor:
     def effort(self) -> str:
         return self._effort
 
+    @property
+    def retrieval(self) -> str:
+        """What the report header says about retrieval, from the store itself.
+
+        Read off the store rather than off the setting that built it, which is the
+        same rule `Predictor` follows in naming its own `source`: a header saying
+        "vector" because a variable said so, rather than because a vector store
+        answered, is exactly the lie #59 wrote that rule to prevent. It also carries
+        the corpus size and the embedding model, so a recorded number says what it
+        was retrieving *from* -- #66's last trap, since changing the embedding model
+        invalidates every vector and the score would otherwise not mention it.
+        """
+        return "off" if self._examples is None else self._examples.label
+
     @classmethod
-    def from_env(cls, env: Mapping[str, str]) -> "AnthropicPredictor":
+    def from_env(
+        cls, env: Mapping[str, str], examples: ExampleStore | None = None
+    ) -> "AnthropicPredictor":
         """Build the real client. The one place a network-capable object is made.
 
         `anthropic.Anthropic()` finds the key itself -- ANTHROPIC_API_KEY, or a
@@ -232,6 +269,15 @@ class AnthropicPredictor:
             # cannot reach Redis even by a later edit: `RulesPredictor` is
             # constructed on a branch that never runs this line.
             cache=cache_from_env(env),
+            # Handed in rather than built here, and it is the one dependency of this
+            # class that is. A store needs a *corpus*, and the two callers get theirs
+            # from places that have nothing in common: the service reads one person's
+            # confirmed labels out of Postgres, and `evals/score.py` reads a CSV that
+            # must not overlap the rows being scored (#66's second trap). A `from_env`
+            # that built its own would have to know about both, and the scorer would
+            # have no way to say "this corpus, these rows, and no others".
+            examples=examples,
+            example_count=example_count_from(env),
         )
 
     def categorize(self, request: CategorizeRequest) -> CategorizeResponse:
@@ -271,7 +317,24 @@ class AnthropicPredictor:
         # #65's sharpest trap answered structurally rather than by remembering:
         # there is no second construction of this text to normalise differently,
         # so the key cannot drift from the input even by a well-meaning edit.
-        shown = _user_message(request)
+        # #66. Retrieval happens before the key is built and before anything is
+        # asked, because it changes both. `neighbours_for` never raises and never
+        # returns None -- an unreachable Voyage, a database that is down and a
+        # corpus with nothing similar in it are all the empty list, which is the
+        # predictor #60 measured at 98.9%.
+        neighbours = neighbours_for(
+            self._examples, request.description, k=self._example_count
+        )
+        shown = _user_message(request, neighbours)
+
+        # **`bool(neighbours)` and not `self._examples is not None`.** Retrieval
+        # being *configured* is not the same fact as examples being *present*, and
+        # it is the second one the prompt depends on: a store that found nothing
+        # produces the base prompt, so labelling that call with the with-examples
+        # fingerprint would key it under instructions it was never sent. It also
+        # means an empty corpus costs nothing at all -- same prompt, same
+        # fingerprint, same cache entries as before #66.
+        with_examples = bool(neighbours)
 
         # Built whether or not there is a cache, which is a sha256 of about a hundred
         # bytes -- a microsecond, against a call that takes two seconds. The
@@ -285,7 +348,7 @@ class AnthropicPredictor:
                 # changes every key in the same commit that changes the label on the
                 # number -- so the first run after an edit measures the new prompt
                 # rather than replaying answers to the old one.
-            prompt_fingerprint=FINGERPRINT,
+            prompt_fingerprint=fingerprint(with_examples),
             user_message=shown,
         )
 
@@ -303,7 +366,7 @@ class AnthropicPredictor:
         usage = Usage()
 
         try:
-            answer, usage = self._ask(shown)
+            answer, usage = self._ask(shown, with_examples)
         # **Broad on purpose, and this is the paragraph to read before narrowing
         # it.** This method sits on the path where a user's transaction is being
         # saved, and #39's promise is that categorising can never cost that row.
@@ -410,11 +473,11 @@ class AnthropicPredictor:
         """
         return self._prices.cost_of(usage) if self._prices else None
 
-    def _ask(self, shown: str) -> tuple[str | None, Usage]:
+    def _ask(self, shown: str, with_examples: bool = False) -> tuple[str | None, Usage]:
         message = self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
-            system=SYSTEM_PROMPT,
+            system=system_prompt(with_examples),
             messages=[{"role": "user", "content": shown}],
             # Both keys live inside output_config: `format` constrains the answer to
             # the schema, `effort` controls how hard the model thinks about it.
@@ -515,20 +578,41 @@ def _or_unknown(tokens: int | None) -> object:
     return "unknown" if tokens is None else tokens
 
 
-def _user_message(request: CategorizeRequest) -> str:
-    """The transaction, and nothing about how to categorise it.
+def _user_message(
+    request: CategorizeRequest, neighbours: Sequence[Neighbour] = ()
+) -> str:
+    """The transaction and the retrieved rows, and nothing about how to judge them.
 
     Everything instructional is in the system prompt, which is stable across every
     request -- so this is the only part that varies, and it stays that way for the
     day #60 finds this worth caching. A prefix cache is invalidated by any byte
     change in the prefix, and moving one rule down here would invalidate it on every
     single call.
+
+    **The examples go here rather than in the system prompt, and that placement is
+    the load-bearing decision of #66 on this side of the file.** `cache.py` keys an
+    answer on the model, the effort, the prompt's fingerprint and *this string*. Put
+    the retrieved rows in the system prompt and the key would not cover them, so the
+    first lookup for a description would be replayed for every later one -- serving
+    an answer computed from a corpus that has since gained the very row that would
+    have changed it. That is #65's second trap exactly, one issue along: an answer
+    remembered under a label that does not describe what produced it. Here the key
+    moves when the neighbours move, which is right, and stops moving when the
+    corpus settles, which is what makes the cache worth having at all.
     """
-    return (
-        f"Description: {request.description}\n"
-        f"Amount: {_plain(request.amount)}\n"
-        f"Currency: {request.currency.upper()}"
-    )
+    lines = [
+        f"Description: {request.description}",
+        f"Amount: {_plain(request.amount)}",
+        f"Currency: {request.currency.upper()}",
+    ]
+
+    if neighbours:
+        lines.append("")
+        lines.append(
+            render_examples([(n.example.description, n.example.category) for n in neighbours])
+        )
+
+    return "\n".join(lines)
 
 
 def _plain(amount: Decimal) -> str:

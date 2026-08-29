@@ -22,7 +22,7 @@ the model is *told* is a property of one predictor being scored against it.
 """
 
 import hashlib
-from typing import Final
+from typing import Final, Sequence
 
 from categorizer.categories import CATEGORIES, NO_PREDICTION
 
@@ -86,7 +86,7 @@ def _boundary_block() -> str:
 # `unknown` is reused rather than a new sentinel invented, because it is what
 # `rules.py` already returns and what `categories.py` keeps outside the vocabulary
 # so the scorer counts it as a miss. One sentinel, one meaning, both predictors.
-SYSTEM_PROMPT: Final[str] = f"""\
+_BASE_PROMPT: Final[str] = f"""\
 You categorise one personal spending transaction into exactly one category from a \
 closed list.
 
@@ -111,6 +111,55 @@ are not the same kind of spending.
 This is one transaction with no conversation around it. Do not ask questions and \
 do not explain your reasoning."""
 
+# What the model is told about the retrieved rows -- #66.
+#
+# **Appended only when there are examples**, which is what keeps two things true at
+# once: the prompt a request was answered under is always the prompt describing what
+# that request contained, and the no-examples prompt is byte-for-byte the one #60
+# measured at 98.9%. A single prompt carrying this paragraph unconditionally would
+# have been simpler and would have re-labelled the recorded number, so the "off" arm
+# of #66's own comparison would have had to be bought again at 53 API calls.
+#
+# The second paragraph is the one that earns its place. Neighbours are retrieved by
+# similarity, which is not relevance: a corpus of 53 rows returns five of them for
+# every query however unlike they are, and `LexicalStore` drops only the rows sharing
+# no three characters at all. Told nothing, a model shown five confident-looking
+# labelled rows will reach for the majority; told this, it can decline them. That is
+# the difference between examples and contamination, and it is #66's first trap
+# pointed at the prompt rather than at the corpus.
+_EXAMPLES_INSTRUCTION: Final[str] = """\
+Below the transaction you will be shown a few of this person's own past \
+transactions, with the categories they gave them themselves. They were chosen \
+because their descriptions resemble this one.
+
+Treat them as the best available evidence about what these particular words mean \
+to this person -- a shop name carries no meaning of its own, and these rows are \
+where its meaning is recorded.
+
+They were chosen by similarity and not by relevance, so some of them may have \
+nothing to do with this transaction. Judge each one. A past transaction that is \
+plainly the same kind of purchase should decide your answer; one that merely shares \
+a word should be ignored, and being shown examples is never a reason to stop \
+answering "unknown" when you do not know."""
+
+
+def system_prompt(with_examples: bool) -> str:
+    """The instructions, with the paragraph about examples only when there are some.
+
+    A function rather than two constants at the call site so that "which prompt was
+    sent" and "which fingerprint keyed the cache" cannot be answered from different
+    places -- `fingerprint` below takes the same argument and is the only other
+    reader.
+    """
+    return _BASE_PROMPT + ("\n\n" + _EXAMPLES_INSTRUCTION if with_examples else "")
+
+
+# Unchanged bytes, and that is asserted rather than hoped: `test_prompt.py` pins
+# this to sha256:c8ad9d9fd16f, which is the digest #60 recorded beside 98.9% and the
+# one every cache key written since #65 carries. If this moves, the recorded number
+# is describing a prompt that no longer exists.
+SYSTEM_PROMPT: Final[str] = system_prompt(False)
+
 # What this prompt is, in twelve hex characters. Two things read it, and it lives
 # here rather than in either of them because they must never disagree.
 #
@@ -131,7 +180,41 @@ do not explain your reasoning."""
 # this digest anyway, because the category names appear verbatim in the block
 # above -- but a change to the schema's *shape* alone would not, and would need the
 # `v1` in `cache.py`'s key prefix.
-FINGERPRINT: Final[str] = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
+def fingerprint(with_examples: bool) -> str:
+    """Twelve hex characters of whichever prompt was actually sent.
+
+    **Two prompts mean two fingerprints, and that is the whole mechanism rather
+    than bookkeeping.** #65 put this digest in every cache key so an edited prompt
+    could not serve yesterday's answers; #66 adds a second way for the prompt to
+    differ, and it differs *per request* rather than per commit. Without the
+    argument, a description answered with five examples and the same description
+    answered with none would share a key -- and since the examples are also in the
+    user message the key would in fact differ, which is worse: it would differ for
+    the right reason under a label that lied about which instructions produced it.
+    """
+    return hashlib.sha256(system_prompt(with_examples).encode("utf-8")).hexdigest()[:12]
+
+
+FINGERPRINT: Final[str] = fingerprint(False)
+FINGERPRINT_WITH_EXAMPLES: Final[str] = fingerprint(True)
+
+
+def render_examples(pairs: "Sequence[tuple[str, str]]") -> str:
+    """The retrieved rows as the model sees them, nearest first.
+
+    Takes descriptions and categories rather than `Neighbour`s so that `prompt.py`
+    keeps importing nothing from `retrieval.py` -- the scores are for the log and
+    for `--show-examples`, and a number the model was never shown has no business
+    in the file that decides what the model is shown.
+
+    **The score is deliberately not rendered.** Told "0.31", a model has to invent
+    a policy about what that number means, and it would be a different policy for
+    cosine than for trigram overlap -- so the same prompt would mean two things
+    depending on which store was configured. The instruction above says to judge
+    each row on its own, which is a job it can do from the text.
+    """
+    lines = "\n".join(f'- "{description}" -> {category}' for description, category in pairs)
+    return f"This person's own past transactions, most similar first:\n{lines}"
 
 # The answer's shape, enforced by the API rather than by parsing prose.
 #
