@@ -278,6 +278,14 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
             nothing. Deliberately not tied to the input with aria-describedby,
             which would read it out again on every focus.
 
+            **The paragraph is always in the document and only its contents come
+            and go**, which looks like an empty element for nothing and is the
+            whole of whether the announcement happens. A live region has to exist
+            before the text appears in it -- a region and its content inserted in
+            one go is announced by some screen readers and silently missed by
+            others, which is the same failure as having no region at all and is
+            harder to notice. App.css collapses its margin while it is empty.
+
             Nothing is rendered while a request is in flight, and nothing at all is
             rendered when one fails -- the reasoning is on SuggestionState. The
             previous suggestion stays visible while a newer one is on the way,
@@ -286,34 +294,36 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
             was the alternative and it flickers, and the answer that matters is the
             server's at save time rather than this one.
           */}
-          {suggestion.status !== 'none' && (
-            <p className="suggestion" role="status">
-              {suggestion.status === 'suggested' ? (
-                <>
-                  <span className="suggestion-label">Suggested</span>
-                  <span className="tag">{suggestion.category}</span>
-                  <SourceTag source={suggestion.source} />
-                </>
-              ) : (
-                <>
-                  {/*
-                    "No idea" is a normal answer -- the rules decline on roughly a
-                    third of the labelled set -- so it is shown rather than treated
-                    as nothing having happened. The badge names who declined, which
-                    is the difference between a baseline that does not know this
-                    shop and a model that does not.
-                  */}
-                  <span className="suggestion-label">No suggestion</span>
-                  <span className="tag tag-empty">Uncategorised</span>
-                  <SourceTag source={suggestion.source} />
-                </>
-              )}
+          <p className="suggestion" role="status">
+            {suggestion.status === 'suggested' && (
+              <>
+                <span className="suggestion-label">Suggested</span>
+                <span className="tag">{suggestion.category}</span>
+                <SourceTag source={suggestion.source} />
+              </>
+            )}
 
+            {/*
+              "No idea" is a normal answer -- the rules decline on roughly a third
+              of the labelled set -- so it is shown rather than treated as nothing
+              having happened. The badge names who declined, which is the
+              difference between a baseline that does not know this shop and a
+              model that does not.
+            */}
+            {suggestion.status === 'unknown' && (
+              <>
+                <span className="suggestion-label">No suggestion</span>
+                <span className="tag tag-empty">Uncategorised</span>
+                <SourceTag source={suggestion.source} />
+              </>
+            )}
+
+            {suggestion.status !== 'none' && (
               <span className="suggestion-note">
                 A guess, applied when you save. You can change it in the list.
               </span>
-            </p>
-          )}
+            )}
+          </p>
         </div>
       </div>
 

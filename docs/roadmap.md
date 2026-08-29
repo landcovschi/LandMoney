@@ -951,6 +951,39 @@ the thing that produced the number can be shown.
       unreachable**, p95 2051ms -- which is the number that could not be
       stated at all the day before. A metrics endpoint is deliberately still
       open
+- [x] The categorizer is visible while a transaction is typed -- #67,
+      2026-08-29. `POST /api/transactions/category-suggestion` answers what the
+      categorizer would say for a description that is not saved yet, and a badge
+      under the description field shows it 400 ms after the typing stops. Not on
+      the roadmap before this: the AI half worked and said so only in a table
+      row, after the fact.
+
+      **A POST that writes nothing**, because a GET would put the user's
+      spending in a query string and into every access log on the way, and would
+      carry the `SameSite=Lax` cookie on a top-level navigation -- so the two
+      CSRF locks #52 recorded would both be gone. The browser cannot call the
+      categorizer itself: it is internal-only (#61) and unauthenticated
+
+      **The distinction the save path never needed.** An abstention and a dead
+      service are both `null` there and are treated the same, correctly. Here
+      "no idea" has to be **visible** -- it is a normal answer on roughly a
+      third of the labelled set -- and a categorizer that is not running has to
+      be **invisible**, because nothing the person typing can do would help.
+      `CategorizerAnswer` carries who answered beside what they said, and the
+      source is what says something answered at all
+
+      **The save asks again rather than trusting the browser.** One call and a
+      guarantee that the screen and the row agree was the alternative, and it
+      lost on provenance: a client that can send a category can send a source,
+      which is the hole #59 closed
+
+      **The calls are counted by what asked for them**, which keeps #64's
+      numbers meaning what they say -- from here on the previews are the
+      majority and against the model each one is a charge
+
+      **First endpoint in the application testable end to end**, because it
+      touches no database: 34 new tests, seven mutations, all caught. The React
+      half has no test framework to check it with, and says so
 - [ ] Graceful degradation: the AI service is down, the app still works
 - [x] Evals run in CI on every PR -- #58, 2026-08-28. `python evals/score.py
       --check` compares the run against `evals/baseline.json` and exits 2 when

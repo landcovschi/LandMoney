@@ -169,6 +169,15 @@ header p {
   margin: var(--space-1) 0 0;
 }
 
+/* The paragraph is in the document whether or not there is a suggestion, because
+   a live region has to exist before its text appears or the announcement is lost
+   -- see TransactionForm. Empty it has no height, but it would still push the
+   button down by its own margin, which is a gap in the form for a thing that is
+   not there. */
+.suggestion:empty {
+  margin: 0;
+}
+
 /* Quieter than the token beside it. The word "Suggested" is scaffolding for the
    category, which is the thing worth reading -- and this is a guess about a
    transaction that does not exist yet, so it must not shout as loudly as the
