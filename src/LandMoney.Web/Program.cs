@@ -3,6 +3,7 @@ using LandMoney.Web.Auth;          // AddLandMoneyAuthentication, MapAuthEndpoin
 using LandMoney.Web.Categorizing;  // CategorizerClient, CategorizerMetrics, CategorizerSummary
 using LandMoney.Web.Data;          // AppDbContext
 using System.Text.Json;            // JsonWriterOptions, for the JSON console formatter
+using Microsoft.AspNetCore.DataProtection.KeyManagement; // IKeyManager, for #88's key ring check
 using Microsoft.AspNetCore.HttpOverrides; // ForwardedHeaders
 using Microsoft.EntityFrameworkCore; // UseNpgsql
 using Microsoft.Extensions.Logging.Console; // JsonConsoleFormatterOptions
@@ -371,13 +372,52 @@ using (var startupLoggerFactory = LoggerFactory.Create(logging =>
     }
 }))
 {
+    var startupLogger = startupLoggerFactory.CreateLogger("LandMoney.Web.Auth");
+
     builder.Services.AddLandMoneyAuthentication(
         builder.Configuration,
         builder.Environment,
-        startupLoggerFactory.CreateLogger("LandMoney.Web.Auth"));
+        startupLogger);
+
+    // #88, and it has to be above rather than below: ConfigureApplicationCookie
+    // resolves an IDataProtectionProvider out of the container, so whatever this
+    // registers is what encrypts the cookie AuthenticationSetup just configured.
+    // The order in this block is not load-bearing -- both are registrations, and
+    // nothing is resolved until a request arrives -- but reading it the other way
+    // round invites the wrong repair the first time a cookie fails to decrypt.
+    //
+    // Deliberately NOT touched by this line: Cookie.SameSite, which is the CSRF
+    // protection for the whole application and lives one file away with the
+    // paragraph explaining why.
+    builder.Services.AddLandMoneyDataProtection(
+        builder.Configuration,
+        builder.Environment,
+        startupLogger);
 }
 
 var app = builder.Build();
+
+// #88's refusal, and the placement is the argument. It is after Build() because
+// there is no IKeyManager before it, and before app.Run() because a key ring this
+// application cannot read must stop the process rather than answer requests with a
+// fresh one.
+//
+// Two things make it safe against #57, and only one of them is enough. It is
+// guarded on the key ring being configured, which `efbundle` never is -- and the
+// bundle stops at builder.Build() anyway, because that is where the host factory
+// resolver throws to get the DbContext out. The guard is the one that is checked
+// rather than reasoned about, so it is the one that is written.
+//
+// The branch is taken on the registered policy and not by reading the two
+// configuration keys again. IKeyManager resolves either way -- the web host adds
+// Data Protection by itself, so asking for one proves nothing about whether
+// anything here configured it.
+if (app.Services.GetRequiredService<KeyRingPolicy>() is PersistedKeyRing)
+{
+    DataProtectionSetup.VerifyKeyRing(
+        app.Services.GetRequiredService<IKeyManager>(),
+        app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("LandMoney.Web.Auth"));
+}
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
