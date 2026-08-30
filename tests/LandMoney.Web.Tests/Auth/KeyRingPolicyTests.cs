@@ -127,17 +127,31 @@ public class KeyRingPolicyTests
     // got wrong is a mistake to report, not a state to tolerate. The container name
     // alone is the mistake this actually catches -- it looks like a setting and
     // resolves to nothing.
+    //
+    // **The `/keys/dataprotection` row is the one that earned this theory its
+    // scheme check, and it did it by being green here and red in CI.** On Windows a
+    // leading slash is not an absolute URI; on Unix it is an absolute *file* path,
+    // so `Uri.TryCreate(..., UriKind.Absolute, ...)` answers true and produces
+    // `file:///keys/dataprotection`. The deployed container is Linux, so the check
+    // as first written would have accepted a path in the one environment that
+    // matters and refused it on the machine it was written on.
     [Theory]
     [InlineData("keyring/keys.xml", Key)]
     [InlineData("stlandmoneypl", Key)]
     [InlineData(Blob, "dataprotection")]
     [InlineData(Blob, "/keys/dataprotection")]
-    public void A_value_that_is_not_an_absolute_uri_is_refused(string blobUri, string keyUri)
+    [InlineData("/keyring/keys.xml", Key)]
+    [InlineData(Blob, "file:///keys/dataprotection")]
+
+    // http is refused too, although it parses perfectly. Neither endpoint speaks
+    // it, so accepting one would only move the failure to the first wrap.
+    [InlineData("http://stlandmoneypl.blob.core.windows.net/keyring/keys.xml", Key)]
+    public void A_value_that_is_not_an_https_uri_is_refused(string blobUri, string keyUri)
     {
         var thrown = Assert.Throws<InvalidOperationException>(() =>
             DataProtectionSetup.ReadKeyRingPolicy(blobUri, keyUri, isDevelopment: false, Silent));
 
-        Assert.Contains("absolute URI", thrown.Message);
+        Assert.Contains("not an https URI", thrown.Message);
     }
 
     // **The application name is the line most likely to be deleted as noise**, and

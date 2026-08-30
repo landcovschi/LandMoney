@@ -2952,7 +2952,7 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   the app's own managed identity -- decided 2026-08-30** (#88).
   `src/LandMoney.Web/Auth/DataProtectionSetup.cs` is the whole of it; the commands
   are a new subsection of step 15 of `docs/deploy-azure.md`; `ci.yml` gained a
-  *Check the key ring* step. Three packages, and 23 new tests that still need no
+  *Check the key ring* step. Three packages, and 26 new tests that still need no
   Postgres, no Docker and no network.
 
   **This is the item #52's own list named as most likely to be worth fixing next,
@@ -3044,6 +3044,29 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   blob is nonsense and fails at once, while **a blob with no vault starts, persists,
   keeps everybody signed in, and leaves the key that decrypts every session cookie
   in a container as plain XML** -- a downgrade nothing would report.
+
+  **A leading slash is an absolute URI on Linux and not on Windows, and that cost
+  a red CI run to find.** The two values were checked with
+  `Uri.TryCreate(..., UriKind.Absolute, ...)`, and the theory case
+  `/keys/dataprotection` was green on this machine and red on the runner:
+
+      Assert.Throws() Failure: No exception was thrown
+      Expected: typeof(System.InvalidOperationException)
+
+  On Unix a leading slash is an absolute *file* path, so `TryCreate` answers true
+  and hands back `file:///keys/dataprotection`. **The deployed container is Linux**,
+  so the weaker check would have accepted a path in the one environment that
+  matters and refused it on the machine it was written on -- green build, and a
+  failure at the first wrap with a message about a file. The check is now
+  `Scheme == Uri.UriSchemeHttps`, which is the tightest thing still true of both a
+  blob endpoint and a Key Vault key identifier, and which makes a bare container
+  name, a relative path and an accidental `file://` all fail in one place. http is
+  refused with them, although it parses: neither endpoint speaks it, so accepting
+  one would only move the failure later.
+
+  Worth keeping as the general form rather than as this instance: **a `Uri` check is
+  a platform-dependent check**, and this repository writes on Windows and runs on
+  Linux. It is the same shape as #57's green-build / red-deploy, one API along.
 
   **`SetApplicationName("LandMoney")`, written out, and its absence is a silent
   sign-out.** The default application discriminator is derived from the content

@@ -1095,7 +1095,7 @@ Recorded so they do not creep back in:
   exists because of a measurement: the framework's answer to a key it cannot
   decrypt is a warning nobody reads and a **brand-new key ring**. Left alone the
   fix would have shipped with the bug inside it, arriving as a working site with
-  everybody signed out. 23 new tests, twelve mutations, eleven applied and all eleven caught
+  everybody signed out. 26 new tests, twelve mutations, eleven applied and all eleven caught, plus one the runner caught that the mutations did not
 - Multi-currency conversion. Amounts keep their currency; no implicit maths
 - Bank integrations. Manual entry and CSV import are enough to learn from
 - Anything resembling investment or financial advice. Categorising past

@@ -180,12 +180,31 @@ public static class DataProtectionSetup
             Absolute(keyUri!, KeyUriKey));
     }
 
+    // **https and not merely absolute, and the difference is a measurement rather
+    // than caution.** This was `UriKind.Absolute` alone, and a test case of
+    // `/keys/dataprotection` passed on Windows and failed in CI:
+    //
+    //   Assert.Throws() Failure: No exception was thrown
+    //   Expected: typeof(System.InvalidOperationException)
+    //
+    // On Unix a leading slash is an absolute *file* path, so `Uri.TryCreate`
+    // answers true and hands back `file:///keys/dataprotection`. The deployed
+    // container is Linux. So the weaker check would have accepted a path in the one
+    // environment that matters and refused it on the machine it was written on --
+    // green build, and a failure at the first wrap with a message about a file.
+    //
+    // Both of these are https by construction: a blob endpoint and a Key Vault key
+    // identifier. Nothing here has to accept http, so the check is the tightest one
+    // that is still true, and it is what makes a bare container name, a relative
+    // path and an accidental `file://` all fail in the same place with the same
+    // sentence.
     private static Uri Absolute(string value, string key) =>
         Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        && uri.Scheme == Uri.UriSchemeHttps
             ? uri
             : throw new InvalidOperationException(
-                $"{key} is '{value}', which is not an absolute URI. It wants the full https "
-                + "address of the blob or of the key, not a name.");
+                $"{key} is '{value}', which is not an https URI. It wants the full https "
+                + "address of the blob or of the key, not a name and not a path.");
 
     /// <summary>
     /// Refuses to carry on when a key already in the store cannot be read, rather
