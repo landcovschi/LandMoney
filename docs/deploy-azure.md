@@ -30,6 +30,8 @@ inspected.
 | Environment     | `cae-landmoney`     |                                                         |
 | Container app   | `landmoney`         | First label of the URL                                  |
 | Categorizer app | `landmoney-categorizer` | Internal ingress -- no URL at all, see step 16       |
+| Storage account | `stlandmoneypl`     | The Data Protection key ring -- one blob, see step 15   |
+| Key vault       | `kv-landmoney-pl`   | Holds the key that wraps it, see step 15                |
 
 **Why the database's full host name is `<server>` below and not spelled out**,
 decided in #36. The container app's FQDN is written out everywhere in this
@@ -1292,27 +1294,278 @@ The other route is a small one-off program using `UserManager.ResetPasswordAsync
 with a generated token. It is the correct answer and it is not written here,
 because a program that can reset any password is a thing that then exists.
 
-### What is not solved, and it will be noticed
+### The cookie that survives a restart
 
-**The cookie does not survive a restart of the container.** ASP.NET Core encrypts
-the authentication cookie with Data Protection keys, and with no configured key
-ring those keys are generated in memory and die with the process. With
-`--min-replicas 0` the process dies after roughly fourteen idle minutes (#35), so
-the practical rule is: **coming back to the site after a pause means signing in
-again** -- and here that means typing a password, where under an external
-provider it would have been a redirect and no typing.
+**#88**, and until it the paragraph here said this was the first thing to pick up
+after #52. What it fixes is the one cost on that list the owner paid every single
+day.
 
-Two sharper edges of the same cause. A revision replaced mid-session signs
-everybody out. And the day `--min-replicas` goes above 1, two replicas cannot
-read each other's cookies at all, so the symptom stops being "signed out after a
-pause" and becomes "signed out at random".
+ASP.NET Core encrypts the authentication cookie with a Data Protection key ring.
+With nothing configured, that ring is generated in memory and dies with the
+process -- and with `--min-replicas 0` the process dies after roughly fourteen
+idle minutes (#35). So **coming back to the site after a pause meant typing a
+password again**, where under the OpenID Connect version that lived for one day
+it would have been a redirect and no typing. Two sharper edges of the same cause:
+a revision replaced mid-session signed everybody out, and the day `--min-replicas`
+goes above 1 two replicas cannot read each other's cookies at all -- which stops
+looking like "signed out after a pause" and starts looking like "signed out at
+random".
 
-The fix is a persisted key ring: `PersistKeysToAzureBlobStorage` plus
-`ProtectKeysWithAzureKeyVault`, which is two packages and at least one more Azure
-resource. Deliberately not done in #52 -- it is a deployment decision with a bill
-attached rather than part of closing the door -- and it is the first thing to pick
-up afterwards, because a password typed on every visit is what makes people pick
-short ones.
+The fix is two Azure resources, an identity to reach them with, and two
+environment variables. The application half is `src/LandMoney.Web/Auth/DataProtectionSetup.cs`.
+
+#### What it costs, read rather than guessed
+
+Off the Azure retail prices API on 2026-08-30, for `polandcentral`:
+
+| Meter                                  | Rate                  |
+| -------------------------------------- | --------------------- |
+| Blob, Hot LRS, data stored             | 0.0196 USD / GB month |
+| Blob, Hot LRS, read operations         | 0.0043 USD / 10K      |
+| Blob, Hot LRS, write operations        | 0.054 USD / 10K       |
+| Key Vault Standard, operations         | 0.03 USD / 10K        |
+
+Neither resource has a monthly base charge; both are billed per operation. The
+key ring is one XML file of a few kilobytes, read once per process start and
+written once every ninety days when a key rolls. At this application's usage that
+is **a small fraction of one US cent a month** -- far below the resolution of the
+bill, and about four orders of magnitude under the 15-20 USD Postgres faces when
+the free year ends (#34).
+
+That is the answer to #88's first trap, and it is worth stating in the shape the
+trap asks for: small is not free, and this one is small enough that the arithmetic
+was the cheap part. The thing actually being spent is a second and third resource
+to keep track of, not money.
+
+**RSA 2048, deliberately.** Key Vault charges "Advanced Key Operations" at
+0.15 USD / 10K for RSA 3072 and above and for elliptic curve keys -- five times
+the rate above. The number of operations here makes that difference meaningless in
+money, and the reason for taking 2048 anyway is that it is what the wrap needs and
+nothing here benefits from more.
+
+#### The names, which follow the table at the top of this file
+
+| What            | Name              | Note                                        |
+| --------------- | ----------------- | ------------------------------------------- |
+| Storage account | `stlandmoneypl`   | Globally unique; lower-case letters and digits only, 3-24 |
+| Blob container  | `keyring`         | Holds one file                              |
+| Key vault       | `kv-landmoney-pl` | Globally unique, and the name is held for 7 days after a delete |
+| Key             | `dataprotection`  | RSA 2048, wrap and unwrap only              |
+
+#### 1. The storage account and the container
+
+```powershell
+az storage account create -g rg-landmoney -n stlandmoneypl -l polandcentral --sku Standard_LRS --kind StorageV2 --min-tls-version TLS1_2 --allow-blob-public-access false --allow-shared-key-access false
+```
+
+`Standard_LRS` and not one of the redundant tiers: losing this file costs one
+sign-in, which is the same thing a redeployment already costs today.
+
+**`--allow-shared-key-access false` is the flag that matters, and it has a
+consequence one command later.** With it, the account key stops working entirely
+and every request has to carry an Entra ID token -- which is what the application
+does. Leaving it on would keep a bearer credential to the whole account alive
+beside the identity that makes it unnecessary. What it costs is that the *owner*
+also has no key, so creating the container needs a token, and holding Owner or
+Contributor on the subscription **does not** grant data-plane access to blobs.
+That is a separate role assignment, and it is the one people spend an afternoon
+on:
+
+```powershell
+az role assignment create --assignee-object-id (az ad signed-in-user show --query id -o tsv) --assignee-principal-type User --role "Storage Blob Data Contributor" --scope (az storage account show -g rg-landmoney -n stlandmoneypl --query id -o tsv)
+```
+
+```powershell
+az storage container create --account-name stlandmoneypl -n keyring --auth-mode login
+```
+
+`--auth-mode login` is not optional here for the same reason: without it the CLI
+reaches for the account key that no longer exists, and the error talks about
+credentials rather than about the flag two commands above.
+
+**Nothing creates the blob itself.** The application writes `keys.xml` the first
+time it makes a key, and an empty container is the correct starting state -- which
+is also why the startup check in `DataProtectionSetup.VerifyKeyRing` accepts a
+ring with no keys in it.
+
+#### 2. The vault and the key
+
+```powershell
+az keyvault create -g rg-landmoney -n kv-landmoney-pl -l polandcentral --enable-rbac-authorization true --retention-days 7
+```
+
+`--enable-rbac-authorization true` uses Azure role assignments rather than the
+vault's own access policies. It is the current default and is written out because
+the two systems look alike and do not interact: a role assignment on a
+policy-mode vault grants nothing, silently.
+
+`--retention-days 7` is the floor. Soft delete cannot be turned off, so a deleted
+vault holds its **globally unique name** for the retention period -- which is a
+detail with no consequence until the day this is torn down and rebuilt, and then
+it is the whole morning. Purge protection is deliberately left off for the same
+reason; it is the right setting for a vault holding something irreplaceable, and
+this one holds a wrapping key whose loss costs one sign-in.
+
+Creating a key in an RBAC vault is a data-plane operation, so the same rule as the
+storage account applies to the owner:
+
+```powershell
+az role assignment create --assignee-object-id (az ad signed-in-user show --query id -o tsv) --assignee-principal-type User --role "Key Vault Crypto Officer" --scope (az keyvault show -g rg-landmoney -n kv-landmoney-pl --query id -o tsv)
+```
+
+```powershell
+az keyvault key create --vault-name kv-landmoney-pl -n dataprotection --kty RSA --size 2048 --ops wrapKey unwrapKey
+```
+
+**`--ops wrapKey unwrapKey` and nothing else.** This key exists to encrypt one
+small XML document; a key that can also sign is a key that can be used for
+something nobody intended.
+
+#### 3. The identity that reads them
+
+**This is #88's second trap and it is a real one.** The OIDC federation from step
+14 belongs to the **workflow**: it is what `azure/login` trades a GitHub token for,
+and it is how `ci.yml` runs `az containerapp update`. The **running container** is
+a completely different principal, and it is the one that needs to read a blob and
+unwrap a key. Confusing the two produces role assignments that are correct, on the
+wrong identity, and a 403 that names neither.
+
+```powershell
+az containerapp identity assign -g rg-landmoney -n landmoney --system-assigned
+```
+
+```powershell
+az containerapp show -g rg-landmoney -n landmoney --query identity.principalId -o tsv
+```
+
+That principal id is what the next two commands are about. System-assigned rather
+than user-assigned: it is created and deleted with the app, so there is no orphan
+to clean up and nothing to remember to attach when the app is recreated. The cost
+is that recreating the app makes a **new** principal and both role assignments
+have to be made again -- which is written into the teardown section at the bottom
+of this file.
+
+```powershell
+az role assignment create --assignee-object-id <the principalId> --assignee-principal-type ServicePrincipal --role "Storage Blob Data Contributor" --scope "$(az storage account show -g rg-landmoney -n stlandmoneypl --query id -o tsv)/blobServices/default/containers/keyring"
+```
+
+```powershell
+az role assignment create --assignee-object-id <the principalId> --assignee-principal-type ServicePrincipal --role "Key Vault Crypto User" --scope "$(az keyvault show -g rg-landmoney -n kv-landmoney-pl --query id -o tsv)/keys/dataprotection"
+```
+
+Three things in those two lines are decisions rather than syntax.
+
+**`--assignee-object-id` with `--assignee-principal-type`, never `--assignee`.**
+The friendly form looks up the principal in Microsoft Graph, and a managed
+identity created seconds earlier has not replicated yet -- so the command fails
+with `Cannot find user or service principal in graph database`, which reads like
+the identity was not created. It usually was. The explicit form skips the lookup
+and is also the one that works when the account running it cannot read Graph at
+all.
+
+**Both scopes reach past the resource to the thing inside it.** `Storage Blob
+Data Contributor` on the account would grant every container it will ever have;
+on `/blobServices/default/containers/keyring` it grants one. Same for the key.
+Neither role has a read-only variant that would do -- the application creates a
+key every ninety days and wraps it, so it genuinely needs to write.
+
+**A scope is a string beginning with a slash, and on this machine that is the
+trap `CLAUDE.md` records twice.** Git Bash rewrites an argument that looks like a
+Unix path into a Windows one before `az` ever sees it, and the failure is an error
+about something else entirely -- `MissingSubscription` was #38's. These commands
+are run from PowerShell.
+
+#### 4. Point the application at them
+
+```powershell
+az containerapp update -g rg-landmoney -n landmoney --set-env-vars "DataProtection__KeyRingBlobUri=https://stlandmoneypl.blob.core.windows.net/keyring/keys.xml" "DataProtection__KeyVaultKeyUri=https://kv-landmoney-pl.vault.azure.net/keys/dataprotection"
+```
+
+Double underscores, and `--set-env-vars` rather than `--replace-env-vars`, for
+the reasons the invite code above already gives.
+
+**Neither of these is a secret and neither is a Container Apps secret.** They name
+two resources; reaching either needs the managed identity, which is not something
+a URL carries. This is the same distinction `Categorizer:BaseUrl` draws in
+`README.md`: a value being configuration is not the same as a value being a
+secret.
+
+**The key URI carries no version, and that is load-bearing.** Key Vault will
+happily give out `.../keys/dataprotection/9a8b...`, and pinning it works until the
+key is rotated, at which point the application keeps asking for a version that is
+no longer current. Versionless, the wrap uses whatever is current and the unwrap
+uses the version recorded inside the key ring XML, so rotation costs nothing and
+old keys stay readable.
+
+**Set these before the image that reads them is deployed**, the same order as the
+invite code and for the same reason: the running revision has never heard of
+either variable and ignores both, so there is no window in which anything is
+wrong. `ci.yml` asserts all of this on every deployment -- the two variables and
+the system-assigned identity -- in a step called *Check the key ring*, which is
+last in the job precisely so that the first run after #88 merges fails there and
+nowhere else if this section has not been run.
+
+#### How it is checked
+
+Three things, and they are #88's own acceptance tests.
+
+**1. A session survives a new revision.** Sign in, then force one:
+
+```powershell
+az containerapp revision restart -g rg-landmoney -n landmoney --revision <the active revision>
+```
+
+Reload the page. Before #88 that is a login form; after it, the transactions.
+
+**2. Two replicas accept each other's cookies.** Temporarily:
+
+```powershell
+az containerapp update -g rg-landmoney -n landmoney --min-replicas 2 --max-replicas 2
+```
+
+Sign in, reload several times, and watch that nothing signs out; the ingress
+spreads requests across both. Then put it back to `--min-replicas 0
+--max-replicas 1`, because a replica held around the clock is exactly the bill
+#61 declined for the categorizer.
+
+**3. Keys that cannot be read stop the application rather than being replaced.**
+This is the one worth doing, because it is the failure the whole feature is shaped
+around and the framework's own answer to it is wrong. Remove the vault role from
+the app's identity, restart it, and read the log stream:
+
+```powershell
+az role assignment delete --assignee <the principalId> --role "Key Vault Crypto User" --scope "$(az keyvault show -g rg-landmoney -n kv-landmoney-pl --query id -o tsv)/keys/dataprotection"
+```
+
+The replica must fail to start, with `Data Protection key <id> is in the store and
+cannot be decrypted` in its log. **What must not happen is a working site**: left
+to itself the framework logs that at Warning, decides the key is ineligible, and
+generates a fresh ring -- measured while writing #88, on a file-system store with
+certificate protection standing in for these two:
+
+```
+3b. Unprotect threw CryptographicException: Unable to retrieve the decryption key.
+3c. Protect SUCCEEDED -- so a new key ring was generated over the unreadable one
+3d. keys on disk now: 2
+```
+
+Everybody signed out, nothing red, which is #88's bug arriving through the fix
+for it. Put the role back afterwards and restart again.
+
+#### On this machine, nothing
+
+Neither variable is set locally and neither should be. Keys in memory are the
+right answer on a machine restarted by its owner, on purpose, while they are
+looking at it -- and `dotnet run` needs no Azure account, no `az login` and no
+network for authentication to work. The application says so once at startup, at
+Information, and that line is how the state is told apart from a deployment that
+lost its configuration, where the same sentence is an Error.
+
+**Half configured is refused outright**, in both places. Setting the blob without
+the vault would start, persist, keep everybody signed in, and leave the key that
+decrypts every session cookie sitting in a container as readable XML -- a
+downgrade with no symptom at all. So the application throws at startup rather than
+taking it, and `ci.yml` reads both variables rather than one.
 
 
 ## Step 16 -- the categorizer, as its own app
@@ -1881,3 +2134,14 @@ az group delete --name rg-landmoney --yes --no-wait
 
 This deletes the database and its backups. There is nothing else to clean up --
 the Log Analytics workspace is inside the group too.
+
+**Two things do not come back the way they went, and both are step 15's.** The key
+vault is soft-deleted rather than gone, and it holds its globally unique name for
+the seven days `--retention-days` was set to -- so rebuilding inside that window
+needs `az keyvault recover` or a different name. And the container app's
+system-assigned identity is deleted with the app, so a rebuilt app has a **new**
+principal id and both role assignments have to be made again. Neither is an error
+anybody would guess from: the first fails at `keyvault create` with a name
+conflict, and the second starts cleanly and then refuses to serve, because
+`VerifyKeyRing` reads the ring at startup and a 403 is not something it carries
+on from.

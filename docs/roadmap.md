@@ -1077,6 +1077,25 @@ Recorded so they do not creep back in:
   read answered `WHERE owner_id IS NULL` and every write stamped null, so two
   accounts saw one shared list with no error anywhere and every unit test green.
   A filter that fails to nothing is loud; that one failed to everything
+
+  **The one thing #52 left open closed on 2026-08-30, in #88.** The Data
+  Protection key ring was generated in memory and died with the process, so with
+  `--min-replicas 0` coming back to the site after fourteen idle minutes meant
+  typing a password -- the cost the owner paid every single day, and the item
+  `CLAUDE.md` named as most likely to be worth fixing next. It now lives in a blob
+  wrapped with a Key Vault key, read with the container app's own managed
+  identity. Locally nothing is configured and nothing should be
+
+  **The bill was the trap and the arithmetic was the cheap part**: neither
+  resource has a monthly base charge, and one XML file read once per start comes
+  to a fraction of a US cent a month. What is actually spent is two more resources
+  to keep track of
+
+  **The half that is not two package references is `VerifyKeyRing`**, and it
+  exists because of a measurement: the framework's answer to a key it cannot
+  decrypt is a warning nobody reads and a **brand-new key ring**. Left alone the
+  fix would have shipped with the bug inside it, arriving as a working site with
+  everybody signed out. 26 new tests, twelve mutations, eleven applied and all eleven caught, plus one the runner caught that the mutations did not
 - Multi-currency conversion. Amounts keep their currency; no implicit maths
 - Bank integrations. Manual entry and CSV import are enough to learn from
 - Anything resembling investment or financial advice. Categorising past

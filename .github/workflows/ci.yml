@@ -1036,3 +1036,83 @@ jobs:
             echo "- api key: $([ -n "$key_ref" ] && echo "a secret reference" || echo none)"
             echo "- cost line: $([ -n "$price_in" ] && [ -n "$price_out" ] && echo "priced" || echo "cost_usd=unpriced")"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ----------------------------------------------------------------------
+      # And the key ring -- #88.
+      #
+      # Last, for the reason the categorizer steps above are next-to-last: this
+      # asserts a state the runbook creates and this workflow does not, so the
+      # first run after #88 merges is red here unless step 15 of
+      # docs/deploy-azure.md has been run once. Everything before it has gone
+      # green by then, and nothing is left half applied.
+      #
+      # Why it is a check here rather than a throw in Program.cs: #57. `efbundle`
+      # runs that file from a directory holding no configuration at all, so a
+      # required key there kills `Apply migrations` five steps up. What the
+      # application does with the keys missing is log one error and carry on with
+      # a key ring in memory -- correct, because a dependency it is designed to
+      # run without must not stop it starting, and invisible for exactly the same
+      # reason. This step is the half that cannot be scrolled past.
+      #
+      # The failure it catches has no other symptom. With these unset the site
+      # works: it starts, serves, signs people in, and encrypts the cookie with
+      # keys it made up. Then the process dies at the fourteen-minute idle mark
+      # (#35) and takes them with it, so the only thing a person sees is that
+      # they are typing their password again.
+      # ----------------------------------------------------------------------
+      - name: Check the key ring
+        run: |
+          # Both are read, and not only the blob. Half configured is a startup
+          # throw in the application itself -- a blob with no vault would keep
+          # everybody signed in while leaving the key that decrypts every cookie
+          # in a container as readable XML -- and a revision that will not start
+          # is a worse way to discover that than a red step here.
+          keyring=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --query "properties.template.containers[0].env[?name=='DataProtection__KeyRingBlobUri'].value | [0]" \
+            -o tsv --only-show-errors)
+          vaultkey=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --query "properties.template.containers[0].env[?name=='DataProtection__KeyVaultKeyUri'].value | [0]" \
+            -o tsv --only-show-errors)
+
+          if [ -z "$keyring" ] || [ -z "$vaultkey" ]; then
+            echo "::error::the app has no persisted Data Protection key ring (blob=${keyring:-(unset)}, key=${vaultkey:-(unset)}), so every cold start signs everybody out -- see step 15 of docs/deploy-azure.md"
+            exit 1
+          fi
+
+          # And the identity that reads them exists. #88's second trap, and it is
+          # a real one: the OIDC federation this job logged in with belongs to the
+          # *workflow*, and the running container is a different principal
+          # entirely -- it is the one the two role assignments are on. Confusing
+          # them costs a morning, and losing the system-assigned identity is one
+          # `containerapp identity remove` away. What that produces is a 403 at
+          # the next cold start, which without this line is a site that is down
+          # with nothing in the deployment that caused it saying so.
+          identity=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --query "identity.type" -o tsv --only-show-errors)
+
+          # A prefix match, because an app that later gains a user-assigned
+          # identity for something else answers `SystemAssigned, UserAssigned`,
+          # and that is still a system-assigned identity. `None` and an empty
+          # answer both fall through to the error.
+          case "$identity" in
+            SystemAssigned*) ;;
+            *)
+              echo "::error::the app's identity is ${identity:-None}, so it cannot read the key ring or the vault key -- see step 15 of docs/deploy-azure.md"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo '### Key ring'
+            echo
+            # The addresses rather than a yes. "Which blob" is the question asked
+            # the day a session does not survive a revision, and neither address is
+            # a credential -- reading them needs the identity on the row below, and
+            # the container is not public.
+            echo "- keys: $keyring"
+            echo "- wrapped with: $vaultkey"
+            echo "- read as: $identity"
+          } >> "$GITHUB_STEP_SUMMARY"

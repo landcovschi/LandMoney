@@ -163,6 +163,26 @@ nowhere else: anywhere else, an empty code means nobody new may register at all.
 It fails closed, and it still starts -- `efbundle` runs `Program.cs` with no
 configuration at all, and #57 is what a startup throw on that path costs.
 
+**The session survives a restart, and that took two Azure resources (#88).** The
+authentication cookie is encrypted with a Data Protection key ring, and with
+nothing configured that ring is generated in memory and dies with the process --
+which, on a container that scales to zero, is roughly every fourteen idle minutes.
+So the deployed site asked for a password on nearly every visit. It now keeps the
+ring in a blob and wraps it with a Key Vault key, reached with the container app's
+own managed identity: `DataProtection:KeyRingBlobUri` and
+`DataProtection:KeyVaultKeyUri`, both plain configuration rather than secrets,
+because a URL is not a credential and neither address is reachable without that
+identity. Step 15 of `docs/deploy-azure.md` has the commands, and `ci.yml` asserts
+both variables and the identity on every deployment.
+
+**Locally neither is set and neither should be.** Keys in memory are the right
+answer on a machine its owner restarts on purpose while looking at it, and
+`dotnet run` needs no Azure account for sign-in to work. The two states are told
+apart by one startup line: Information on a developer machine, Error anywhere
+else. Setting one of the two and not the other is refused at startup, because the
+blob without the vault would keep everybody signed in while leaving the key that
+decrypts every cookie in a container as readable XML.
+
 **There is no password reset**, on purpose: it would mean an email provider, an
 API key and a sender domain. A forgotten password is an administrative act, and
 step 15 has it.
