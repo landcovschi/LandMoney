@@ -1394,31 +1394,25 @@ az containerapp create --resource-group rg-landmoney --name landmoney-categorize
   Claude call per saved transaction. That is a decision with a bill attached and
   it is not this step's.
 
-  **And since #65 it is two decisions with two bills.** The model path caches its
-  answers in Redis so that an identical description is not billed twice, and
-  **there is no Redis in this resource group** -- deliberately, because a cache in
-  front of a predictor that is not running is a monthly charge for nothing.
-  `docker-compose.yml` has one for local work; the deployed categorizer has
-  `CATEGORIZER_REDIS_URL` unset and therefore no cache, which is the correct and
-  free state while it runs the rules.
+  **That decision was taken on 2026-08-30 in #87, and this bullet is now history
+  rather than the state of the world.** The categorizer runs the model; the
+  commands, what it costs and the ceiling are in *Turning the model on* at the end
+  of this step. What is worth keeping here is what the paragraph used to say and
+  what happened to it.
 
-  So flipping this variable to `model` is three things and not one: the key as a
-  secret, a cache, and the price variables of #64 if the cost line is to mean
-  anything. `ci.yml`'s `Check the categorizer` step refuses a deployment that is
-  `model` with no `CATEGORIZER_REDIS_URL`, because that combination is billed per
-  save, forever, and looks exactly like a working deployment.
+  It said that flipping this variable was three things and not one -- the key as a
+  secret, **a Redis cache**, and the price variables of #64 -- and that `ci.yml`
+  refused a deployment that was `model` with no `CATEGORIZER_REDIS_URL`, because an
+  uncached model is billed once per saved transaction. It also said, in #65's own
+  words, that the honest third option was no cache at all and that **the arithmetic
+  was the thing to do before provisioning anything**.
 
-  What the cache would cost, read on 2026-08-29 and to be re-read rather than
-  trusted: **Azure Cache for Redis Basic C0** (250 MB, no SLA, a single node) is
-  around **16 USD a month** -- which is the same order as the whole Postgres bill
-  slice 3 is facing when the free year ends (#34), for a service one person uses
-  weekly. Two alternatives worth pricing at the same time: a `redis:8-alpine`
-  container app of its own with internal ingress and `--min-replicas 1` (cheaper,
-  and it is then a database with no backups that must not scale to zero), or an
-  Azure Cache for Redis in the *free* tier if one exists on the day. The honest
-  third option is no cache at all and a per-call bill, which for weekly use may
-  simply be smaller than 16 USD -- **that arithmetic is the thing to do before
-  provisioning anything**, and it needs the token counts #64 already logs.
+  The arithmetic was done and it removed one of the three: a call is 0.62 US cents
+  and the cache is ~16 USD a month, so the cache pays for itself at ~2,600 calls a
+  month against the 80-160 this application makes. So it is **two** things and not
+  three, the Redis gate is gone from `ci.yml`, and what replaced it asserts the two
+  that are left -- the key must be a secret reference and never a value, and `model`
+  with no price configured is refused.
 - **No registry credentials**, for the reason step 10 gives: the package is
   public. It is a *second* package, and #24 recorded that ghcr.io makes a new one
   private by default -- **measured here, and it was already public**, listing its
@@ -1544,6 +1538,269 @@ az containerapp update -g rg-landmoney -n landmoney-categorizer --image ghcr.io/
 ```
 
 
+### Turning the model on
+
+**#87, 2026-08-30.** Everything above deploys the categorizer running
+`CATEGORIZER_PREDICTOR=rules`, which costs nothing and scores 56.1% macro recall.
+`docs/evals.md` section 7 records the model at **98.9%**, measured twice, with
+zero confident errors -- so until this the repository held a number it did not
+use, and every transaction saved through the site was categorised at baseline
+quality while the model existed only in an eval run.
+
+This is the step that closes that. It is a decision with a bill rather than a
+configuration change, so the arithmetic comes before the commands.
+
+#### What a call costs, measured
+
+Four rows through `evals/score.py --predictor model` on 2026-08-30, with #64's
+price variables set to the published rate, which is what puts `cost_usd` on the
+line at all:
+
+```
+model_call outcome=answered model=claude-opus-5 effort=low elapsed_ms=2307 input_tokens=1174 output_tokens=11 cost_usd=0.006145
+model_call outcome=answered model=claude-opus-5 effort=low elapsed_ms=2075 input_tokens=1172 output_tokens=12 cost_usd=0.006160
+model_call outcome=answered model=claude-opus-5 effort=low elapsed_ms=2076 input_tokens=1176 output_tokens=13 cost_usd=0.006205
+model_call outcome=answered model=claude-opus-5 effort=low elapsed_ms=2046 input_tokens=1173 output_tokens=11 cost_usd=0.006140
+```
+
+**One call is 0.62 US cents.** Two things in those numbers are worth more than
+the total, because both contradict what the code assumes about itself.
+
+**Output is eleven to thirteen tokens.** Adaptive thinking at `effort=low` writes
+essentially nothing on a one-word classification against a rubric supplied in
+full. `anthropic_predictor.py` sets `max_tokens=2048` and its comment explains
+that the ~256 a classification suggests would "truncate mid-thought and cost a
+retry" -- that reasoning is sound and the headroom it reserves is never touched.
+So the answer is **2.5% of the bill and the prompt is the other 97.5%**, which
+inverts every intuition about where to look if this ever needs to be cheaper.
+`CATEGORIZER_EFFORT` is a latency and quality lever; it is not a cost lever.
+
+**Input is ~1,173 tokens where the prompt text measures ~700.** The remaining
+~450 is `RESPONSE_SCHEMA` and the message framing, neither of which appears in
+`prompt.py`'s character count. Anything that prices this by measuring the file
+will be low by 60%.
+
+#### What a saved transaction costs, which is not one call
+
+Since #67 the categorizer is asked twice for one transaction: once 400 ms after
+the typing stops, for the badge under the description field, and once again when
+the row is saved -- because the save deliberately does not trust the browser's
+answer, since a client that can send a category can send a source. Every
+`(description, amount, currency)` that survives the debounce is a call, and the
+amount is usually typed after the description, so a transaction entered
+comfortably is **two to four calls, 1.2 to 2.5 US cents**.
+
+At forty transactions a month -- one person, weekly, which is what this
+application is -- that is **50 to 100 US cents a month**. A month of nothing but
+CSV imports costs nothing at all: #62 does not call the categorizer.
+
+#### The cache, and why there is not one
+
+`ci.yml` used to refuse a deployment that was `model` with no
+`CATEGORIZER_REDIS_URL`. #65 wrote that gate and, in the same breath, wrote down
+what would settle whether it was right:
+
+> The honest third option is no cache at all and a per-call bill, which for
+> weekly use may simply be smaller than 16 USD -- **that arithmetic is the thing
+> to do before provisioning anything.**
+
+Done, and it is not close. **Azure Cache for Redis Basic C0 is ~16 USD a month**
+-- the figure #65 recorded on 2026-08-29, carried forward here and still to be
+re-read rather than trusted -- which at 0.62 cents a call pays for itself at
+**~2,600 calls a month, 87 every day, every day**. This application makes 80 to
+160 a month. The gate was refusing the cheaper of two states by a factor of about
+thirty, so it is **gone rather than satisfied**, and what replaces it is below.
+
+The alternative #65 named loses the same way and by arithmetic rather than by a
+price list. A `redis:8-alpine` container app of its own needs `--min-replicas 1`,
+because a cache that scales to zero is a cache that is always cold; the smallest
+valid size is 0.25 vCPU and 0.5 GiB, which running continuously is ~648,000
+vCPU-seconds and ~1.3 million GiB-seconds a month. After the subscription's
+monthly free grant that is roughly 14 USD at the published consumption rates --
+and the grant is already partly spent by the two apps that exist, so 14 is a
+floor. The order of magnitude is what decides this, and it is the same one.
+
+**What is given up by having no cache**, said plainly rather than waved away: the
+preview and the save of the same transaction are two calls where one would do, so
+roughly a third to a half of the bill above is a duplicate. A third of a dollar a
+month is not worth sixteen.
+
+`docker-compose.yml` keeps its Redis and nothing changes locally -- the cache is
+still where an experiment that re-runs the same descriptions belongs, and #65's
+measurements stand. What changed is the answer to "does the deployed one need
+one", and it is no.
+
+**The cache that would actually pay, and it is not this one.** Anthropic's prompt
+caching would cut the ~1,150-token constant prefix -- the system prompt and the
+schema, byte-identical on every call -- to a tenth on a read, which is where 97%
+of this bill is. It needs no infrastructure and no monthly charge, only a
+`cache_control` on one content block, and `_user_message`'s docstring already
+keeps the varying half at the end for exactly that day. `Prices.cost_of` says in
+as many words that the figure it computes becomes an overestimate when it
+happens. It is a change to the adapter, so it is its own issue and not this one.
+
+#### The ceiling, if anything ever loops
+
+Nothing in this deployment caps spend, and it is worth writing down what that
+means rather than discovering it.
+
+`--max-replicas 1` bounds concurrency and not money. `/categorize` is a `def`
+handler, so Starlette dispatches it to AnyIO's thread pool -- forty threads by
+default -- and at ~2.1 s a call that is about **19 calls a second, or ~7 USD a
+minute, ~420 USD an hour**. Nothing rate-limits the preview endpoint either; #67
+says so in as many words, and the only thing between that screen and an unbounded
+number of calls is that a person types slowly.
+
+**So the ceiling is set at Anthropic, in the Console, and not here.** Put the key
+in a workspace with a **monthly spend limit** -- 5 USD is roughly 800 calls,
+which is five times the expected use and a rounding error against the numbers
+above. That is the owner's act, it costs nothing, and it is the only control in
+this whole arrangement that a bug in this repository cannot defeat.
+
+What makes it the right shape rather than merely the available one: **the limit
+degrades into the state the application already handles.** A call refused for
+spend raises inside `AnthropicPredictor`, which catches `Exception`, logs the
+traceback, writes `model_call outcome=failed`, and returns no category -- #39's
+fallback, unchanged by a model being behind the port. The site keeps saving
+transactions. A spend limit here does not take anything down.
+
+#### The commands
+
+Three of them, in this order, and the order matters: a revision that references a
+secret which does not exist yet does not start.
+
+**One.** The key as a secret, the same road the connection string takes (step 12).
+It is read rather than typed into the command, because a command line reaches the
+shell's history file and this one is a credential:
+
+```
+read -rs ANTHROPIC_KEY
+echo "length: ${#ANTHROPIC_KEY}"
+az containerapp secret set -g rg-landmoney -n landmoney-categorizer --secrets "anthropic-key=$ANTHROPIC_KEY"
+unset ANTHROPIC_KEY
+```
+
+**Checking a key by printing its length and never its value** is the rule from
+#76, and it is the whole of what can be confirmed here: `secret list` without
+`--show-values` answers with names only, which is the property worth keeping
+rather than a limitation to work around.
+
+**Two.** The predictor, the key reference, and the prices -- one `update`, so one
+new revision:
+
+```
+az containerapp update -g rg-landmoney -n landmoney-categorizer --set-env-vars "CATEGORIZER_PREDICTOR=model" "ANTHROPIC_API_KEY=secretref:anthropic-key" "CATEGORIZER_PRICE_INPUT_PER_MTOK=5.00" "CATEGORIZER_PRICE_OUTPUT_PER_MTOK=25.00"
+```
+
+- **`secretref:anthropic-key`, never the key itself.** `--set-env-vars
+  "ANTHROPIC_API_KEY=sk-..."` deploys, starts and answers correctly, and the key
+  is then readable by anybody who can run `az containerapp show` -- and it stays
+  in that revision's template for as long as the revision is listed, which
+  outlives rotating the key, because rotating writes a new revision and does not
+  edit the old one. `ci.yml` asserts the difference; see below.
+- **`--set-env-vars` adds and updates; `--replace-env-vars` removes everything
+  else.** Step 12's warning, one app along, and here the variable it would delete
+  is `CATEGORIZER_PREDICTOR` -- which reads as unset, which means `rules`, which
+  is a working deployment quietly serving the baseline.
+- **The two prices are the published rate for `claude-opus-5` on 2026-08-30, and
+  they are configuration because a rate moves without this repository noticing**
+  (#64). Re-read them when the model changes; a stale figure in a log is worse
+  than an absent one, because it is believed.
+- **`CATEGORIZER_REDIS_URL` is deliberately not set**, per the arithmetic above.
+  `cache.py` says so on its own at start-up: `CATEGORIZER_REDIS_URL is not set, so
+  answers are not cached and every call is billed.`
+
+**Three.** Nothing. There is no third command -- the app needs no change at all.
+`Categorizer__BaseUrl` still points at the same internal FQDN, and the .NET side
+has never known which predictor is behind it.
+
+#### How it is checked
+
+**The first check is the log, not the 200**, and that is #87's first trap.
+`anthropic.Anthropic()` constructs cleanly with no credential anywhere and defers
+the failure to the first request, so a deployment that selects the model and
+forgets the key **starts, serves 200s, and answers `category: null` for ever**.
+From the .NET side that is an *abstention*: counted, not logged (#64), and
+indistinguishable from a model declining every row. The only signal in the
+running system is one line in the other container's log stream.
+
+```
+az containerapp logs show -g rg-landmoney -n landmoney-categorizer --type console --tail 40
+```
+
+| What it says                                              | What it means                          |
+| --------------------------------------------------------- | -------------------------------------- |
+| `Categorising with the model. This costs money per request.` | `CATEGORIZER_PREDICTOR=model` took     |
+| `ANTHROPIC_API_KEY is not set...`                          | the secret reference did not arrive     |
+| `model_call outcome=answered ... cost_usd=0.006...`         | a real call, priced                     |
+| `model_call outcome=failed ...`                            | the call raised -- key, quota or network |
+| `cost_usd=unpriced`                                        | the price variables did not arrive      |
+
+Then the acceptance test, which is a save through the site:
+
+| Check                                                     | Expected                          |
+| --------------------------------------------------------- | --------------------------------- |
+| Type `haircut` into the description field and wait         | the badge suggests `other`        |
+| Save it                                                    | the row shows `other`, badge `model` |
+| `select category, category_source from transactions order by created_at desc limit 1` | `other`, `model`  |
+
+**`haircut` and not `Uber ride to the airport`**, which is what the rules check
+above uses, and the difference is the point rather than the variety. A
+description both predictors answer identically would show a category and prove
+nothing about which one produced it. `other` is the category `docs/evals.md`
+records as structurally unreachable by substring matching -- one of eleven, which
+is the baseline's 90.9% hard ceiling -- and the model took it from 0/3 to 3/3.
+
+Both halves of that were checked on 2026-08-30 before being written here, which is
+the mistake #61 and #67 each made once by writing an acceptance test whose input
+produces the failure it is meant to detect:
+
+```
+rules: line 2  other -> unknown  haircut
+model: model_call outcome=answered ... input_tokens=1173 output_tokens=10 cost_usd=0.006115   -> other
+```
+
+And the third of #87's verifications, which is the one worth actually doing:
+**revoke the key in the Anthropic Console and save another transaction.** The
+transaction is stored, with no category, and `landmoney-categorizer` logs
+`model_call outcome=failed` with a traceback. That is #39's fallback under a
+model rather than under a stopped container, and it has never been seen in that
+configuration.
+
+What `ci.yml` now asserts on every deployment, which replaces #65's Redis gate:
+
+- `ANTHROPIC_API_KEY` is a `secretRef` and never a literal value -- checked for
+  both predictors, because the wrong one of those is a leak whichever predictor is
+  running. The check **counts rather than fetches**: `length()` over a filter
+  answers `0` or `1`, where asking for `.value` would pull the key into a runner
+  variable on the very run that is reporting it exposed. The filter has to exclude
+  the empty string as well as null, because a variable filled from a secret is
+  returned by `show` with `value` present and empty -- which is step 12's
+  acceptance test, and would otherwise count every correct deployment as a leak;
+- `model` with no key secret is refused, which turns the trap above from a
+  sentence telling somebody to read a log into a red step;
+- `model` with no price configured is refused, because a deployment that bills
+  while every line says `cost_usd=unpriced` is exactly the shape this project
+  keeps writing down -- a dependency whose absence nothing reports.
+
+#### Turning it back off
+
+One command, and it is the reason `CATEGORIZER_PREDICTOR` is written out
+explicitly rather than defaulted:
+
+```
+az containerapp update -g rg-landmoney -n landmoney-categorizer --set-env-vars "CATEGORIZER_PREDICTOR=rules"
+```
+
+The secret stays and costs nothing; the rules path never reads it. Billing stops
+with the revision, and the site is a baseline categorizer again with no other
+change anywhere.
+
+**Removing the key entirely** is `az containerapp secret remove -g rg-landmoney -n
+landmoney-categorizer --secret-names anthropic-key`, and it must not be run while
+a revision still references it. Flip the predictor first.
+
+
 ## Step 17 -- reading what the categorizer is doing
 
 Added 2026-08-29 with #64. Nothing to create and nothing to set: this is where the
@@ -1582,16 +1839,29 @@ unanswered, so it counts as a timeout (#39, measured twice).
 input_tokens=... output_tokens=... cost_usd=...` line per call, and it says
 `cost_usd=unpriced` unless `CATEGORIZER_PRICE_INPUT_PER_MTOK` and
 `CATEGORIZER_PRICE_OUTPUT_PER_MTOK` are both set on that app -- there is no price
-in the code, deliberately, because a stale one would be believed. None of this
-appears today: the deployed categorizer is pinned to `CATEGORIZER_PREDICTOR=rules`
-(step 16), so there are no tokens to count until that changes.
+in the code, deliberately, because a stale one would be believed. **Since #87
+those lines are there**: the categorizer runs the model and both prices are set,
+which `ci.yml` refuses to deploy without. Summing `cost_usd` over a month is the
+bill, and it is the only place in this system that can be asked what the model
+spent.
 
-**The other line to look for on that day is `cache`** -- one per lookup, carrying
-`outcome=hit|miss`, what the hit did not spend, and the running `hit_rate=`. It is
-how #65's promise is checked in production rather than believed: a hit rate that
-is zero after a fortnight means the key is being built from something that varies
-per request, and a stream of `failures=` means Redis is unreachable and every call
-is being billed. Neither shows up anywhere else, because both answer correctly.
+The line to look for **first** is `outcome=failed`. A revoked, expired or
+spend-limited key raises inside the adapter, is logged here with its traceback,
+and reaches the .NET side as a **200 with no category** -- which #64 counts as an
+abstention and does not log, because an abstention is a normal answer. So a key
+that has stopped working looks, from the application's own logs, exactly like a
+model declining every row. This container is the only witness.
+
+**There is no `cache` line in production, and its absence is correct** -- #87.
+`CATEGORIZER_REDIS_URL` is unset on the deployed categorizer, so `cache.py` says
+so once at start-up and every call is billed on purpose:
+
+    CATEGORIZER_REDIS_URL is not set, so answers are not cached and every call is billed.
+
+That line appearing is the deployment working as decided; a `cache` line appearing
+would mean somebody provisioned a Redis without the arithmetic in step 16. The
+query below is for a local session with the compose stack, where the cache does
+run and where #65's `outcome=hit|miss` and `hit_rate=` are worth reading:
 
     ContainerAppConsoleLogs_CL
     | where ContainerName_s == 'landmoney-categorizer' and Log_s startswith 'cache '

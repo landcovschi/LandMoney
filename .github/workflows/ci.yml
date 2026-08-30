@@ -924,13 +924,31 @@ jobs:
             exit 1
           fi
 
-          # **The model is only deployed with a cache in front of it** -- #65.
-          # `rules` is what is deployed today (step 16) and costs nothing, so
-          # this asserts nothing most of the time. It exists for the day somebody
-          # flips one variable in the portal: without a Redis the model is billed
-          # once per saved transaction with no memory at all, which is the whole
-          # of what slice 5's first line says must not happen -- and it would be
-          # invisible, because every answer would still be correct.
+          # **The model is only deployed with its price configured, and with its
+          # key as a secret** -- #87. This replaces the Redis gate #65 wrote here,
+          # and the replacement is the whole of what #87 decided.
+          #
+          # #65 refused `model` with no CATEGORIZER_REDIS_URL, on the grounds that
+          # an uncached model is billed once per saved transaction. It also wrote
+          # down what would settle the question -- "the honest third option is no
+          # cache at all and a per-call bill, which for weekly use may simply be
+          # smaller than 16 USD; that arithmetic is the thing to do before
+          # provisioning anything" -- and #87 did it. One call is **1,173 input
+          # tokens and 12 output tokens**, measured, because thinking at
+          # `effort=low` writes nothing on a one-word classification: **0.6 US
+          # cents**. Azure Cache for Redis Basic C0 is ~16 USD a month, so the
+          # cache pays for itself at ~2,600 calls a month, ~87 every day, against
+          # the 80-160 this application makes. The gate was refusing the cheaper of
+          # two states by a factor of about thirty, so it is gone rather than
+          # satisfied.
+          #
+          # What replaces it is the state that really is invisible. #64 kept the
+          # price out of the code so a stale figure could not be believed, and the
+          # consequence is that a deployment which forgets to configure one bills
+          # real money while every line it writes says `cost_usd=unpriced`. That is
+          # this project's recurring shape -- a dependency whose absence nothing
+          # reports -- and here it is one `az containerapp show` from being
+          # asserted.
           predictor=$(az containerapp show \
             --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
             --query "properties.template.containers[0].env[?name=='CATEGORIZER_PREDICTOR'].value | [0]" \
@@ -939,9 +957,68 @@ jobs:
             --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
             --query "properties.template.containers[0].env[?name=='CATEGORIZER_REDIS_URL'].value | [0]" \
             -o tsv --only-show-errors)
+          price_in=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --query "properties.template.containers[0].env[?name=='CATEGORIZER_PRICE_INPUT_PER_MTOK'].value | [0]" \
+            -o tsv --only-show-errors)
+          price_out=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --query "properties.template.containers[0].env[?name=='CATEGORIZER_PRICE_OUTPUT_PER_MTOK'].value | [0]" \
+            -o tsv --only-show-errors)
 
-          if [ "$predictor" = "model" ] && [ -z "$cache" ]; then
-            echo "::error::the categorizer runs the model with no CATEGORIZER_REDIS_URL -- every call is billed twice; see step 16 of docs/deploy-azure.md"
+          if [ "$predictor" = "model" ] && { [ -z "$price_in" ] || [ -z "$price_out" ]; }; then
+            echo "::error::the categorizer runs the model with no price configured -- it is billing and every log line says cost_usd=unpriced; see step 16 of docs/deploy-azure.md"
+            exit 1
+          fi
+
+          # **The key arrives as a secret reference, never as a value** -- #87, and
+          # it is asserted for both predictors rather than only for `model`.
+          # `--set-env-vars "ANTHROPIC_API_KEY=..."` deploys, starts and answers
+          # correctly; the key is then readable by anybody who can run
+          # `az containerapp show`, and it stays in the revision's own specification
+          # for as long as that revision is listed -- which outlives rotating the
+          # key, because rotating writes a new revision and does not edit the old
+          # one. The secret road is the one the connection string already takes
+          # (step 12) and the two are one word apart at the point of typing.
+          #
+          # **The literal check counts rather than fetches**, and that is not a
+          # style preference. Asking for `.value` and testing whether the answer is
+          # empty would pull the key into a runner variable on exactly the run that
+          # is reporting the key is exposed -- one `set -x`, one later `echo`, one
+          # crash dump away from publishing it in the log of a public repository.
+          # `length(...)` over a filter that excludes null and the empty string
+          # answers the same question with a `0` or a `1`. A secret *name* is not a
+          # secret, so `secretRef` is read normally and reaches the summary.
+          #
+          # `value!=''` is the half that has to be there: a variable filled from a
+          # secret is returned by `show` with its `value` present and **empty** --
+          # step 12's output, where that empty string is the whole of the acceptance
+          # test -- so a filter testing only for null would count every correctly
+          # configured deployment as a leak.
+          key_literals=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --query "length(properties.template.containers[0].env[?name=='ANTHROPIC_API_KEY' && value!=null && value!=''])" \
+            -o tsv --only-show-errors)
+          key_ref=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CATEGORIZER_APP" \
+            --query "properties.template.containers[0].env[?name=='ANTHROPIC_API_KEY'].secretRef | [0]" \
+            -o tsv --only-show-errors)
+
+          if [ "$key_literals" != "0" ]; then
+            echo "::error::ANTHROPIC_API_KEY is a literal value on $CATEGORIZER_APP and is readable by anyone who can run az containerapp show. Move it to a secret: see step 16 of docs/deploy-azure.md"
+            exit 1
+          fi
+
+          # #87's first trap, answered by a red step instead of by a sentence
+          # telling somebody to read a log. `anthropic.Anthropic()` constructs
+          # cleanly with no credential anywhere and defers the failure to the first
+          # request, so `model` with no key starts, serves 200s, and answers
+          # `category: null` for ever -- which on the .NET side is an *abstention*,
+          # is counted rather than logged (#64), and is indistinguishable from a
+          # model declining every row. The only signal in the running system is one
+          # `logger.error` at start-up in the other container's log stream.
+          if [ "$predictor" = "model" ] && [ -z "$key_ref" ]; then
+            echo "::error::the categorizer runs the model with no ANTHROPIC_API_KEY secret -- every call fails and every transaction is stored with no category; see step 16 of docs/deploy-azure.md"
             exit 1
           fi
 
@@ -952,6 +1029,10 @@ jobs:
             echo "- ingress: internal, https://$internal"
             echo "- the app points at it: yes"
             echo "- predictor: ${predictor:-(unset -- the image default, rules)}"
-            # Whether, never where -- a connection string is not summary material.
-            echo "- answer cache: $([ -n "$cache" ] && echo configured || echo none)"
+            # Whether, never where -- a connection string is not summary material,
+            # and neither is an API key. Both rows say which state the deployment
+            # is in and nothing about how to reach it.
+            echo "- answer cache: $([ -n "$cache" ] && echo configured || echo "none (#87: ~0.6 US cents a call; a cache costs more than the calls)")"
+            echo "- api key: $([ -n "$key_ref" ] && echo "a secret reference" || echo none)"
+            echo "- cost line: $([ -n "$price_in" ] && [ -n "$price_out" ] && echo "priced" || echo "cost_usd=unpriced")"
           } >> "$GITHUB_STEP_SUMMARY"
