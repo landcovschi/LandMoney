@@ -1043,16 +1043,17 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   sign in, wrong password, unknown user, lockout, sign out, and two accounts that
   cannot see each other.
 
-  **Still deliberately open: Data Protection keys are not persisted.** The
-  authentication cookie is encrypted with keys generated in memory, so they die
-  with the process -- and with `--min-replicas 0` that is roughly every fourteen
-  idle minutes (#35). Coming back after a pause means signing in again, and here
-  that means **typing a password**, which is a good deal worse than it was under
-  OpenID Connect, where a live provider session made it a redirect and no typing.
-  This is the one item on this list most likely to be worth fixing next: two
-  packages (`PersistKeysToAzureBlobStorage`, `ProtectKeysWithAzureKeyVault`) and
-  one more Azure resource. Left out of #52 because it is a deployment decision with
-  a bill attached rather than part of closing the door.
+  **The Data Protection keys were not persisted, and that was closed on 2026-08-30
+  in #88.** The paragraph here used to end "this is the one item on this list most
+  likely to be worth fixing next", and it was: the authentication cookie was
+  encrypted with keys generated in memory, they died with the process, and with
+  `--min-replicas 0` that is roughly every fourteen idle minutes (#35) -- so coming
+  back after a pause meant **typing a password**, which was a good deal worse than
+  it was under OpenID Connect, where a live provider session made it a redirect and
+  no typing. Left out of #52 because it is a deployment decision with a bill
+  attached rather than part of closing the door, and the bill turned out to be a
+  fraction of a US cent a month. The account is the #88 entry at the end of this
+  list.
 
 
 - **Database: Postgres. A container locally, Azure Database for PostgreSQL
@@ -2946,6 +2947,179 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   deployed by this change. `az containerapp show` reported
   `CATEGORIZER_PREDICTOR=rules`, no secrets and no key on 2026-08-30, which is what
   the new checks were exercised against.
+
+- **The Data Protection key ring: a blob, wrapped with a Key Vault key, read with
+  the app's own managed identity -- decided 2026-08-30** (#88).
+  `src/LandMoney.Web/Auth/DataProtectionSetup.cs` is the whole of it; the commands
+  are a new subsection of step 15 of `docs/deploy-azure.md`; `ci.yml` gained a
+  *Check the key ring* step. Three packages, and 23 new tests that still need no
+  Postgres, no Docker and no network.
+
+  **This is the item #52's own list named as most likely to be worth fixing next,
+  and it is the only one that cost the owner something every single day.** The
+  authentication cookie was encrypted with keys generated in memory, which die
+  with the process -- and with `--min-replicas 0` that is roughly every fourteen
+  idle minutes (#35). So coming back to the site after a pause meant **typing a
+  password**, where under the OpenID Connect version that lived for one day a live
+  provider session made it a redirect and no typing.
+
+  **Three packages, not the two #88 names.**
+  `Azure.Extensions.AspNetCore.DataProtection.Blobs` and `.Keys` bring
+  `Azure.Storage.Blobs` and `Azure.Security.KeyVault.Keys` between them and
+  **neither brings `Azure.Identity`** -- read off the nuspecs rather than assumed,
+  because a missing credential package fails at the `DefaultAzureCredential` line
+  rather than at restore, which reads like a using directive. Blobs 1.5.4, Keys
+  1.6.4, Azure.Identity 1.21.0, all checked on the day, which is the sixth time
+  that rule has paid after #22, #24, #39, #59 and #65.
+
+  **What it costs, off the Azure retail prices API for `polandcentral` on
+  2026-08-30 rather than off a blog:** blob Hot LRS is 0.0196 USD per GB-month
+  with reads at 0.0043 and writes at 0.054 per 10K; Key Vault Standard operations
+  are 0.03 USD per 10K. **Neither resource has a monthly base charge.** The ring is
+  one XML file of a few kilobytes, read once per process start and written once
+  every ninety days when a key rolls, so the bill is **a fraction of one US cent a
+  month** -- four orders of magnitude under the 15-20 USD Postgres faces when the
+  free year ends (#34). #88's first trap is answered in the shape it asks for:
+  small is not free, and the arithmetic was the cheap part. What is actually spent
+  is two more resources to keep track of. (RSA 2048 rather than 3072 or an elliptic
+  curve, which Key Vault bills as *Advanced Key Operations* at five times the rate
+  -- meaningless in money here, and nothing in a wrap benefits from more.)
+
+  **`VerifyKeyRing` is the half that is not two package references, and it exists
+  because of a measurement rather than a suspicion.** `XmlKeyManager` hands each
+  stored key to `DefaultKeyResolver`, which asks whether it can produce an
+  encryptor -- a question that goes through Key Vault, because the descriptor is
+  encrypted with it. `DefaultKeyResolver` **catches every exception that throws**,
+  logs it at Warning, and marks the key ineligible; with no eligible key left,
+  `KeyRingProvider` does what it does on a brand-new installation and generates
+  one. Measured against the real framework with a file-system store and
+  certificate protection standing in for the two Azure resources -- same shape, no
+  network -- by writing the ring with one certificate and re-opening it with
+  another:
+
+      3b. Unprotect threw CryptographicException: Unable to retrieve the decryption key.
+      3c. Protect SUCCEEDED -- so a new key ring was generated over the unreadable one
+      3d. keys on disk now: 2
+
+  So **the framework's answer to a key it cannot read is to replace it**: a working
+  site, a warning nobody reads, and everybody signed out. That is #88's own bug
+  arriving through the fix for it, which is why reading the whole ring once at
+  startup and refusing on any key that will not decrypt is not optional hardening.
+  Note what the same run says about `GetAllKeys()`: it does **not** throw, because
+  `Key.Descriptor` is resolved lazily. Only asking a key to do work surfaces it.
+
+  What that costs, said out loud: with `--min-replicas 0` this runs on every cold
+  start, so an Azure blip during a wake-up is a replica that fails to start rather
+  than one that serves. That is what #88 asks for in as many words, and the
+  alternative is the failure that looks exactly like success. Measured on this
+  machine against a storage account that does not exist: the process refuses to
+  start and names the host, after **52.7 seconds** -- six SDK retries against a DNS
+  failure. Loud, and slow enough that the request which woke the container gives up
+  first. The retry count is deliberately left at the default: a 503 from storage is
+  worth retrying and the SDK cannot tell it from an NXDOMAIN.
+
+  **Absent is legal, half configured is not, and the asymmetry is the design.**
+  Neither key set is the state a developer machine and `efbundle` are both in, and
+  it has to stay legal for both -- #57 is what a required-configuration throw on
+  the bundle's path costs, and it was re-checked rather than assumed by building a
+  bundle and running it in an empty directory, where it still answers "No such host
+  is known." rather than "Unable to create a 'DbContext'". So the unconfigured
+  deployed case is an **error in the log plus an assertion in `ci.yml`**, which is
+  the same answer #61 gave for `Categorizer__BaseUrl` and for the same reason.
+
+  **What that same run settled, and it is general rather than about #88:
+  `efbundle` executes nothing below `builder.Build()`.** Run with both key ring
+  variables pointing at resources that do not exist, the bundle logged the
+  registration line -- which is above Build -- and then failed at **Postgres**,
+  never at the blob, although `VerifyKeyRing` sits between the two and would have
+  thrown first. The host factory resolver stops the program at Build to take the
+  `DbContext`. The half of that worth carrying forward is the cost: `ci.yml`'s
+  "The bundle must start without appsettings.json", which is the guard #57 bought,
+  therefore covers the registrations and **nothing after them**.
+
+  One of the two alone **throws at startup**, and that is safe against #57 precisely
+  because the bundle has *neither*: reaching that branch means somebody set one,
+  which is a mistake to report rather than a state to tolerate. The two halves are
+  not symmetrical and the dangerous one is the half that works: a vault key with no
+  blob is nonsense and fails at once, while **a blob with no vault starts, persists,
+  keeps everybody signed in, and leaves the key that decrypts every session cookie
+  in a container as plain XML** -- a downgrade nothing would report.
+
+  **`SetApplicationName("LandMoney")`, written out, and its absence is a silent
+  sign-out.** The default application discriminator is derived from the content
+  root path and mixed into every purpose string, so two processes sharing a ring
+  and disagreeing about where they run cannot read each other's cookies. In this
+  image the path is `/app` and always has been, which is exactly what makes the
+  default look safe -- it holds until something changes the working directory, and
+  then it fails as "everybody signed out" with the key ring intact and blameless.
+  It is pinned by a test that reads `DataProtectionOptions.ApplicationDiscriminator`
+  off a bare `ServiceCollection`, which needs no network.
+
+  **`DefaultAzureCredential`, not `ManagedIdentityCredential`.** In the container
+  the two are identical -- Container Apps sets the identity endpoint variables, so
+  the chain finds managed identity without probing IMDS and hanging. The difference
+  is on a developer machine, where the chain picks up `az login` and the precise
+  one refuses; this is the only configuration in the application that cannot be
+  exercised locally at all, so the one route to debugging it is worth keeping open.
+  What it costs is the trap of that class: the chain is ordered and silent about
+  which link answered, so a stale `AZURE_CLIENT_ID` or an `az login` against the
+  wrong tenant authenticates as somebody else and the error is a 403 about a role
+  assignment that is in fact correct.
+
+  **The two identities are different, and #88 says so before anyone discovers it.**
+  The OIDC federation of #38 belongs to the **workflow** -- it is what `azure/login`
+  trades a GitHub token for. The **running container** is a separate principal, and
+  it is the one both role assignments are on. `ci.yml` asserts the app has a
+  system-assigned identity for that reason: losing it is one `containerapp identity
+  remove` away and produces a 403 at the next cold start, with nothing in the
+  deployment that caused it saying so.
+
+  **Three things in the role assignments that are decisions rather than syntax**,
+  all in step 15. `--assignee-object-id` with `--assignee-principal-type`, never
+  `--assignee`, because the friendly form does a Graph lookup and a managed
+  identity created seconds earlier has not replicated -- the failure is `Cannot find
+  user or service principal in graph database`, which reads as if the identity was
+  not created. Both scopes reach *past* the resource to the container and to the
+  key, rather than granting every container the account will ever have. And
+  `--allow-shared-key-access false` on the storage account kills the account key
+  outright, which is the point and which means the **owner** needs a data-plane
+  role too: holding Owner or Contributor grants nothing over blobs.
+
+  **The Key Vault key URI carries no version, and that is load-bearing.** Pinning
+  one works until the key is rotated, at which point the application keeps asking
+  for a version that is no longer current. Versionless, the wrap uses whatever is
+  current and the unwrap uses the version recorded inside the ring, so rotation
+  costs nothing and old keys stay readable.
+
+  **The check is `ci.yml`'s last step, and that is #61's one-time-bootstrap shape
+  reused.** The runbook creates resources and CI asserts them, so the first run
+  after this merges is red there and nowhere else if step 15 has not been run --
+  after everything before it has gone green, with nothing left half applied.
+
+  **What is deliberately untested, said plainly:** that
+  `PersistKeysToAzureBlobStorage` and `ProtectKeysWithAzureKeyVault` do what they
+  say. Both need a storage account, a vault, an identity and a network, which is
+  the same wall `AuthorizationTests` and #62 both document. #88's three acceptance
+  tests -- a session surviving a new revision, two replicas accepting each other's
+  cookies, and a vault role removed producing a refusal rather than a fresh ring --
+  are by hand, and step 15 has the commands.
+
+  **Checked by breaking it, per #21: twelve mutations, one at a time, reverted with
+  `git checkout` from the commit rather than from memory.** Eleven applied and all
+  eleven were caught; the twelfth did not compile, the compiler refusing to let the
+  ephemeral branch fall through to the persisted one. Two are worth keeping.
+  Replacing `IsNullOrWhiteSpace` with a null check failed **26** tests rather than
+  one, because `appsettings.json` now ships both keys present and empty -- so the
+  committed empty strings turn a plausible null-check slip into a failure
+  everywhere instead of a half-configured throw in one deployment. And the
+  substitution script refuses to proceed when a pattern matches zero or two places,
+  which is #21's own lost mutation written into the tool: the sweep there silently
+  changed a comment instead of the call beneath it.
+
+  **Still deliberately open:** nothing rotates the Key Vault key, and nothing
+  prunes revoked or expired entries from the ring. Both are Key Vault's own
+  rotation policy and a `RevokeKey` call respectively, neither has a consumer yet,
+  and the ring gains one entry every ninety days.
 
 ## How work flows
 

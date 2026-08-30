@@ -403,10 +403,18 @@ var app = builder.Build();
 // fresh one.
 //
 // Two things make it safe against #57, and only one of them is enough. It is
-// guarded on the key ring being configured, which `efbundle` never is -- and the
-// bundle stops at builder.Build() anyway, because that is where the host factory
-// resolver throws to get the DbContext out. The guard is the one that is checked
-// rather than reasoned about, so it is the one that is written.
+// guarded on the key ring being configured, which `efbundle` never is; and
+// **`efbundle` does not execute anything below this line at all**, which was
+// measured rather than assumed -- a bundle run with both keys pointing at
+// resources that do not exist logged the registration line above and then failed
+// at *Postgres*, never at the blob. The host factory resolver stops the program
+// at builder.Build() to take the DbContext, so the whole of the pipeline below is
+// unreachable there.
+//
+// Worth knowing in the other direction as well, since it is the half that bites
+// later: ci.yml's "The bundle must start without appsettings.json" therefore
+// cannot see anything after this point. It guards the registrations above and
+// nothing else.
 //
 // The branch is taken on the registered policy and not by reading the two
 // configuration keys again. IKeyManager resolves either way -- the web host adds
