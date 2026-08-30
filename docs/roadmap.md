@@ -1002,6 +1002,38 @@ the thing that produced the number can be shown.
       **First endpoint in the application testable end to end**, because it
       touches no database: 34 new tests, seven mutations, all caught. The React
       half has no test framework to check it with, and says so
+- [ ] Turn the model on in production -- #87. **The repository half landed
+      2026-08-30; the three commands are step 16 of `docs/deploy-azure.md` and
+      are the owner's**, because the key is a credential and the commands spend
+      money. Tick this when `az containerapp show` reports
+      `CATEGORIZER_PREDICTOR=model`
+
+      **A call is 0.62 US cents**, measured rather than estimated: 1,173 input
+      tokens and **11 output tokens**, because adaptive thinking at `effort=low`
+      writes essentially nothing on a one-word classification. So the answer is
+      2.5% of the bill and the prompt is 97.5% -- `CATEGORIZER_EFFORT` is a
+      latency lever and not a cost one. With #67's preview a transaction is two
+      to four calls, which is **50 cents to a dollar a month** at forty
+      transactions
+
+      **No Redis, and that is #65's own question answered rather than
+      overruled.** #65 refused `model` without a cache and wrote down that the
+      arithmetic came first; ~16 USD a month buys ~2,600 calls and this
+      application makes 80-160, so the gate was refusing the cheaper of two
+      states by a factor of about thirty. It is gone, and `ci.yml` now asserts
+      the two things that really are invisible instead -- the key must be a
+      `secretRef` and never a literal value, and `model` with no price
+      configured is refused, because #64 deliberately keeps the price out of the
+      code and the cost of that is a deployment billing under
+      `cost_usd=unpriced`
+
+      **The ceiling is a spend limit at Anthropic and not anything here.**
+      `--max-replicas 1` bounds concurrency, not money -- forty threads at 2.1 s
+      a call is ~7 USD a minute -- and nothing rate-limits the preview endpoint.
+      What makes the limit the right control rather than merely the available
+      one is that it degrades into the state the application already handles: a
+      refused call is logged, becomes a null category, and the transaction is
+      saved. #39's fallback, unchanged by a model being behind the port
 - [ ] Graceful degradation: the AI service is down, the app still works
 - [x] Evals run in CI on every PR -- #58, 2026-08-28. `python evals/score.py
       --check` compares the run against `evals/baseline.json` and exits 2 when

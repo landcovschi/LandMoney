@@ -1782,13 +1782,14 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   This is the same failure shape as #24's missing `setup-buildx-action`, one
   cache setting along.
 
-  **The deployed categorizer runs `rules`, written out rather than defaulted.**
-  `CATEGORIZER_PREDICTOR=rules` is set explicitly so `az containerapp show` can
-  answer the question; `model` means an `ANTHROPIC_API_KEY` secret and one Claude
-  call per saved transaction, which is a decision with a bill and is not this
-  one. The unauthenticated endpoint being internal-only is the other half of
-  that: an open categorizer with a model behind it is somebody else's Anthropic
-  bill.
+  **The deployed categorizer ran `rules` until 2026-08-30**, written out rather
+  than defaulted, so `az containerapp show` could answer the question;
+  `CATEGORIZER_PREDICTOR=model` meant an `ANTHROPIC_API_KEY` secret and one Claude
+  call per saved transaction, which was a decision with a bill and was not #61's.
+  **That decision is #87**, below. The unauthenticated endpoint being internal-only
+  is the other half of it and is unchanged: an open categorizer with a model behind
+  it is somebody else's Anthropic bill, which is why #87 does not widen the ingress
+  by so much as a flag.
 
 - **CSV import: one endpoint, `POST /api/transactions/import`, taking a raw
   `text/csv` body -- decided 2026-08-28** (#62). `src/LandMoney.Web/Import/` holds
@@ -2390,10 +2391,10 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   fortnightly spending session this is meant to make cheap.
 
   **No Redis is deployed, deliberately, and it is a cost line rather than an
-  oversight.** The deployed categorizer runs `rules` (#61), and a cache in front of a
+  oversight.** The deployed categorizer ran `rules` (#61), and a cache in front of a
   predictor that is not running is a monthly charge for nothing. So flipping that
-  variable is now three things and not one -- the key as a secret, a cache, and #64's
-  price variables -- and `ci.yml` refuses a deployment that is `model` with no
+  variable was three things and not one -- the key as a secret, a cache, and #64's
+  price variables -- and `ci.yml` refused a deployment that was `model` with no
   `CATEGORIZER_REDIS_URL`, because that combination is billed per save for ever and
   looks exactly like a working deployment. What the cache would cost, read on
   2026-08-29 and to be re-read rather than trusted: **Azure Cache for Redis Basic C0
@@ -2401,6 +2402,18 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   when the free year ends (#34), for a service one person uses weekly. The
   arithmetic to do *before* provisioning anything is whether the per-call bill is
   simply smaller than that -- and #64 already logs the tokens it needs.
+
+  **It was done on 2026-08-30 in #87 and the answer was no cache**, by a factor of
+  about thirty: a call is 0.62 US cents, so ~16 USD a month buys ~2,600 calls and
+  this application makes 80-160. The gate was refusing the cheaper of the two
+  states, so it is gone rather than satisfied, and `ci.yml` now asserts the two
+  things that are actually invisible instead -- the key must be a `secretRef` and
+  never a literal value, and `model` with no price configured is refused. Nothing
+  about #65 is retracted by that: the cache is right locally, where a session
+  re-runs the same descriptions, and the paragraph above is what told #87 which
+  arithmetic to do. **What would pay is a different cache** -- Anthropic's prompt
+  caching over the ~1,150-token constant prefix, which is 97% of the bill, costs no
+  monthly charge and is a change to the adapter rather than a resource group.
 
   **Checked by breaking it, per #21: fourteen mutations, one at a time, reverted
   from a file copy rather than from memory.** All fourteen were caught. Four are
@@ -2813,6 +2826,126 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   no symbol as its code, so "MDL -- MDL 290.00 in total" was the first version and
   reads like a bug, while "EUR -- €299.83" has the same shape and hides it. The
   count now sits between them.
+
+- **The model in production: `CATEGORIZER_PREDICTOR=model`, the key as a Container
+  Apps secret, and no cache -- decided 2026-08-30** (#87). The commands are the new
+  *Turning the model on* subsection of step 16 of `docs/deploy-azure.md`; the
+  repository half is `ci.yml`'s `Check the categorizer` step, which lost #65's Redis
+  gate and gained two others. **No application code changed at all**, in either
+  language, and no new dependency.
+
+  **What it fixes is that the repository held a number it did not use.**
+  `docs/evals.md` section 7 recorded 98.9% macro recall against the baseline's
+  56.1%, measured twice with zero confident errors -- and every transaction saved
+  through the site was still categorised by 109 substrings, because #61 pinned the
+  deployed categorizer to `rules` and said out loud that turning it over was a
+  decision with a bill rather than a configuration change.
+
+  **A call is 0.62 US cents**, measured on 2026-08-30 through `evals/score.py` with
+  #64's price variables set, at a total cost of about three US cents for the
+  exercise: **1,173 input tokens and 11-13 output tokens**, ~2.1 s, `claude-opus-5`
+  at `effort=low`. Two things in that contradict what the code assumes about
+  itself, and both matter more than the total.
+
+  **Output is eleven tokens, so the answer is 2.5% of the bill and the prompt is
+  the other 97.5%.** Adaptive thinking at `effort=low` writes essentially nothing
+  on a one-word classification against a rubric supplied in full, so the
+  `max_tokens=2048` headroom `anthropic_predictor.py` reserves for thinking is
+  never touched -- its comment is right about why it is there and wrong about it
+  costing anything. `CATEGORIZER_EFFORT` is a latency and quality lever and **is
+  not a cost lever**; the only cost lever is the prompt. And **input is ~1,173
+  where `prompt.py`'s text measures ~700**: the other ~450 is `RESPONSE_SCHEMA` and
+  the message framing, so anything that prices this by measuring the file is low by
+  60%.
+
+  **A saved transaction is not one call, which is #67 arriving in the bill.** The
+  categorizer is asked once 400 ms after the typing stops and again when the row is
+  saved -- the save deliberately does not trust the browser -- and every
+  `(description, amount, currency)` surviving the debounce is its own call. Two to
+  four calls a transaction, 1.2 to 2.5 cents, so **50 cents to a dollar a month**
+  at forty transactions. A month of CSV imports costs nothing: #62 never calls it.
+
+  **No Redis, and this is the decision the issue turned on.** #65 wrote a gate into
+  `ci.yml` refusing `model` with no `CATEGORIZER_REDIS_URL`, and wrote in the same
+  breath that the honest third option was no cache at all and that **the arithmetic
+  was the thing to do before provisioning anything**. Done: ~16 USD a month buys
+  ~2,600 calls, this application makes 80-160, so the gate was refusing the cheaper
+  of two states by a factor of about thirty. It is **gone rather than satisfied**.
+  Nothing about #65 is retracted -- the cache is right locally, where a session
+  re-runs the same descriptions, and it is the paragraph that told #87 which sum to
+  do. What is given up is real and small: preview and save are two calls where one
+  would do, so a third of the bill is duplicate, and a third of a dollar is not
+  worth sixteen.
+
+  **The cache that would pay is a different one and is deliberately not in this
+  change.** Anthropic's prompt caching over the ~1,150-token constant prefix --
+  system prompt plus schema, byte-identical every call -- is where 97% of the bill
+  is, needs no resource and no monthly charge, and `_user_message`'s docstring
+  already keeps the varying half at the end for exactly that day. It is a change to
+  the adapter, so it is its own issue.
+
+  **What replaced the gate is the two states that really are invisible.**
+  `ANTHROPIC_API_KEY` must arrive as a `secretRef` and never as a literal value --
+  asserted for *both* predictors, because `--set-env-vars "ANTHROPIC_API_KEY=..."`
+  deploys and answers correctly while leaving the key readable to anyone who can
+  run `az containerapp show`, and leaving it in that revision's template for as
+  long as the revision is listed, which outlives rotating it. And `model` with no
+  price configured is refused, because #64 kept the price out of the code so a
+  stale figure could not be believed, and the consequence is a deployment that
+  bills while every line it writes says `cost_usd=unpriced`.
+
+  **The leak check counts rather than fetches**, which is the one line in it worth
+  copying elsewhere: `length()` over a JMESPath filter answers `0` or `1`, where
+  reading `.value` and testing it for emptiness would pull the key into a runner
+  variable on exactly the run that is reporting the key exposed -- one `set -x` or
+  one later `echo` from publishing it in a public repository's build log. The
+  filter excludes the empty string as well as null, because a variable filled from
+  a secret comes back with `value` present and **empty** (step 12's acceptance
+  test), so testing only for null would call every correct deployment a leak.
+  Verified against all four shapes -- unset, secretRef with an empty value,
+  secretRef with no value at all, and a literal -- and against the live app, which
+  answers 0.
+
+  **`model` with no key secret is refused too, and that turns #87's first trap into
+  a red step.** `anthropic.Anthropic()` constructs cleanly with no credential and
+  defers the failure to the first request, so a deployment that selects the model
+  and forgets the key **starts, serves 200s, and answers `category: null` for
+  ever** -- which on the .NET side is an *abstention*, counted and not logged (#64),
+  and indistinguishable from a model declining every row. The issue's own advice was
+  to read the log after the first deploy; a check that cannot be forgotten is worth
+  more than advice that can.
+
+  **The ceiling is set at Anthropic and not here, and nothing in the deployment
+  caps spend.** `--max-replicas 1` bounds concurrency, not money: `/categorize` is a
+  `def` handler so Starlette dispatches it to a forty-thread pool, which at 2.1 s a
+  call is ~19 calls a second, **~7 USD a minute**. Nothing rate-limits the preview
+  endpoint either -- #67 said so, and the only thing between that screen and an
+  unbounded number of calls is that a person types slowly. So the control is a
+  **monthly spend limit on the workspace the key belongs to**, which is the owner's
+  act, costs nothing, and is the only control here that a bug in this repository
+  cannot defeat. What makes it the right shape rather than merely the available
+  one: **it degrades into the state the application already handles** -- a refused
+  call raises, is caught, is logged as `outcome=failed`, and becomes a null
+  category. #39's fallback, unchanged by a model being behind the port. A spend
+  limit does not take the site down.
+
+  **The acceptance test is `haircut` and not `Uber ride to the airport`**, and both
+  halves were checked before being written down -- which is the mistake #61 and #67
+  each made once, writing an acceptance test whose input produces the failure it
+  exists to detect. The rules answer `unknown`; the model answers `other`, which is
+  the category `docs/evals.md` records as structurally unreachable by substring
+  matching and which the model took from 0/3 to 3/3. A description both predictors
+  answer identically would show a category and prove nothing about which one
+  produced it.
+
+  **What Claude did not do, and it is the whole Azure half.** The key is a
+  credential and the three commands spend money, so creating the secret, flipping
+  the variable and setting the spend limit are the owner's acts -- the same
+  division as the app registration in step 14 and the first account in step 15. The
+  repository is ready and CI will refuse the wrong shapes of it; nothing is
+  deployed by this change. `az containerapp show` reported
+  `CATEGORIZER_PREDICTOR=rules`, no secrets and no key on 2026-08-30, which is what
+  the new checks were exercised against.
 
 ## How work flows
 
