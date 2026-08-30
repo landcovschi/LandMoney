@@ -1311,8 +1311,8 @@ goes above 1 two replicas cannot read each other's cookies at all -- which stops
 looking like "signed out after a pause" and starts looking like "signed out at
 random".
 
-The fix is two Azure resources and three environment variables. The application
-half is `src/LandMoney.Web/Auth/DataProtectionSetup.cs`.
+The fix is two Azure resources, an identity to reach them with, and two
+environment variables. The application half is `src/LandMoney.Web/Auth/DataProtectionSetup.cs`.
 
 #### What it costs, read rather than guessed
 
@@ -1343,7 +1343,7 @@ the rate above. The number of operations here makes that difference meaningless 
 money, and the reason for taking 2048 anyway is that it is what the wrap needs and
 nothing here benefits from more.
 
-#### Two more names
+#### The names, which follow the table at the top of this file
 
 | What            | Name              | Note                                        |
 | --------------- | ----------------- | ------------------------------------------- |
