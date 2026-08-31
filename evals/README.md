@@ -187,6 +187,49 @@ first of them. When they are replaced with real ones, this is the list to follow
    answers, and the eval set cannot report that it has happened. `score.py`
    refuses a file with blank labels, so using them early has to be deliberate.
 
+## Getting rows out of the application
+
+#89. Correcting a category in the interface stores `category_source = human`
+(#63), which is a labelled row produced by the one person who can judge it,
+during ordinary use. Until #89 those rows accumulated in Postgres and there was
+no way out; `GET /api/transactions/labelled` is the way out, and the
+**Export labelled rows** card on the screen is the button that calls it.
+
+It answers `text/csv` with the five columns below, ordered oldest first, and
+**only the rows whose source is `human`**. That filter is the point of the whole
+endpoint rather than a detail of it: a `rules` or `model` row exported into this
+set is the predictor grading its own past answers, and the number afterwards
+means nothing while the file looks exactly right.
+
+The file is a valid eval set on its own, which is worth doing before merging it
+into this one -- it says what the baseline makes of rows nobody wrote for it:
+
+```bash
+python evals/score.py --set ~/Downloads/labelled-2026-08-31.csv
+```
+
+To add the rows here, append it **without its header line**:
+
+```bash
+tail -n +2 ~/Downloads/labelled-2026-08-31.csv >> evals/transactions.csv
+```
+
+Then re-run the scorer and update `baseline.json` in the same commit, per the
+section above -- rows added to a CSV are one of the three things that are meant
+to move the number, and CI turns red until the recorded one moves with them.
+
+Two things the export does not do. It **does not deduplicate against what is
+already here**, so exporting twice and appending twice puts every row in twice;
+the fix is to append once and to know which export you last merged, which is why
+the file is named after the day it was taken. And it exports the *latest* label
+and no history -- a row corrected twice appears once, because `PATCH` updates the
+row in place and there is no journal.
+
+This is not the file `POST /api/transactions/import` reads. That one has four
+columns and no category, and it is how a bank export gets *into* the
+application; this one has five and is how labels get out. They are different
+files with different jobs, which is why nothing calls this one `transactions.csv`.
+
 ## The CSV
 
 ```

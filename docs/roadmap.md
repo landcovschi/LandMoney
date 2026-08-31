@@ -652,6 +652,18 @@ again by itself after 7 days.
        into the CSV is still a hand job. **This ticks when real labelled rows
        replace the invented ones**, by whichever of the two routes gets there
 
+       **#89 closed the way out, on 2026-08-31, and this box is still empty.**
+       `GET /api/transactions/labelled` answers the five columns of
+       `evals/transactions.csv` for every row whose `category_source` is `human`,
+       and there is a button on the screen that saves it. So the sentence above
+       -- "there is no export, so the rows accumulate in Postgres" -- is no
+       longer true, and the remaining distance to this checkbox is exactly what
+       it was always going to be: somebody correcting real rows. That is the
+       point worth keeping rather than the endpoint. Three issues have now
+       removed an excuse each -- #62 the typing, #63 the labelling, #89 the
+       getting-out -- and none of them can tick this box, because what it asks
+       for is data and every one of them is a route
+
 2. [x] **A rules baseline.** String matching on the description. Score it.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat

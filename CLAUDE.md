@@ -3144,6 +3144,186 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   rotation policy and a `RevokeKey` call respectively, neither has a consumer yet,
   and the ring gains one entry every ninety days.
 
+- **The way out of the database: `GET /api/transactions/labelled`, five columns,
+  `category_source = human` only -- decided 2026-08-31** (#89).
+  `src/LandMoney.Web/Export/` holds the writer, the rendering and the one
+  predicate; the screen is
+  `src/landmoney.client/src/components/ExportLabelled.tsx`. 50 new tests, and
+  they still need no Postgres, no Docker and no network. No new dependency, and
+  no migration.
+
+  **What it fixes is an asymmetry rather than a fault.** #63 made every
+  correction a labelled row produced by the one person who can judge it, during
+  ordinary use -- and those rows went into Postgres and stayed there, because
+  `evals/score.py` reads a CSV and there was nothing that wrote one. The roadmap
+  said so in as many words. Three issues have now each removed an excuse -- #62
+  the typing, #63 the labelling, #89 the getting-out -- and none of them can tick
+  the box they all point at, because what that asks for is data and every one of
+  them is a route.
+
+  **Where the export lives was the decision, and the alternative was a `psql`
+  query written into `docs/`.** That is genuinely less code -- no route, no
+  writer, no screen -- and #35 has already established that this machine reaches
+  the deployed database. It lost on #89's second trap. The export has to be
+  scoped to one owner, and in `psql` that scoping is a `WHERE` clause somebody
+  types, against an owner id they first have to look up; here it is
+  `AppDbContext`'s global query filter, applied to a query that does not mention
+  ownership and therefore cannot forget to. **The failure modes are not
+  symmetrical**: a forgotten clause in a hand-typed query exports every account's
+  rows into a file that looks exactly right, and #52's bug is this repository's
+  own evidence that that class of mistake is invisible from outside. Two smaller
+  things went the same way -- `psql` is a dependency #37 already declined for the
+  same "another thing to install, another place the connection string arrives"
+  reason, and the labelling being exported is done in a browser, so a route that
+  needs a terminal is a different act from the one that produced the rows.
+
+  What the route taken costs, said plainly: about ninety lines and a card on the
+  screen, for something one person runs a handful of times a year. That is the
+  honest size of it, and it is why this was argued rather than assumed.
+
+  **A GET, which is #67's decision going the other way and for the reason #67
+  gave.** That endpoint is a POST because a description in a query string is one
+  person's spending written into every access log between the browser and the
+  process. Nothing about this request is a value -- there is no query string at
+  all -- so the method means what it says: a read, idempotent, safe to repeat.
+
+  **The header is included, so the export is a valid eval set on its own**, and
+  `python evals/score.py --set <file>` reads it -- which is worth doing before
+  merging, because it says what the baseline makes of rows nobody wrote for it.
+  The price is that appending it is `tail -n +2` rather than `cat`, and the
+  screen prints both commands. Omitting the header was the alternative and buys a
+  file that concatenates directly and cannot be read by the one program it exists
+  to feed.
+
+  **Nothing is downloaded when nothing was labelled**, and that is a decision
+  rather than a guard against an empty string: the body is still a valid file --
+  a header and no rows -- and it is precisely the file that does damage, because
+  appended it puts a second header into the middle of the set, which `score.py`
+  refuses as a row whose date is the word `occurred_at`.
+
+  **`X-Labelled-Rows` is a header rather than a field in a JSON envelope**,
+  because the body has to stay a file: anything wrapping it puts the whole export
+  through JSON escaping and makes `curl -OJ` produce something that is not the
+  CSV. Counting the lines in the client is the alternative and is wrong on
+  exactly the rows worth having -- a quoted description may contain a newline, so
+  lines and rows are not the same number, and the browser would need a second CSV
+  parser to find out.
+
+  **The one `WHERE` clause is a named rule, not a lambda**, and it was a lambda
+  until a mutation sweep said otherwise. `LabelledRows.ByHand` is the precedent
+  `CategorySources.MayOverwrite` set in #63 -- a rule that is easy to lose, in a
+  place where losing it is silent. An `Expression` and not a `Func`, or EF fetches
+  the table and filters it in memory. What a test still cannot hold is that the
+  handler *applies* it: that is a one-line deletion in a method that reaches
+  `AppDbContext`, which is the wall `AuthorizationTests` and #62 both document,
+  and it was checked by hand instead.
+
+  **The export is ordered oldest first, which is the opposite of the screen.**
+  `evals/transactions.csv` is in date order and this file is appended to it, so
+  ascending keeps it sorted where newest-first would interleave backwards.
+  `CreatedAt` is the tiebreak for the same reason `ListAsync` has one -- a day
+  holds several rows -- and with it two exports of an unchanged table are
+  byte-identical, which is what makes a diff of two of them mean anything.
+
+  **CRLF, and no BOM.** RFC 4180 says CRLF, which is the weaker half; the
+  stronger is that `evals/transactions.csv` is CRLF in the working tree --
+  `core.autocrlf` is true and git stores it as LF -- so an appended block of LF
+  rows would be a change to every line of the file the next time anything
+  rewrote it. The BOM is left off because `score.py` opens the set as `utf-8-sig`
+  and would read it, and because `TypedResults.Text` with an explicit encoding
+  writes the encoded bytes without the preamble.
+
+  **Two files, two cards, and never the same name.** #89's third trap is that
+  the file `POST /api/transactions/import` reads has four columns and no
+  category and this one has five, so naming them alike is how they get swapped.
+  The download is `labelled-<date>.csv`, `CsvWriter` lives apart from
+  `CsvReader` although both are RFC 4180, and the screen is a second card beside
+  the import rather than a second control inside it -- adjacent, so the
+  difference is visible at the same moment, and separate, because one card
+  holding an upload and a download is where somebody eventually feeds one to the
+  other. A test asserts the export's name does **not** contain "transactions".
+
+  **The header is a contract with a Python file, so the Python file is read.**
+  `score.py` compares its `COLUMNS` tuple against the header exactly rather than
+  by lookup, so a column renamed on either side makes every export unreadable by
+  the one program meant to read it, with nothing red anywhere because each side
+  stays self-consistent. `LabelledCsvTests` reads `evals/score.py` by
+  `[CallerFilePath]`, which is the answer `CategoriesTests` already gives for the
+  vocabulary, with the same cost: the test knows the repository's layout.
+
+  **Checked by breaking it, per #21: 21 mutations, one at a time, reverted with
+  `git checkout` from the commit rather than from memory.** Nineteen were caught.
+  The two that were not are the handler's query -- the `.Where` deleted, and the
+  order reversed -- and both are unreachable from a suite that may not open a
+  database; both were checked by hand instead. Two rounds were needed and the
+  first round is the part worth keeping.
+
+  **The first sweep reported every mutation as caught, and every one of those
+  verdicts was worthless.** The application was still running from the by-hand
+  verification, holding `bin\Debug`, so `dotnet test` failed to *build* each
+  time and the script read a non-zero exit as a dead mutation. #63 already
+  recorded the fix for the underlying clash -- a separate output folder and a
+  second port -- and the lesson this adds is about the harness rather than the
+  application: **a mutation runner has to tell a failing test from a failing
+  build**, or it reports a perfect score for a suite it never ran.
+
+  The same harness has a second edge worth writing down, because it produced a
+  red suite over code that was already correct: the sweep reverts the source and
+  does **not** rebuild, so the next `dotnet test --no-build` runs the *last*
+  mutation's binaries. Here that was `.AllowAnonymous()` on the export, which
+  answers a signed-out request by reaching a database that is not there -- a 500
+  where the test wanted a 401, on a working tree `git status` reported clean.
+
+  **The second sweep found a test that looked like it asserted something.**
+  Writing the date in the ambient culture survived a culture test that used
+  `ro-RO` alone -- `-` is a literal in a custom format string rather than a
+  separator placeholder, so Romanian renders `yyyy-MM-dd` exactly as the
+  invariant culture does. `ar-SA` is what changes it: its default calendar is Umm
+  al-Qura, so the same format string yields a **Hijri** year, which is #31
+  arriving on the way out instead of the way in. Both cultures are now in the
+  theory, for two different halves of the rule, and a second test asserts that
+  `ar-SA` really does render a different year -- otherwise the day that stops
+  being true, the date half quietly tests nothing.
+
+  **Verified against the running compose stack**, which is where the half that
+  matters is. Five transactions, one of which the rules categorised by itself;
+  three corrected by hand, one of them corrected twice. The export is exactly
+  those three, oldest first, with `X-Labelled-Rows: 3` -- the `rules` row absent,
+  the twice-corrected row present once carrying its second label. `lidl, centru`
+  came back quoted, a description stored with surrounding spaces came back
+  quoted, and `78.5` came back as `78.50` from `numeric(18,2)`. Clearing a
+  category dropped its row out of the export, which is #63's invariant doing the
+  work. `python evals/score.py --set` read the export unedited; appended to a
+  copy of `evals/transactions.csv` with `tail -n +2`, the scorer read 56 rows
+  with no hand-editing. Anonymous is 401, a POST to the same path is 405.
+
+  **And the #52 check, which is the one that has caught a real bug here before.**
+  A second account exported one row and the first exported three, neither seeing
+  the other's -- with no ownership condition anywhere in the query. That is the
+  global query filter doing exactly the job that decided the endpoint over the
+  `psql` script.
+
+  **What is not automated, said plainly.** The whole client half: this project
+  still has no test framework for React (#67 recorded the same for its own
+  debounce), so the debounce-free button, the three states and the Blob download
+  are checked by `tsc`, by `oxlint` and by reading. The download in particular is
+  the piece most likely to be wrong and least likely to be caught -- an anchor
+  that is clicked while detached is ignored by Firefox and works in Chrome, and
+  an object URL revoked on the next line is a download that silently produces
+  nothing in Safari; both are handled, and neither is exercised by anything that
+  runs on its own. Signing in through a browser means typing a password, which is
+  not something Claude does, so the screen was not opened.
+
+  **Still deliberately open: the export does not deduplicate against
+  `evals/transactions.csv`.** Exporting twice and appending twice puts every row
+  in twice, and nothing reports it -- the scorer would simply weigh those rows
+  double. What lost: sending the eval set up to be diffed against, which makes an
+  export depend on a file in the repository and turns a read of one table into a
+  merge; and a "since" parameter, which is state the application would have to
+  keep about a chore. What is there instead is the date in the file name, which
+  is a convention and not a control. It becomes worth fixing the first time
+  somebody appends the same file twice.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as
