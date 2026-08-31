@@ -1,4 +1,4 @@
-import { request } from './http'
+import { request, send } from './http'
 import type {
   CategorySuggestion,
   CategorySuggestionQuery,
@@ -25,6 +25,18 @@ const TRANSACTIONS_URL = '/api/transactions'
 // eleven are not a sub-resource of one transaction, and the day a budget or a
 // filter needs them they would be reading a list out of another feature's URLs.
 const CATEGORIES_URL = '/api/categories'
+
+// #89. A path of its own under the transactions group rather than a query
+// parameter on the list, because it is a different representation of a different
+// subset -- and because a `?format=csv` on the list is how a screen ends up
+// fetching a CSV by accident.
+const LABELLED_URL = '/api/transactions/labelled'
+
+// Written here and in TransactionEndpoints.cs, which is the two-places problem
+// this repository names rather than pretends away. It is a header name and not a
+// rule: getting it wrong costs a row count that reads 0, which the screen says out
+// loud, and never a wrong file.
+const ROW_COUNT_HEADER = 'X-Labelled-Rows'
 
 /** The closed list the correction dropdown is built from. */
 // Fetched rather than written down here, and that is #63's "decide how they stay
@@ -138,6 +150,66 @@ export function importTransactions(
     signal,
     { timeoutMs: IMPORT_TIMEOUT_MS },
   )
+}
+
+/** How long an export may take before the client gives up on it. */
+// Between the ten seconds every other call gets and the import's two minutes, and
+// chosen against the same shape of work: the server runs one indexed query,
+// renders a few hundred rows into a string and sends it -- but on the deployed app
+// this may also be the request that pays the 23 second cold start (#35). Thirty
+// seconds is a backstop, not a budget.
+const EXPORT_TIMEOUT_MS = 30_000
+
+/** What the server sent, and what to call the file it goes into. */
+// Not in api/types.ts, deliberately: everything there is a shape the server
+// serialises, and this is one this module assembles out of a body and two headers.
+// Putting it there would suggest there is a JSON contract behind it, and the whole
+// point of the endpoint is that there is not -- the body is the file.
+export interface LabelledExport {
+  csv: string
+  rows: number
+  fileName: string
+}
+
+/** The name the server suggested, or a plain one if it did not. #89. */
+// A deliberately narrow parse of one header this application writes itself, rather
+// than a general Content-Disposition reader -- the RFC's grammar has parameter
+// ordering, RFC 5987 encoding and unquoted forms in it, none of which this server
+// produces. The fallback matters more than the parse: a browser extension or a
+// proxy that strips the header must cost a nice filename and nothing else.
+function fileNameFrom(disposition: string | null): string {
+  return /filename="([^"]+)"/.exec(disposition ?? '')?.[1] ?? 'labelled.csv'
+}
+
+/** Every row a person has labelled by hand, as the five columns the eval set holds. #89. */
+// Read as text rather than JSON, which is why this is the one function in this file
+// that reaches for `send` instead of `request`. The body is a file: wrapping it in
+// an envelope would put the whole export through JSON escaping and would make
+// anything but this client -- curl, a script -- unwrap it before it had a CSV.
+//
+// The row count comes from a header for the same reason, and because counting lines
+// here would be wrong on exactly the rows worth having: a quoted description may
+// contain a newline, so lines and rows are not the same number.
+export async function exportLabelled(
+  signal?: AbortSignal,
+): Promise<LabelledExport> {
+  const response = await send(
+    LABELLED_URL,
+    { method: 'GET' },
+    signal,
+    { timeoutMs: EXPORT_TIMEOUT_MS },
+  )
+
+  // Number() rather than parseInt: a header that is not a number at all should be
+  // 0 rows and not the leading digits of something else. NaN is guarded below
+  // because Number('') is 0 and Number(null) is 0, but Number('two') is NaN.
+  const rows = Number(response.headers.get(ROW_COUNT_HEADER))
+
+  return {
+    csv: await response.text(),
+    rows: Number.isFinite(rows) ? rows : 0,
+    fileName: fileNameFrom(response.headers.get('content-disposition')),
+  }
 }
 
 /** How long a suggestion may take before it stops being worth having. #67. */

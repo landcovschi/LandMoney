@@ -627,7 +627,10 @@ button:not(.link)[aria-busy='true']::after {
   color: var(--text-muted);
 }
 
-.import code {
+/* Both CSV cards, because #89's export names its five columns and two shell
+   commands in exactly the same way the import names its four. */
+.import code,
+.export code {
   padding: 0 var(--space-1);
   border-radius: var(--radius-sm);
   background: var(--surface-sunken);
@@ -686,6 +689,23 @@ button:not(.link)[aria-busy='true']::after {
   border-color: var(--danger-border);
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+/* --- the export (#89) ------------------------------------------------------ */
+
+/* Reuses .entry for the card and .import-report for the result, so the two CSV
+   blocks read as one pair rather than as two features that happen to be adjacent.
+   Only the gap differs: this card is a paragraph and a button rather than a form,
+   and .entry's column gap is sized for fields. */
+.export {
+  gap: var(--space-3);
+}
+
+/* The button sits under a paragraph rather than at the end of a form, so it has
+   no field above it to inherit an edge from and would otherwise stretch to the
+   full width of the card on its own. */
+.export button {
+  align-self: flex-start;
 }
 
 /* --- the month at a glance (#68) ------------------------------------------- */
