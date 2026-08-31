@@ -96,6 +96,29 @@ public class AuthorizationTests
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    // #89. The export endpoint is inside the group RequireAuthorization is applied
+    // to, and this is the assertion that it stayed there. It is the one route in this
+    // application whose whole answer is somebody's data in a file -- the list endpoint
+    // returns the same rows, but an export is the shape that gets saved, mailed and
+    // committed -- so a MapGet written outside the group would be one URL between an
+    // account's spending and anyone who guessed the path.
+    //
+    // Asserted with 401 rather than "not 200", because the query filter would answer
+    // an anonymous caller with an empty file: owner_id compared to NULL is never true,
+    // which is AppDbContext's deliberate fail-closed behaviour. A header-only CSV and
+    // a refusal look alike from a distance and are not the same fact, and it is the
+    // authorization that is being checked here.
+    [Fact]
+    public async Task An_anonymous_export_is_refused()
+    {
+        using var app = TestApp.WithInviteCode();
+        using var client = app.CreateNonFollowingClient();
+
+        var response = await client.GetAsync("/api/transactions/labelled");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     // #63. The correction endpoint is inside the group RequireAuthorization is
     // applied to, and this is the assertion that it stayed there.
     //

@@ -281,3 +281,13 @@ Content-Type: application/json
 
 occurred_at,amount,currency,description
 2026-06-12,412.50,MDL,linella
+
+### #89. The rows a person labelled, as the five columns evals/transactions.csv
+### holds. Expect text/csv, a header line, and X-Labelled-Rows counting the rows
+### under it -- and nothing whose category came from `rules` or `model`, which is
+### the one WHERE clause the whole endpoint exists for.
+###
+### The quickest way to see it do its job: POST one of the creates above, correct
+### its category in the screen -- the dropdown in the list -- and run this. The row
+### appears; every row whose category the categorizer guessed does not.
+GET {{host}}/api/transactions/labelled

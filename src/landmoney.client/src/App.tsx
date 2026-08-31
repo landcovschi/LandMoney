@@ -7,6 +7,7 @@ import {
   updateCategory,
 } from './api/transactions'
 import type { NewTransaction } from './api/types'
+import { ExportLabelled } from './components/ExportLabelled'
 import { ImportForm } from './components/ImportForm'
 import { LoginForm } from './components/LoginForm'
 import { MonthSummary } from './components/MonthSummary'
@@ -295,6 +296,19 @@ function App() {
             blinks through "Loading..." rather than holding the previous rows.
           */}
           <ImportForm onImported={reload} />
+
+          {/*
+            #89. Under the import and above the summary, which puts the two CSV
+            cards next to each other -- the one that reads four columns and the one
+            that writes five. They are adjacent so that the difference is on the
+            screen at the same time rather than remembered; they are two cards
+            rather than one for the same reason.
+
+            No callback, unlike ImportForm: an export changes nothing, so there is
+            no list to fetch again. It is the only block on this page that reads
+            and does not write.
+          */}
+          <ExportLabelled />
 
           {/*
             #68. Between the import and the list, and rendered off the very array

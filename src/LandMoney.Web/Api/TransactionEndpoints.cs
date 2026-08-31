@@ -1,6 +1,9 @@
 ﻿using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using System.Text;
 using LandMoney.Web.Categorizing;
 using LandMoney.Web.Data;
+using LandMoney.Web.Export;
 using LandMoney.Web.Import;
 using LandMoney.Web.Models;
 using Microsoft.AspNetCore.Http.Features;
@@ -79,6 +82,21 @@ public static class TransactionEndpoints
         // established: the specific routes, then the parameterised one.
         group.MapPost("/category-suggestion", SuggestCategoryAsync)
             .AddEndpointFilter<ValidationFilter<CategorySuggestionRequest>>();
+
+        // #89. A GET, and the one place the argument for #67's POST does not carry
+        // over: nothing about this request is a value, so there is no description to
+        // write into an access log, and it is a read in the sense the method means --
+        // idempotent, and safe to repeat. What it keeps from that decision is the
+        // literal segment, registered after the {id:guid} PATCH for the same reason
+        // /category-suggestion is: routing would not confuse them in any case, and the
+        // file reads specific-then-parameterised.
+        //
+        // No ValidationFilter, and no query string to validate. Every choice this
+        // endpoint could have offered -- a date range, a category, a limit -- is one
+        // more thing that can be got wrong in a file whose whole job is to be appended
+        // to another file, and `head` and `grep` already exist for the day one is
+        // wanted.
+        group.MapGet("/labelled", ExportLabelledAsync);
 
         return group;
     }
@@ -623,6 +641,110 @@ public static class TransactionEndpoints
         await db.SaveChangesAsync(cancellationToken);
 
         return TypedResults.Ok(ToResponse(transaction));
+    }
+
+    /// <summary>How many rows the file holds, so the client can say so without parsing it.</summary>
+    // A header rather than a field in a JSON envelope, because the body has to stay a
+    // CSV file: anything wrapping it makes `curl -OJ` produce something that is not
+    // the file, and puts the whole export through JSON escaping for the sake of one
+    // integer. Counting the lines on the other side is the alternative and is wrong
+    // for a reason that only shows up in the rows that matter -- a quoted description
+    // may contain a newline, so line count and row count are not the same number, and
+    // the client would have to own a second CSV parser to find out.
+    //
+    // Same-origin, so nothing has to be exposed for the browser to read it: the
+    // Access-Control-Expose-Headers rule applies to cross-origin responses, and this
+    // client is served by this application (#20).
+    private const string RowCountHeader = "X-Labelled-Rows";
+
+    /// <summary>#89. The rows a person labelled, as the five columns the eval set holds.</summary>
+    // **Where this lives was the decision, and the alternative was a psql query
+    // written into docs/.** That is genuinely less code -- no route, no writer, no
+    // client -- and #37 has already established that this machine can reach the
+    // deployed database. It lost on the trap the issue names second. The export has
+    // to be scoped to one owner, and in psql that scoping is a WHERE clause somebody
+    // types, against an owner id they first have to look up; here it is
+    // AppDbContext's global query filter, which is applied to a query that does not
+    // mention ownership and cannot forget to. The failure modes are not symmetrical:
+    // a forgotten clause in a hand-typed query exports every account's rows into a
+    // file that looks exactly right, and #52's bug is this repository's evidence that
+    // that class of mistake is invisible from the outside.
+    //
+    // Two smaller things went the same way. psql is a dependency this repository
+    // declined once already, in #37, for the same "another thing to install and
+    // another place the connection string has to arrive" reason -- and the labelling
+    // it exports is done in a browser, so a route that needs a terminal and a
+    // connection string is a different act from the one that produced the rows. And
+    // the five columns are written down once, in LabelledCsv, next to the four the
+    // import reads, rather than in a SQL string in a document that nothing compiles.
+    //
+    // What the route taken costs, said plainly: about ninety lines and a screen, for
+    // something one person runs a handful of times a year. That is the honest size of
+    // it, and it is the reason this was worth arguing rather than assuming.
+    private static async Task<ContentHttpResult> ExportLabelledAsync(
+        HttpContext http,
+        AppDbContext db,
+        TimeProvider clock,
+        CancellationToken cancellationToken)
+    {
+        var rows = await db.Transactions
+            // **The one WHERE clause this issue exists for.** A `model` or `rules`
+            // row exported into the eval set is the predictor being scored against
+            // its own past answers, and the number afterwards means nothing --
+            // silently, because such a file is indistinguishable from a labelled one.
+            // CategorySources.Human is written by the PATCH handler and by nothing
+            // else, and no service can send it, which is what makes this clause a
+            // statement about who decided rather than about what was stored.
+            .Where(transaction => transaction.CategorySource == CategorySources.Human)
+
+            // Redundant today and kept anyway. #59's invariant is that a source
+            // exists exactly when a category does, so a `human` row always carries
+            // one -- but the cost of that ever being false is not a missing row, it
+            // is an empty fifth field, which evals/score.py refuses for the *whole
+            // file* rather than for the row. Dropping such a row is the failure that
+            // leaves the export usable.
+            .Where(transaction => transaction.Category != null)
+
+            // Ascending, which is the opposite of ListAsync and is not an oversight.
+            // evals/transactions.csv is in date order, and this file is meant to be
+            // appended to it -- so ascending keeps the result sorted, where the
+            // screen's newest-first would interleave backwards. CreatedAt is the same
+            // tiebreak for the same reason as there: OccurredAt is a day, several rows
+            // share one, and without a second key their order is whatever Postgres
+            // finds cheapest. Two exports of an unchanged table are then byte-identical,
+            // which is what makes a diff of two of them mean something.
+            .OrderBy(transaction => transaction.OccurredAt)
+            .ThenBy(transaction => transaction.CreatedAt)
+
+            // The null-forgiving operator is what the Where above earns. EF translates
+            // the projection rather than running it, so the compiler cannot see that
+            // the filter has already excluded the nulls.
+            .Select(transaction => new LabelledRow(
+                transaction.OccurredAt,
+                transaction.Amount,
+                transaction.Currency,
+                transaction.Description,
+                transaction.Category!))
+            .ToListAsync(cancellationToken);
+
+        // A row corrected twice exports once, with the last label -- and it is worth
+        // saying out loud that nothing here arranges that. PATCH updates the row in
+        // place and there is no history table, so "the latest label" is the only
+        // label there is. The day corrections are journalled, this query grows a
+        // DISTINCT ON and this comment becomes wrong.
+        var csv = LabelledCsv.Render(rows);
+
+        var fileName = LabelledCsv.FileName(DateOnly.FromDateTime(clock.GetUtcNow().UtcDateTime));
+
+        http.Response.Headers.ContentDisposition = $"attachment; filename=\"{fileName}\"";
+        http.Response.Headers[RowCountHeader] = rows.Count.ToString(CultureInfo.InvariantCulture);
+
+        // Encoding passed explicitly, which is what puts `; charset=utf-8` on the
+        // content type -- and what keeps the BOM off, since this writes the encoded
+        // bytes rather than the preamble. A BOM would be read by evals/score.py,
+        // which opens the set as utf-8-sig, and would be one more difference between
+        // the exported file and the one it is appended to.
+        return TypedResults.Text(csv, CsvContentType, Encoding.UTF8);
     }
 
     private static TransactionResponse ToResponse(Transaction transaction) => new(

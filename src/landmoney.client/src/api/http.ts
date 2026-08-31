@@ -64,12 +64,21 @@ export class ApiError extends Error {
   }
 }
 
-export async function request<T>(
+/**
+ * One request, as far as "the server answered and it was not an error".
+ *
+ * Split out of `request` in #89, which needed the `Response` itself rather than a
+ * parsed body: the export is a CSV file and a row count in a header, neither of
+ * which survives `response.json()`. Everything about failure -- the timeout, the
+ * gateway statuses, the 401 sentence, the problem document -- is here, so the two
+ * callers below cannot report the same failure two different ways.
+ */
+export async function send(
   url: string,
   init: RequestInit,
   callerSignal?: AbortSignal,
   options: RequestOptions = {},
-): Promise<T> {
+): Promise<Response> {
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS
 
   // Two independent reasons to give up, and both have to reach the same fetch:
@@ -150,6 +159,17 @@ export async function request<T>(
   if (!response.ok) {
     throw await toApiError(response)
   }
+
+  return response
+}
+
+export async function request<T>(
+  url: string,
+  init: RequestInit,
+  callerSignal?: AbortSignal,
+  options: RequestOptions = {},
+): Promise<T> {
+  const response = await send(url, init, callerSignal, options)
 
   // 204 has no body, and calling response.json() on one throws a SyntaxError
   // about a document nobody sent. Added in #52, where /api/auth/logout is the
