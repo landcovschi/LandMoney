@@ -84,21 +84,55 @@ public class LabelledCsvTests
         Assert.Contains($",{expected},", LabelledCsv.Render([Row(amount: amount)]), StringComparison.Ordinal);
 
     /// <summary>The rule this repository has been bitten by twice, on the way out this time.</summary>
-    // A machine set to Romanian writes 412,50 for this decimal and 02.06.2026 for
-    // this date. The first is two CSV fields and the second is not a date score.py
-    // can parse, so either one turns the whole export into a file the scorer refuses
-    // -- and it would do it only on the machine whose culture is not invariant,
-    // which is the half that makes this worth a test rather than a comment.
-    [Fact]
-    public void Neither_the_date_nor_the_amount_is_written_in_the_ambient_culture()
+    // **The two cultures are not interchangeable and picking only one leaves half the
+    // rule untested**, which a mutation sweep is what said: writing the *date* in the
+    // ambient culture survived a test that used ro-RO alone. `-` is a literal in a
+    // custom format string rather than a separator placeholder, so ro-RO renders
+    // yyyy-MM-dd exactly as the invariant culture does and the mutation changed
+    // nothing visible.
+    //
+    // ro-RO is here for the amount: 412,50 is two CSV fields, so the export gains a
+    // row of six columns where the header says five and score.py refuses the file.
+    // ar-SA is here for the date, and it is #31 arriving on the way out -- its default
+    // calendar is Umm al-Qura, so the same format string yields a *Hijri* year,
+    // silently, for a row that is otherwise perfectly formed.
+    [Theory]
+    [InlineData("ro-RO")]
+    [InlineData("ar-SA")]
+    public void Neither_the_date_nor_the_amount_is_written_in_the_ambient_culture(string culture)
     {
         var original = CultureInfo.CurrentCulture;
 
         try
         {
-            CultureInfo.CurrentCulture = new CultureInfo("ro-RO");
+            CultureInfo.CurrentCulture = new CultureInfo(culture);
 
             Assert.Contains("2026-06-02,412.50,", LabelledCsv.Render([Row()]), StringComparison.Ordinal);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
+    }
+
+    // The guard on the guard, and it is here because the theory above passed for a
+    // year that was never Hijri. If ar-SA ever stops defaulting to Umm al-Qura on
+    // this runtime -- or the culture is unavailable on a stripped image and silently
+    // falls back to the invariant one -- the date half of that theory becomes a test
+    // of nothing, and this is what says so instead.
+    [Fact]
+    public void The_ambient_culture_used_above_really_does_render_a_different_year()
+    {
+        var original = CultureInfo.CurrentCulture;
+
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("ar-SA");
+
+            Assert.DoesNotContain(
+                "2026",
+                new DateOnly(2026, 6, 2).ToString(TransactionCsv.DateFormat, CultureInfo.CurrentCulture),
+                StringComparison.Ordinal);
         }
         finally
         {

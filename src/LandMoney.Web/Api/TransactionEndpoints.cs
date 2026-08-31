@@ -688,22 +688,13 @@ public static class TransactionEndpoints
         CancellationToken cancellationToken)
     {
         var rows = await db.Transactions
-            // **The one WHERE clause this issue exists for.** A `model` or `rules`
-            // row exported into the eval set is the predictor being scored against
-            // its own past answers, and the number afterwards means nothing --
-            // silently, because such a file is indistinguishable from a labelled one.
-            // CategorySources.Human is written by the PATCH handler and by nothing
-            // else, and no service can send it, which is what makes this clause a
-            // statement about who decided rather than about what was stored.
-            .Where(transaction => transaction.CategorySource == CategorySources.Human)
-
-            // Redundant today and kept anyway. #59's invariant is that a source
-            // exists exactly when a category does, so a `human` row always carries
-            // one -- but the cost of that ever being false is not a missing row, it
-            // is an empty fifth field, which evals/score.py refuses for the *whole
-            // file* rather than for the row. Dropping such a row is the failure that
-            // leaves the export usable.
-            .Where(transaction => transaction.Category != null)
+            // **The one WHERE clause this issue exists for**, and it is a named rule
+            // in LabelledRows rather than a lambda written here -- a `model` row in
+            // the eval set is the predictor grading its own past answers, and the
+            // number afterwards means nothing while the file looks exactly right.
+            // The comment on that field is the long version, including what a test
+            // can hold about it and what it cannot.
+            .Where(LabelledRows.ByHand)
 
             // Ascending, which is the opposite of ListAsync and is not an oversight.
             // evals/transactions.csv is in date order, and this file is meant to be
