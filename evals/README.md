@@ -131,7 +131,12 @@ no package yet.
 ## The state of this today
 
 `transactions.csv` holds **53 labelled rows and none of them are real spending**,
-and `holdout.csv` holds 10 more with the category column empty. The baseline
+and `holdout-spent-2026-08-29.csv` holds 10 more that are **labelled and
+spent** -- #66 scored both predictors on them on 2026-08-29 (rules 44.4%, model
+100.0%, over the nine of eleven categories the file covers) and #91 recorded it
+burned on 2026-09-02, renaming it so a copied command fails rather than scores
+it twice. There is no holdout right now; section 4 of `docs/evals.md` is the
+account. The baseline
 scores **56.1% macro recall** and 56.6% accuracy against them -- which is what
 `baseline.json` records and what CI asserts.
 
@@ -181,11 +186,20 @@ first of them. When they are replaced with real ones, this is the list to follow
 4. **Do not look at any prediction while labelling.** Not the model's, and not
    `python evals/score.py` either. Seeing an answer and then deciding whether it
    is acceptable is how a 60% system scores 90%.
-5. **Put a few rows in `holdout.csv` and leave the category column empty.**
-   They are not labelled now and not looked at again until the end of slice 4.
-   Tuning against the same fifty rows until they pass teaches the rules the
-   answers, and the eval set cannot report that it has happened. `score.py`
-   refuses a file with blank labels, so using them early has to be deliberate.
+5. **Hold a few rows back, in a file of their own, with the category column
+   empty.** Tuning against the same fifty rows until they pass teaches the rules
+   the answers, and the eval set cannot report that it has happened. `score.py`
+   refuses a file with blank labels, so spending them has to be deliberate
+   rather than accidental.
+
+   **Take them before the labelling session, not after it.** Once a set has been
+   scored against, no part of it is held out any more, and carving a holdout out
+   of it afterwards produces rows that were already seen. This is the one step
+   here that cannot be done later.
+
+   There is no such file today. The old one is `holdout-spent-2026-08-29.csv`,
+   named for what happened to it, and the replacement is a slice of the real
+   export from #90 -- which is why the name `holdout.csv` is free again.
 
 ## Getting rows out of the application
 
