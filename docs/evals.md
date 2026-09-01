@@ -197,18 +197,105 @@ patched around by quietly adding non-English substrings.
 
 ## 4. The held-out rows
 
-`evals/holdout.csv` carries descriptions with **an empty category column** and
-is not to be labelled now. It exists for one use: at the end of slice 4, label
-it once and score whatever won on it. Tuning against the same rows until they
-pass teaches the answers, and the eval set cannot report that it has happened.
+**Spent on 2026-08-29 in #66, and recorded as burned on 2026-09-02 in #91.**
+This file is not an instrument any more. The section is kept in the shape of an
+account rather than deleted, because one that quietly stopped describing a live
+holdout would leave the project reading as though it still had one -- which is
+exactly the mistake #91 was written under.
 
-`score.py` refuses to score a file whose labels are blank, so using the holdout
-early has to be deliberate rather than accidental.
+`evals/holdout.csv` was written on 2026-08-25 alongside the labelled set, for
+one use: at the end of slice 4, label it once and score whatever won on it.
+Tuning against the same rows until they pass teaches the answers, and the eval
+set cannot report that it has happened.
 
-The eight rows in it were written on 2026-08-25 by the same hand as the labelled
-set and carry the same caveat: a held-out set drawn from the same synthetic
-distribution checks for tuning, which is what it is for, and does not check that
-anything generalises to real descriptions.
+### The two numbers
+
+#66 released it -- slice 4 closed with #60 -- to give retrieval a corpus and an
+eval that do not overlap, since a nearest-neighbour lookup that can return the
+row it is answering is a lie with a very good percentage. Labelling it to do
+that produced the scores a holdout exists to produce:
+
+| predictor | macro recall | accuracy | date |
+| --- | --- | --- | --- |
+| rules | **44.4%** | 40.0% | 2026-08-29 |
+| model, no retrieval | **100.0%** | 100.0% | 2026-08-29 |
+
+Ten rows, `claude-opus-5` at `effort=low`, and both recalls are macro averages
+over the **nine** categories present rather than over the eleven -- see below.
+The model answered ten of ten with zero abstentions and zero confident errors;
+the rules abstained on six of their six misses. Section 8 has the run itself and
+what it says about retrieval.
+
+**It was spent cleanly, and that is the half most easily lost.** Nothing was
+tuned after the numbers were seen -- section 8 records the score floor that was
+*not* added in response to seeing the neighbours, at the one place in
+`retrieval.py` it would have gone. So the verdict stands rather than being
+merely available: on rows neither predictor had been tuned against, the model
+held at 100.0% and the rules fell 11.7 points below their 56.1% on the main set.
+
+### Read it as small, and two categories short
+
+Ten rows over **nine** of the eleven categories: `fees` and `other` do not
+appear in the file at all, so neither number above is an average over the
+vocabulary. That is not a detail, and it cuts both ways.
+
+`other` is the category section 7 singles out -- structurally unreachable for a
+substring baseline, and the one the model took from 0/3 to 3/3 on the main set.
+So **the model's 100.0% is a hundred per cent of a set with the hardest category
+missing**, which is the single largest reason to read it as agreement rather
+than as a result. And the rules' 44.4% is *flattered* by the same absence: on
+the main set they score `other` at 0.0% and `fees` at 33.3%, the two worst of
+the eleven. They still came out 11.7 points below their own main-set number.
+
+Eight of the nine categories present hold exactly one row, so each can only
+score 0% or 100%; `score.py` named all nine as thin, under its three-row floor.
+One row is 10 points of accuracy. "Does this broadly agree" is the whole of what
+this file can say, and it agreed.
+
+**A replacement inherits this problem and will not solve it either.** Real
+spending is lopsided (#90's second trap), so a holdout sliced off it will be
+thin or empty in the same categories the main set is thin in. Recording which
+categories a holdout cannot measure is part of reporting its number, not a
+footnote to it.
+
+### What it cannot answer, and why there is no second run
+
+The rows are synthetic, written by the same hand as the labelled set. A held-out
+set drawn from the same synthetic distribution checks for **tuning**, which is
+what it is for, and does not check that anything generalises to real
+descriptions -- so it was never able to answer the question section 7 raises
+about itself.
+
+It cannot be re-run to answer it later either. The rows have been seen, and rows
+that have been seen are not held out; a second run would report a number about
+an instrument that no longer exists, and reusing it while saying so is worse
+than not using it at all.
+
+### The replacement, and the one moment it can be taken
+
+**A slice of #90's real export, held back before the labelling session rather
+than after it.** Agreed 2026-09-02. That ordering is the whole of it: once a set
+has been scored against, no part of it is a holdout any more, so carving one out
+retroactively produces rows that were already seen rather than rows nobody has
+looked at.
+
+`score.py` refuses to score a file whose labels are blank, so a replacement left
+unlabelled cannot be spent by accident -- which is what protected this one until
+something deliberately released it.
+
+### The file is named for what it is
+
+**`evals/holdout.csv` is now `evals/holdout-spent-2026-08-29.csv`.** A note in a
+document is a thing a reader has to have read; a path that no longer resolves is
+a thing the shell says. So the `--set evals/holdout.csv` commands printed in
+section 8 -- and any copied out of them -- now fail with a missing file rather
+than quietly scoring a burned set for a second time, which is the failure this
+whole section exists to prevent.
+
+It also leaves the name `holdout.csv` free for the replacement, and that is safe
+rather than a trap: a replacement is held back **unlabelled**, and `score.py`
+refuses a file with blank labels. An old command pointed at a new file therefore
+refuses instead of scoring the wrong thing.
 
 ## 5. The set, and the first baseline number
 
@@ -493,6 +580,13 @@ Three caveats, and the first is the one that matters most.
 
 `evals/holdout.csv` was **not touched**, and remains unlooked-at. It is the only
 thing left that can answer a question this section cannot.
+
+**That was true on the day and stopped being true the next one.** #66 released
+and spent it on 2026-08-29; section 4 now carries the two numbers and marks the
+file burned. The sentence above is left standing rather than corrected, because
+what it claims about *this* section is still exactly right -- #60 did not look --
+and because the record is worth more showing a gap that was closed than one that
+was quietly edited shut.
 
 ### Operational facts worth keeping
 

@@ -909,6 +909,15 @@ again by itself after 7 days.
        still unlooked-at and is the only instrument left that this section's
        number cannot bias
 
+       **The sentence above was true for one day.** #66 released and spent the
+       holdout on 2026-08-29, and #91 recorded it burned on 2026-09-02: rules
+       44.4%, model 100.0% over its ten rows, with nothing tuned afterwards. It
+       is kept rather than corrected because it is an accurate record of what
+       #60 did. What it costs is that this section's caveat now has **no**
+       instrument standing behind it, and the replacement can only be taken at
+       one moment -- a slice of #90's real export, held back before the
+       labelling session. Section 4 of `docs/evals.md` is the account
+
        Two runs, identical to the row, 114 s and 115 s for 53 calls each -- ~2.1 s
        per call, inside the 6-second timeout the *service* uses, so the number
        describes the deployed configuration rather than a relaxed one. Zero

@@ -1612,6 +1612,29 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   in English, when real entries would be Russian and Romanian. #47 -- real rows --
   is the only thing that fixes that, and `evals/holdout.csv` is still unlooked-at.
 
+  **That last clause was true for exactly one day, and #91 is what noticed.**
+  #66 released the holdout on 2026-08-29 -- section 4 of `docs/evals.md` allows
+  it once slice 4 has closed, which it had, with #60 -- labelled its ten rows and
+  scored both predictors on them: **rules 44.4%, model 100.0%**, nothing tuned
+  afterwards. So the two numbers #91 asks for already existed, and the issue was
+  written from the four places that still said otherwise -- this clause,
+  `docs/evals.md` sections 4 and 7, and `docs/roadmap.md` -- none of which #66
+  went back to amend. The general form is worth more than the instance: **a fact
+  asserted in four places is a fact that will be updated in one of them**, and
+  the three left behind are the ones a later reader trusts, because they read as
+  corroboration rather than as copies of each other. Section 4 is rewritten,
+  because it was the definition of the file rather than a record of a day; the
+  other three are left standing with the correction beside them, so the record
+  shows the gap closing rather than having been quietly edited shut.
+
+  **What it costs is that nothing now stands behind the caveat above.** A holdout
+  is spendable once; this one was synthetic anyway, so it could never have
+  answered the "Claude grading Claude" question -- only real rows can. The
+  replacement is a slice of #90's export **held back before the labelling
+  session**, agreed 2026-09-02, and that ordering is the whole of it: once a set
+  has been scored against, carving a holdout out of it retroactively produces
+  rows that were already seen.
+
   **Measured at the 6-second timeout the service actually uses**, not a relaxed
   one, at ~2.1 s per call. That was a decision rather than a default: a number
   produced under a configuration that is not deployed describes something that does

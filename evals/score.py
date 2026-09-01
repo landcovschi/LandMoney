@@ -686,9 +686,11 @@ def build_store(mode: str, corpus: Path | None, env: Mapping[str, str]):
     the issue's second trap and the reason this takes a path rather than reusing
     `rows`: a nearest-neighbour lookup that can return the row it is answering is
     a lie with a very good percentage. `--corpus evals/transactions.csv --set
-    evals/holdout.csv` is the pairing #66 was built around, and the two files are
-    disjoint by construction rather than by an exclusion rule somebody has to
-    remember.
+    evals/holdout-spent-2026-08-29.csv` is the pairing #66 was built around, and
+    the two files are disjoint by construction rather than by an exclusion rule
+    somebody has to remember. That set is spent and the pairing is history --
+    #91, and section 4 of `docs/evals.md`; it is named here because it is the
+    worked example of the rule, not because it is a run to repeat.
 
     Loaded through the same `load` the eval set uses, so a corpus is held to the
     same rules -- a label outside the vocabulary is an error here too. And loaded
