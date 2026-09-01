@@ -3508,6 +3508,24 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   the budget and the "Categorizing..." indicator are checked by `tsc`, by `oxlint`
   and by reading.
 
+  **Checked by breaking it, per #21: twelve mutations, one at a time, reverted with
+  `git checkout` from the commit rather than from memory.** Eleven were caught. The
+  harness itself carries the two traps this repository has already paid for: it
+  runs `dotnet build` before `dotnet test` and reports a build failure as invalid
+  rather than as a kill -- #89's sweep scored a suite it never ran -- and it
+  refuses a substitution matching zero or two places, which is #21's own lost
+  mutation, and that refusal fired once here on the three identical `unusable`
+  exits.
+
+  Two are worth keeping. `Owing = 1` survived the first sweep: a row entering with
+  one attempt already spent is still owed a category and still stops at the cap, so
+  every existing test passed while every row's budget had silently been shortened
+  by one. It needed a test naming what the count *means* rather than what it
+  permits. And the null check in `ToResponse` is an **equivalent mutant** -- `null
+  < 30` is false in C# either way, so no test can kill its removal; it is kept for
+  symmetry with the SQL projection, which is now written beside it rather than left
+  to be rediscovered by the next sweep.
+
   **Deliberately not done: the import.** #62 stores every row with a null category
   and says in as many words that "the backfill is its own issue" -- and its stated
   reason, that a 300-row file would be a request running for minutes, is exactly

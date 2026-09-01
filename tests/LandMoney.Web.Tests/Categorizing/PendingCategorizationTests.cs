@@ -27,6 +27,18 @@ public class PendingCategorizationTests
         Assert.True(Owed(Row(attempts: PendingCategorization.Owing)));
     }
 
+    // Added after a mutation sweep: `Owing = 1` survived every other test here,
+    // because a row entering with one attempt already spent is still owed a
+    // category and still stops at the cap. What it silently does is shorten every
+    // row's budget by one, which is a tuning change nobody made and nothing
+    // reports. The count means "attempts charged so far", and a row nothing has
+    // asked yet has had none.
+    [Fact]
+    public void A_row_enters_the_queue_having_spent_nothing()
+    {
+        Assert.Equal(0, PendingCategorization.Owing);
+    }
+
     // The reason the column exists at all, and the reason it is not
     // `category IS NULL`.
     //

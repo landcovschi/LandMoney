@@ -767,6 +767,12 @@ public static class TransactionEndpoints
         // shape are two projections somebody will eventually make disagree in
         // meaning.
         //
+        // **A mutation sweep confirmed no test can kill the removal of this line,
+        // and that is correct rather than a gap.** Deleting it changes nothing this
+        // process does: it is an equivalent mutant, kept for the symmetry above and
+        // not for behaviour. Writing a test that appeared to catch it would be
+        // asserting that C# evaluates `null < 30` the way C# evaluates it.
+        //
         // The default rather than the configured cap, knowingly. Threading
         // IConfiguration into a static projection to get a spinner right buys a
         // client that polls a few extra times and then stops; the cap itself is
