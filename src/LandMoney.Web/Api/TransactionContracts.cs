@@ -178,6 +178,22 @@ public sealed record TransactionResponse(
     string Description,
     string? Category,
     string? CategorySource,
+
+    /// <summary>#92. Is a category still coming for this row?</summary>
+    // The client polls while anything on screen is still expecting one, and this is
+    // what it polls on. Deriving it from `Category is null` instead is the obvious
+    // saving and is wrong in the direction that never stops: the categorizer
+    // abstains on roughly a third of the labelled set, and an abstention is a final
+    // answer that leaves the category null for ever. A client polling on a null
+    // category would poll for ever on exactly those rows.
+    //
+    // A boolean rather than the attempt count. The count is this application's
+    // business -- a ceiling on a bill -- and a screen has nothing to do with it;
+    // putting it on the wire would expose a number a client could only misuse. A
+    // row that has exhausted its attempts reports false, which is correct: nothing
+    // is coming.
+    bool CategoryPending,
+
     DateTimeOffset CreatedAt);
 
 /// <summary>What a client is allowed to send when correcting a category.</summary>

@@ -1392,6 +1392,15 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   has answered 201 with a category the database does not have. The tight timeout
   already bounds the window it would protect.
 
+  **Reversed on 2026-09-02 in #92, and the thing that lost above is what this
+  application now does.** The argument was never wrong; the number in it changed.
+  A save cost 142 ms with the rules behind the port, and about 2.1 s once a model
+  was there (#87) -- and that is the *working* case rather than the broken one, so
+  no timeout can bound it. The costs listed here are now paid deliberately, and
+  the failure the original order protected against is gone rather than traded
+  away: nothing between the request and its 201 can fail any more. See the #92
+  entry at the end of this list.
+
   **21 xUnit tests, and they need no server** -- `HttpMessageHandler` is the seam
   the way `IEndpointFilter` was in #21, so "timeout" takes 50 ms and "unreachable"
   needs nothing to be unreachable. What that leaves untested is said out loud in
@@ -1674,6 +1683,14 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   own issue. Splitting them gives the two different failures two budgets, which is
   all they ever needed: `SocketsHttpHandler.ConnectTimeout` for "not there",
   `HttpClient.Timeout` for "thinking".
+
+  **That own issue was #92, taken on 2026-09-02, and it is now the route this
+  application takes.** Both budgets stay exactly as they are and now bound a
+  background sweep rather than somebody's save, so "every save paid the full
+  timeout while the service was down" describes something that no longer happens
+  on the request path. The two-budget split is what still makes an outage cheap
+  there; it just no longer costs a user anything. See the #92 entry at the end of
+  this list.
 
   **Measured, because the first version of this was wrong twice.** Categorizer up:
   142 ms and a category. Categorizer stopped: **2043 ms**, a 201, and no category --
@@ -3346,6 +3363,156 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   keep about a chore. What is there instead is the date in the file name, which
   is a convention and not a control. It becomes worth fixing the first time
   somebody appends the same file twice.
+
+- **Categorising happens after the save, driven by one nullable column and a
+  five-second sweep -- decided 2026-09-02** (#92).
+  `src/LandMoney.Web/Categorizing/CategorizerSweep.cs` is the worker,
+  `PendingCategorization.cs` is the rule it selects on, and
+  `transactions.categorization_attempts` is the marker. The client polls while
+  anything on screen is still waiting. 36 new tests, and they still need no
+  Postgres, no Docker and no network.
+
+  **What it fixes is that the working case had become the slow one.** #39 put the
+  categorizer call before `SaveChangesAsync` and #59 gave it a two-second connect
+  budget, and both were right while the answer came from 109 substrings in 142 ms.
+  With a model behind the port (#87) it is ~2.1 s of somebody's save, every time,
+  and a timeout cannot bound a service that is working. So the row is written,
+  answered for, and categorised afterwards.
+
+  **A column and a sweep, not a queue in memory, and that was the decision the
+  issue called its substance.** A `Channel<Guid>` read by a hosted service is less
+  code, needs no migration and answers in milliseconds. It loses on where this
+  runs: `--min-replicas 0` kills the process after about fourteen idle minutes
+  (#35) and again at every revision, so anything queued and undone goes with it,
+  silently. That is the fifth time this project has been offered a fallback whose
+  absence nothing reports -- #39, #61, #62, #64 -- and the whole point of a column
+  is that the owing outlives the process. An external queue lost to the arithmetic
+  that killed the Redis cache in #87: a monthly charge against an application one
+  person uses weekly.
+
+  **`categorization_attempts` is one nullable column doing two jobs, and the null
+  is the interesting half.** Null means nothing is owed; a number means something
+  is, and how many attempts it has cost. A `pending` flag beside a counter was the
+  obvious shape and loses because two columns can disagree -- `pending = false`
+  with three attempts recorded is a state nothing should be able to produce, and
+  the way to make that impossible is to have nowhere to write it.
+
+  **What it must not be is `category IS NULL`, and that is #63's deferred decision
+  coming due exactly where #63 said it would.** Clearing a category in the
+  interface writes null to both category columns, so a row somebody deliberately
+  cleared is indistinguishable from one nothing has touched -- and #63's own text
+  says to reopen it "the day something re-categorises existing rows". This is that
+  day. An explicit marker answers it without changing what clearing means: a
+  cleared row was never marked as owing anything, so the sweep cannot see it. Rows
+  predating the column are null for the same reason and are equally out of reach,
+  which is correct rather than a gap -- nothing asked for them.
+
+  **The retry ceiling counts attempts that could have been billed, not attempts
+  that were made**, which is the whole of #92's fourth trap.
+  `CategorizerOutcome.CountsAgainstTheCap` is the one place that rule lives:
+  `not-configured` never opened a socket and `unreachable` is a refusal or a DNS
+  failure, so neither reached a model and neither is charged; everything else is.
+  Charging an outage would abandon rows for a failure that cost nothing.
+
+  **`timeout` is charged and it is the uncomfortable one.** #64 records that a call
+  the model answers at seven seconds is billed and still reads as a timeout here,
+  and #39 measured that a *stopped container* also arrives as a timeout rather than
+  as unreachable, because the SYN goes unanswered instead of being refused. So the
+  branch genuinely cannot tell a free failure from a paid one. It is charged,
+  because between "an outage abandons some rows, visibly and recoverably" and "a
+  slow model bills for ever, silently", the first is the failure to choose. What
+  makes that affordable is the other half: **a tick stops at the first answer it
+  cannot use**, so an outage costs one attempt on the oldest row per five seconds
+  rather than one on every owed row. Measured -- eight ticks against a stopped
+  categorizer produced eight calls, not eight times twenty.
+
+  **The guard is repeated in the UPDATE's own WHERE clause, and that is the one
+  decision here about correctness rather than shape.** Rows are read at the top of
+  a tick and each call takes about two seconds, so a batch is the better part of a
+  minute during which somebody may correct a category on the screen. The entity in
+  memory is a photograph taken before that happened, and `SaveChanges` would write
+  the prediction over the correction -- #92's second trap arriving through
+  staleness rather than through a missing check, and an in-memory `MayOverwrite`
+  would not catch it either. `ExecuteUpdate` with the predicate repeated means
+  Postgres evaluates the guard at the moment of the write. Measured, and the
+  statement is worth keeping: `WHERE t.id = @id AND t.categorization_attempts IS
+  NOT NULL AND t.categorization_attempts < @maxAttempts AND (t.category_source <>
+  'human' OR t.category_source IS NULL)`. This is the caller
+  `CategorySources.MayOverwrite` was written for in #63 and the first where it is
+  not trivially true.
+
+  **`IgnoreQueryFilters` is called for the first time in this repository**, and
+  `AppDbContext`'s comment predicted the shape of the day it would be. The sweep
+  has no `HttpContext`, so `CurrentUser` answers null, and `owner_id = NULL` is
+  never true in SQL -- without the call the sweep would select nothing, for ever,
+  looking exactly like a categorizer that was never reached. It is the mirror of
+  #52's bug: there a null owner made one person's rows visible to everyone, here it
+  would make everyone's rows visible to nobody. What makes ignoring the filter safe
+  rather than merely necessary is that the operation has no owner: it reads a row,
+  sends three fields to a service with no concept of accounts, and writes the
+  answer back to the same row. **The day that stops being true is the day retrieval
+  sends the owner's own history as examples** (#66), and that is the change which
+  has to revisit it. What lost: a mutable `ICurrentUser` registered in the
+  background scope, which reads as safer and makes a fake signed-in user a
+  supported concept.
+
+  **A third `CategorizerKind`, `sweep`, rather than reusing `save`.** Until now
+  every `save` call happened inside the request that wrote the row; from here none
+  do, so keeping the word would leave #64's summary reporting the same number for a
+  different event -- the one failure a closed vocabulary exists to prevent -- and
+  would throw away the signal that the change took. **`save=0` is now the correct
+  reading and `save>0` means something categorises inline again.** Measured:
+  `2 recorded (save=0, preview=0, sweep=2)`.
+
+  **`CategorizerClient` now returns the outcome beside the answer**, for the sweep
+  only. `CategorizerAnswer.Nothing` deliberately collapses "there is no
+  categorizer", "it did not answer in time" and "it answered something unusable",
+  which is exactly right for the two callers that only decide whether to store a
+  category, and useless to a retry -- only one of those three could have been paid
+  for. The two older signatures are unchanged, which is what the projection helper
+  is for.
+
+  **`categoryPending` on the wire, and it is not derivable from a null category.**
+  The categorizer abstains on roughly a third of the labelled set, and an
+  abstention is a final answer that leaves the category null for ever, so a client
+  polling on `category === null` would poll for ever on exactly those rows. The
+  flag is also false for a row the sweep has given up on. The client polls every
+  two seconds while anything visible is pending, gives up after thirty fruitless
+  polls, and **refills that budget whenever the number of pending rows goes down**
+  -- so one save and a three-hundred-row import need no separate handling, and only
+  a minute of no progress at all stops it.
+
+  **What was measured, against the compose stack, and it is the half that matters.**
+  Five rows seeded across two owners in the five states the predicate has to
+  separate: a fresh row was categorised (`eating-out`/`rules`), a row belonging to
+  a *different* owner was categorised too -- which is `IgnoreQueryFilters` working
+  and nothing crossing between owners -- and three were untouched exactly as
+  designed: one labelled `human`, one with a null marker (the #63 hole, shut), and
+  one at the cap. The SELECT is
+  `WHERE categorization_attempts IS NOT NULL AND categorization_attempts <
+  @maxAttempts AND (category_source <> 'human' OR category_source IS NULL)`, with
+  no `owner_id` in it -- so **EF Core's null-semantics rewrite is confirmed rather
+  than assumed**, which was the one claim in this design that C# could not check.
+  Then the categorizer was stopped: eight ticks, eight `timeout` outcomes at ~2.0 s
+  each, attempts charged one per tick; restarted, and both rows resolved, so a
+  short outage abandons nothing.
+
+  **What is not automated, said plainly.** The sweep's own loop needs a database
+  and a categorizer, which is the wall `AuthorizationTests` and #62 both document,
+  so `SweepOnceAsync` is covered by the by-hand run above and not by the suite. The
+  three acceptance tests that need a signed-in session -- a 201 that is as fast
+  with the categorizer down as up, the category appearing without a reload, and the
+  process killed between the two -- were **not** run: signing in means typing a
+  password, which is not something Claude does. The client half has no test
+  framework at all (#67 recorded the same for its own debounce), so the polling,
+  the budget and the "Categorizing..." indicator are checked by `tsc`, by `oxlint`
+  and by reading.
+
+  **Deliberately not done: the import.** #62 stores every row with a null category
+  and says in as many words that "the backfill is its own issue" -- and its stated
+  reason, that a 300-row file would be a request running for minutes, is exactly
+  what this change removes. Marking imported rows as owing a category is one
+  property assignment away and is not in this pass.
 
 ## How work flows
 

@@ -1056,6 +1056,14 @@ the thing that produced the number can be shown.
       refused call is logged, becomes a null category, and the transaction is
       saved. #39's fallback, unchanged by a model being behind the port
 - [ ] Graceful degradation: the AI service is down, the app still works
+
+      **#92 did the half of this that was costing something, on 2026-09-02, and
+      the box is left open on purpose.** Categorising moved off the request path,
+      so a save no longer waits for the categorizer at all -- where it used to pay
+      the full two-second connect budget on every save while the service was down
+      (#59, measured). What is still on that path is #67's preview, which costs the
+      same two seconds when the categorizer is not there and blocks nothing while
+      it does. Whoever closes this box decides whether that counts
 - [x] Evals run in CI on every PR -- #58, 2026-08-28. `python evals/score.py
       --check` compares the run against `evals/baseline.json` and exits 2 when
       the number moved, so a step that is green means the baseline is the
