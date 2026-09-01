@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getMe, logout, type Me } from './api/auth'
 import {
   createTransaction,
@@ -25,6 +25,28 @@ type SessionState =
   | { status: 'loading' }
   | { status: 'signedIn'; me: Me }
   | { status: 'signedOut' }
+
+/** How long to wait before asking again whether a category has arrived. #92. */
+// Two seconds against a sweep that runs every five: often enough that the category
+// never feels like it needed a reload, rare enough that the polling is a handful of
+// requests rather than a stream. Deliberately not equal to the sweep's interval --
+// the two clocks are unsynchronised, so matching them would make the average wait
+// one and a half sweeps instead of one.
+const POLL_INTERVAL_MS = 2_000
+
+/** How many polls to make with nothing to show for them before giving up. */
+// The bound that stops this being a request every two seconds for ever, and it is
+// needed rather than tidy: rows stay pending while the categorizer is down, and
+// `Categorizer:SweepIntervalSeconds` of 0 turns categorising after the fact off
+// altogether, which is a supported state. Thirty is a minute of waiting, which
+// comfortably covers the app's 23-second cold start (#35) plus the categorizer's
+// own.
+//
+// **Progress refills it**, which is what makes one number serve both a single save
+// and a three-hundred-row import: as long as the count of pending rows is going
+// down, something is working and there is a reason to keep asking. Only a minute of
+// no change at all stops it, and a reload starts it again.
+const MAX_IDLE_POLLS = 30
 
 function App() {
   const [list, setList] = useState<ListState>({ status: 'loading' })
@@ -63,6 +85,15 @@ function App() {
     setList({ status: 'loading' })
     setReloads((count) => count + 1)
   }
+
+  // #92. What is left of the polling budget, and how many rows were waiting last
+  // time it was looked at.
+  //
+  // Refs rather than state, on purpose: neither is rendered, and putting them in
+  // state would re-render the table on every tick of a counter nobody can see. They
+  // are read and written inside the effect below, which is where React allows it.
+  const pollsLeft = useRef(MAX_IDLE_POLLS)
+  const pendingLastSeen = useRef<number | null>(null)
 
   // #52. Asked once, on mount. A session that ends while the page is open
   // surfaces as a 401 from the list request instead, which is where the user is
@@ -156,6 +187,71 @@ function App() {
     return () => controller.abort()
   }, [session.status])
 
+  // #92. The category arrives after the row does, so something has to go and look.
+  //
+  // **The whole of the change on this side is that a save no longer waits.** The
+  // server used to ask the categorizer before writing the row, so the 201 carried
+  // the answer and the list fetched after it was already final. Now the row is
+  // written immediately and a sweep fills the category in a few seconds later,
+  // which is invisible to a client that asks once.
+  //
+  // Polling rather than server-sent events, which is the other honest answer and
+  // needs an endpoint, a long-lived connection and a story about an application
+  // that scales to zero. This costs a `setTimeout` and stops on its own.
+  //
+  // **It is self-limiting in the way that matters: an account whose rows all have
+  // categories polls zero times.** The condition is not "recently saved" but "is
+  // anything on screen still waiting", so nothing here has to know which action
+  // caused the wait -- a create, an import, or a page opened while a previous
+  // session's sweep was still running all behave the same.
+  //
+  // `list` is the dependency rather than a counter, so each answer schedules the
+  // next question. That is a loop, and the two conditions below are what end it:
+  // nothing pending, or a budget that progress has stopped refilling.
+  useEffect(() => {
+    if (session.status !== 'signedIn' || list.status !== 'ready') {
+      return
+    }
+
+    const pending = list.transactions.filter((transaction) => transaction.categoryPending).length
+
+    // Fewer waiting than last time means the sweep is working, so the budget is
+    // worth spending again. The null case is the first look, which is not progress
+    // but is the right moment to start from a full budget.
+    if (pendingLastSeen.current === null || pending < pendingLastSeen.current) {
+      pollsLeft.current = MAX_IDLE_POLLS
+    }
+
+    pendingLastSeen.current = pending
+
+    if (pending === 0 || pollsLeft.current <= 0) {
+      return
+    }
+
+    const controller = new AbortController()
+
+    const timer = setTimeout(() => {
+      pollsLeft.current -= 1
+
+      listTransactions(controller.signal)
+        .then((transactions) => setList({ status: 'ready', transactions }))
+
+        // Swallowed, and this is the second place in this file where that is right.
+        // Nobody asked for this request: it is the application checking on itself,
+        // so a failure means the answer is not here yet, not that the screen the
+        // reader is looking at has stopped working. Replacing a correct table with
+        // "Could not reach the API" because a background poll failed would report a
+        // problem the reader does not have. A session that has actually ended still
+        // surfaces, on the next thing they do.
+        .catch(() => {})
+    }, POLL_INTERVAL_MS)
+
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [list, session.status])
+
   // Deliberately not caught here. The form needs the ApiError itself to put the
   // server's messages beside its own fields, and catching it in this function
   // would leave the form with a rejected promise it never sees.
@@ -188,6 +284,11 @@ function App() {
     // is the honest one. It is written down rather than fixed because the fix is
     // the same fix as the paragraph above, and both become worth it together --
     // not because nobody noticed.
+    //
+    // #92: the 201's body is thrown away here as it always was, and it now carries
+    // no category at all -- the sweep has not run yet. Which makes this reload the
+    // moment the new row first appears, uncategorised and marked as waiting, and
+    // the poll above takes it from there.
     reload()
   }
 
@@ -231,6 +332,12 @@ function App() {
 
   async function handleSignOut() {
     await logout()
+
+    // #92. A spent polling budget belongs to the session that spent it. Without
+    // this, signing in as somebody else lands on a table that has already given up
+    // asking, and their newest row would sit uncategorised until they reloaded.
+    pollsLeft.current = MAX_IDLE_POLLS
+    pendingLastSeen.current = null
 
     setSession({ status: 'signedOut' })
 

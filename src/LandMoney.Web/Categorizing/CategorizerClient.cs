@@ -50,6 +50,22 @@ public sealed record CategorizerAnswer(string? Category, string? Source)
         Category is not null && Source is not null ? new CategorySuggestion(Category, Source) : null;
 }
 
+/// <summary>An answer, and the one word #64 filed the call under.</summary>
+// #92. The sweep is the first caller that has to act on *why* there was no
+// answer rather than only on the fact of it, and CategorizerAnswer deliberately
+// cannot tell it: `Nothing` collapses "there is no categorizer", "it did not
+// answer in time" and "it answered something unusable" into one value, which is
+// exactly right for the two callers that only have to decide whether to store a
+// category.
+//
+// It is not right for a retry. A row is retried until a cap, and the cap exists
+// because every attempt that reaches the model is about 0.62 US cents (#87) --
+// so the question the sweep asks is "could that attempt have cost anything",
+// and CategorizerOutcome is the only thing in this application that knows.
+// Widening the answer type instead would have put a word that means nothing to
+// the create path onto the create path.
+public sealed record CategorizerResult(CategorizerAnswer Answer, string Outcome);
+
 /// <summary>Asks the Python categorizer for a category, and never lets it stop a save.</summary>
 // A typed client -- registered with AddHttpClient&lt;CategorizerClient&gt;, so the
 // HttpClient handed in is a short-lived wrapper over a pooled, rotated
@@ -107,7 +123,7 @@ public sealed class CategorizerClient(
         string currency,
         CancellationToken cancellationToken)
         => (await AskAsync(description, amount, currency, CategorizerKind.Save, cancellationToken))
-            .Suggestion;
+            .Answer.Suggestion;
 
     /// <summary>What the categorizer says about a description being typed. #67.</summary>
     /// <remarks>
@@ -120,12 +136,34 @@ public sealed class CategorizerClient(
         decimal amount,
         string currency,
         CancellationToken cancellationToken)
-        => AskAsync(description, amount, currency, CategorizerKind.Preview, cancellationToken);
+        => AskAsync(description, amount, currency, CategorizerKind.Preview, cancellationToken)
+            .ContinueWithAnswer();
+
+    /// <summary>What the categorizer says about a row already in the database. #92.</summary>
+    /// <remarks>
+    /// The only caller that gets the outcome as well as the answer, because it is
+    /// the only one that has to decide whether to ask again. See
+    /// <see cref="CategorizerResult"/>.
+    /// </remarks>
+    // A third kind rather than reusing `save`, and the reason is that `save` would
+    // quietly stop meaning what #64 recorded it as meaning. Until this change every
+    // `save` call happened inside the request that wrote the row; from here none
+    // do. Keeping the word would leave the summary reporting the same number for a
+    // different event, which is the one failure a named vocabulary exists to
+    // prevent -- and it would throw away the signal that this change took at all.
+    // After #92 ships, `save=0` is correct and `save>0` means something still
+    // categorises inline.
+    public Task<CategorizerResult> SweepCategoryAsync(
+        string description,
+        decimal amount,
+        string currency,
+        CancellationToken cancellationToken)
+        => AskAsync(description, amount, currency, CategorizerKind.Sweep, cancellationToken);
 
     // One body for both, and the two public methods above are the only places the
     // kind is chosen -- so a call site cannot label a save as a preview, which is
     // the mistake that would quietly make #64's numbers describe something else.
-    private async Task<CategorizerAnswer> AskAsync(
+    private async Task<CategorizerResult> AskAsync(
         string description,
         decimal amount,
         string currency,
@@ -153,7 +191,7 @@ public sealed class CategorizerClient(
             // it. A figure on this line separates "the categorizer answers nothing"
             // from "there is no categorizer".
             metrics.Record(CategorizerOutcome.NotConfigured, source: null, kind, elapsed: null);
-            return CategorizerAnswer.Nothing;
+            return new CategorizerResult(CategorizerAnswer.Nothing, CategorizerOutcome.NotConfigured);
         }
 
         // Read on every path since #64 -- a latency figure that covered only the
@@ -181,7 +219,7 @@ public sealed class CategorizerClient(
                     "Categorizer {Kind} {Outcome}: answered {StatusCode}; there is no category.",
                     kind, CategorizerOutcome.Refused, (int)response.StatusCode);
                 metrics.Record(CategorizerOutcome.Refused, source: null, kind, Stopwatch.GetElapsedTime(started));
-                return CategorizerAnswer.Nothing;
+                return new CategorizerResult(CategorizerAnswer.Nothing, CategorizerOutcome.Refused);
             }
 
             var body = await response.Content.ReadFromJsonAsync<CategorizeResponse>(Json, cancellationToken);
@@ -215,7 +253,7 @@ public sealed class CategorizerClient(
                     + "source; the answer is refused.",
                     kind, CategorizerOutcome.Unusable, body?.Category);
                 metrics.Record(CategorizerOutcome.Unusable, source: null, kind, Stopwatch.GetElapsedTime(started));
-                return CategorizerAnswer.Nothing;
+                return new CategorizerResult(CategorizerAnswer.Nothing, CategorizerOutcome.Unusable);
             }
 
             // The same guard as the one above, for the same reason, against a
@@ -233,7 +271,7 @@ public sealed class CategorizerClient(
                 // string another process chose -- #64's first trap, which is about
                 // the description and is the same trap here.
                 metrics.Record(CategorizerOutcome.Unusable, source: null, kind, Stopwatch.GetElapsedTime(started));
-                return CategorizerAnswer.Nothing;
+                return new CategorizerResult(CategorizerAnswer.Nothing, CategorizerOutcome.Unusable);
             }
 
             // Abstention. A 200 with a null category is the baseline working as
@@ -260,7 +298,7 @@ public sealed class CategorizerClient(
                 // that line report more producers than categories. The word still
                 // reaches the caller, which is where #67 needs it.
                 metrics.Record(CategorizerOutcome.Abstained, source: null, kind, Stopwatch.GetElapsedTime(started));
-                return new CategorizerAnswer(null, source);
+                return new CategorizerResult(new CategorizerAnswer(null, source), CategorizerOutcome.Abstained);
             }
 
             // The one guard here that is not about the network, and the one that
@@ -283,7 +321,12 @@ public sealed class CategorizerClient(
                 // "{source} had no idea" exists -- and it would be this application
                 // putting words in another process's mouth. It had an idea; this
                 // side will not use it.
-                return CategorizerAnswer.Nothing;
+                //
+                // #92: the *outcome* still says `unusable`, so the sweep can tell
+                // this from a service that was never reached. Both are `Nothing` to
+                // the two older callers and they are the opposite of each other to a
+                // retry -- this one reached the model and may have been billed for.
+                return new CategorizerResult(CategorizerAnswer.Nothing, CategorizerOutcome.Unusable);
             }
 
             // Stored verbatim, neither trimmed nor lower-cased, which is the same
@@ -301,7 +344,7 @@ public sealed class CategorizerClient(
                 "Categorizer {Kind} {Outcome}: {Category} by {Source} in {ElapsedMs:F0}ms.",
                 kind, CategorizerOutcome.Suggested, category, source, elapsed.TotalMilliseconds);
             metrics.Record(CategorizerOutcome.Suggested, source, kind, elapsed);
-            return new CategorizerAnswer(category, source);
+            return new CategorizerResult(new CategorizerAnswer(category, source), CategorizerOutcome.Suggested);
         }
         // The timeout, and recognising it takes the `when` clause. HttpClient
         // implements Timeout by cancelling the request, so what surfaces is
@@ -337,7 +380,7 @@ public sealed class CategorizerClient(
             // unreachables, and that is the correct answer rather than a rounding
             // of one.
             metrics.Record(CategorizerOutcome.Timeout, source: null, kind, elapsed);
-            return CategorizerAnswer.Nothing;
+            return new CategorizerResult(CategorizerAnswer.Nothing, CategorizerOutcome.Timeout);
         }
         // The caller went away. The exception is rethrown -- saving a transaction
         // for a request that no longer exists is what the clause above exists to
@@ -361,7 +404,7 @@ public sealed class CategorizerClient(
                 "Categorizer {Kind} {Outcome}: there is no category.",
                 kind, CategorizerOutcome.Unreachable);
             metrics.Record(CategorizerOutcome.Unreachable, source: null, kind, Stopwatch.GetElapsedTime(started));
-            return CategorizerAnswer.Nothing;
+            return new CategorizerResult(CategorizerAnswer.Nothing, CategorizerOutcome.Unreachable);
         }
         // A 200 whose body is not the contract: malformed JSON (JsonException), or
         // a content type the reader will not take, such as an HTML error page from
@@ -374,7 +417,18 @@ public sealed class CategorizerClient(
                 "Categorizer {Kind} {Outcome}: the body was not the contract; there is no category.",
                 kind, CategorizerOutcome.Unreadable);
             metrics.Record(CategorizerOutcome.Unreadable, source: null, kind, Stopwatch.GetElapsedTime(started));
-            return CategorizerAnswer.Nothing;
+            return new CategorizerResult(CategorizerAnswer.Nothing, CategorizerOutcome.Unreadable);
         }
     }
+}
+
+/// <summary>Drops the outcome for the two callers that have no use for it.</summary>
+// So that #92 changes neither of the signatures #39 and #67 settled on. The save
+// path wants a suggestion or nothing and the preview path wants the three-state
+// answer; handing either of them a word about retries would put the sweep's
+// concern at a call site that has none.
+internal static class CategorizerResultExtensions
+{
+    public static async Task<CategorizerAnswer> ContinueWithAnswer(this Task<CategorizerResult> result)
+        => (await result).Answer;
 }

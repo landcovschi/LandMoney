@@ -146,6 +146,27 @@ export function CategoryCell({ transaction, categories, onChange }: CategoryCell
       */}
       {!saving && stored !== null && <SourceTag source={transaction.categorySource} />}
 
+      {/*
+        #92. The row arrives before its category does, so without this the seconds
+        between the two look exactly like a row the categorizer declined -- which
+        is a real and permanent state, not a wait. One word is enough to tell them
+        apart, and it disappears on its own when the answer lands.
+
+        Not a spinner. What is being waited for may turn out to be nothing at all
+        -- an abstention is a normal answer on roughly a third of the labelled set
+        -- so an animation promising a result would be wrong about a third of the
+        time it appeared.
+
+        Suppressed while saving, like the badge above and for the same reason: the
+        value on screen during that round trip is the one being written, and
+        nothing is pending about it.
+      */}
+      {!saving && stored === null && transaction.categoryPending && (
+        <span className="tag tag-empty" title="The categorizer has not answered yet.">
+          Categorizing...
+        </span>
+      )}
+
       {saving && (
         <span className="category-saving" role="status">
           Saving...

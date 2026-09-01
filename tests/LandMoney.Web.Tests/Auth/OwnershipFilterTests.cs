@@ -75,7 +75,16 @@ public class OwnershipFilterTests
 
     // IgnoreQueryFilters is the one call that turns this off, and it is the call to
     // notice in a review. Asserted so that the suite says out loud that the escape
-    // hatch exists and what it does; nothing in src/ calls it.
+    // hatch exists and what it does.
+    //
+    // **This used to end "nothing in src/ calls it", and since #92 something does.**
+    // CategorizerSweep is the one caller and is expected to be the only one: it
+    // runs outside a request, so there is no signed-in user for the filter to
+    // compare against, and without this call it would select nothing for ever while
+    // looking exactly like a categorizer that was never reached. A second caller
+    // appearing in src/ is a thing to argue about in review rather than a thing to
+    // wave through -- which is the whole reason the escape hatch has to be asked for
+    // by name.
     [Fact]
     public void IgnoreQueryFilters_is_the_only_way_past_it()
     {

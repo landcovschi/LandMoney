@@ -208,22 +208,47 @@ public class CategorizerSummaryTests
         var summary = Summary(await StartAndStop(metrics));
 
         Assert.Equal(3L, summary.Field("Calls"));
-        Assert.Equal("save=1, preview=2", summary.Field("ByKind"));
+        Assert.Equal("save=1, preview=2, sweep=0", summary.Field("ByKind"));
     }
 
     [Fact]
     public async Task A_kind_that_did_not_happen_is_printed_as_zero()
     {
         // Unlike BySource, which prints only what answered. The two vocabularies
-        // have different owners: there are exactly two kinds and both are this
-        // application's, so a missing one is a fact -- "preview=0" says the screen
-        // asked for nothing, which after #67 is a symptom rather than an absence of
-        // news.
+        // have different owners: there are exactly three kinds and all three are
+        // this application's, so a missing one is a fact -- "preview=0" says the
+        // screen asked for nothing, which after #67 is a symptom rather than an
+        // absence of news.
+        //
+        // **#92 makes `save=0` the expected reading rather than the alarming one**,
+        // and reverses which of these two numbers is the symptom. Nothing
+        // categorises inside the request that writes a row any more, so `save=1`
+        // here is a fact about this test's own Record call and `save>0` in a real
+        // log means something has put the categorizer back on the save path.
         var metrics = NewMetrics();
         metrics.Record(CategorizerOutcome.Suggested, "rules", CategorizerKind.Save, TimeSpan.FromMilliseconds(4));
 
         var summary = Summary(await StartAndStop(metrics));
 
-        Assert.Equal("save=1, preview=0", summary.Field("ByKind"));
+        Assert.Equal("save=1, preview=0, sweep=0", summary.Field("ByKind"));
+    }
+
+    [Fact]
+    public async Task The_line_says_how_many_of_the_calls_were_the_sweep()
+    {
+        // #92. The number that replaces `save` as the count of transactions that
+        // got a category, and the reason a third kind was added rather than the
+        // existing one reused: `save` had to keep meaning "categorised inside the
+        // request", or the summary would report the same number for a different
+        // event and the change would be invisible in the one place it is measured.
+        var metrics = NewMetrics();
+        metrics.Record(CategorizerOutcome.Suggested, "rules", CategorizerKind.Sweep, TimeSpan.FromMilliseconds(4));
+        metrics.Record(CategorizerOutcome.Abstained, source: null, CategorizerKind.Sweep, TimeSpan.FromMilliseconds(3));
+        metrics.Record(CategorizerOutcome.Suggested, "rules", CategorizerKind.Preview, TimeSpan.FromMilliseconds(2));
+
+        var summary = Summary(await StartAndStop(metrics));
+
+        Assert.Equal(3L, summary.Field("Calls"));
+        Assert.Equal("save=0, preview=1, sweep=2", summary.Field("ByKind"));
     }
 }

@@ -36,6 +36,14 @@ public class CategorizerClientTests
 {
     private const string Endpoint = "http://categorizer:8000";
 
+    /// <summary>The two bodies #92's sweep tests ask for, written once.</summary>
+    // Ordinary escaped strings rather than the raw literals the rest of this file
+    // uses. The sweep tests build one body by concatenation -- an over-long
+    // category -- and a file that spells the same JSON two ways invites the two
+    // from drifting apart.
+    private const string Suggestion = "{\"category\":\"eating-out\",\"source\":\"rules\"}";
+    private const string Abstention = "{\"category\":null,\"source\":\"rules\"}";
+
     /// <summary>Replaces the transport. Every test here is a different answer from it.</summary>
     private sealed class StubHandler(
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
@@ -95,6 +103,11 @@ public class CategorizerClientTests
     private static Task<CategorizerAnswer> Preview(
         CategorizerClient client, CancellationToken cancellationToken = default)
         => client.PreviewCategoryAsync("Dinner at the pizza place", 42.50m, "EUR", cancellationToken);
+
+    /// <summary>The #92 path, the only one that gets the outcome as well as the answer.</summary>
+    private static Task<CategorizerResult> Sweep(
+        CategorizerClient client, CancellationToken cancellationToken = default)
+        => client.SweepCategoryAsync("Dinner at the pizza place", 42.50m, "EUR", cancellationToken);
 
     /// <summary>A client with nothing configured, which is a legal state since #57.</summary>
     // Not reachable through ClientThat: that one sets a base address, which is the
@@ -676,5 +689,107 @@ public class CategorizerClientTests
         Assert.NotNull(window);
         Assert.Equal(1, Counted(window, CategorizerOutcome.Abandoned));
         Assert.Equal(1, window.ByKind[CategorizerKind.Preview]);
+    }
+
+    // --- the sweep, #92 ------------------------------------------------------
+
+    // The reason this path exists at all. The save path gets a suggestion or null
+    // and the preview path gets the three-state answer; neither can tell "there is
+    // no categorizer" from "it answered something unusable", because
+    // CategorizerAnswer.Nothing collapses them on purpose. A retry has to tell them
+    // apart, because only one of the two could have been billed for.
+    [Fact]
+    public async Task The_sweep_is_told_why_there_was_no_answer()
+    {
+        var tooLong = "{\"category\":\"" + new string('x', 101) + "\",\"source\":\"rules\"}";
+        var unreachable = ClientThat((_, _) => throw new HttpRequestException("no route"));
+        var unusable = ClientThat((_, _) => Json(tooLong));
+
+        var whenNothingIsThere = await Sweep(unreachable);
+        var whenTheAnswerIsRefused = await Sweep(unusable);
+
+        // Indistinguishable to the two older callers...
+        Assert.Equal(CategorizerAnswer.Nothing, whenNothingIsThere.Answer);
+        Assert.Equal(CategorizerAnswer.Nothing, whenTheAnswerIsRefused.Answer);
+
+        // ...and opposite to this one. The first is free and must not be charged
+        // against the cap; the second reached the model and must be.
+        Assert.Equal(CategorizerOutcome.Unreachable, whenNothingIsThere.Outcome);
+        Assert.Equal(CategorizerOutcome.Unusable, whenTheAnswerIsRefused.Outcome);
+        Assert.False(CategorizerOutcome.CountsAgainstTheCap(whenNothingIsThere.Outcome));
+        Assert.True(CategorizerOutcome.CountsAgainstTheCap(whenTheAnswerIsRefused.Outcome));
+    }
+
+    [Fact]
+    public async Task A_swept_row_that_gets_a_category_reports_it_with_its_source()
+    {
+        var result = await Sweep(ClientThat((_, _) => Json(Suggestion)));
+
+        Assert.Equal(CategorizerOutcome.Suggested, result.Outcome);
+        Assert.Equal(new CategorySuggestion("eating-out", "rules"), result.Answer.Suggestion);
+    }
+
+    // An abstention is a final answer, which is what lets the sweep stop owing a
+    // category for the row rather than asking the same question again at the same
+    // price. The source is what distinguishes it from silence -- #67's rule,
+    // unchanged, and the one the sweep leans on hardest.
+    [Fact]
+    public async Task A_swept_row_the_categorizer_declines_is_still_an_answer()
+    {
+        var result = await Sweep(ClientThat((_, _) => Json(Abstention)));
+
+        Assert.Equal(CategorizerOutcome.Abstained, result.Outcome);
+        Assert.Null(result.Answer.Suggestion);
+        Assert.Equal("rules", result.Answer.Source);
+    }
+
+    // The state the deployed application was in on every save between #39 and #61,
+    // and the one #92 must not make invisible again: with no categorizer configured
+    // the sweep charges nothing and stops the tick, so rows keep owing a category
+    // indefinitely. That is correct, and it is only findable because this outcome
+    // has a name.
+    [Fact]
+    public async Task With_no_categorizer_configured_the_sweep_is_told_so_and_charged_nothing()
+    {
+        var metrics = NewMetrics();
+
+        var result = await Sweep(UnconfiguredClient(metrics));
+
+        Assert.Equal(CategorizerOutcome.NotConfigured, result.Outcome);
+        Assert.Equal(CategorizerAnswer.Nothing, result.Answer);
+        Assert.False(CategorizerOutcome.CountsAgainstTheCap(result.Outcome));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, window.ByKind[CategorizerKind.Sweep]);
+    }
+
+    // So that #64's summary keeps meaning what it says. The call the sweep makes is
+    // the one that used to be a `save`, and counting it as one would report the
+    // same number for a different event -- and would hide the fact that nothing
+    // categorises inline any more.
+    [Fact]
+    public async Task A_swept_row_is_counted_as_a_sweep_and_never_as_a_save()
+    {
+        var metrics = NewMetrics();
+        var client = ClientThat((_, _) => Json(Suggestion), metrics: metrics);
+
+        await Sweep(client);
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, window.ByKind[CategorizerKind.Sweep]);
+        Assert.Equal(0, window.ByKind.GetValueOrDefault(CategorizerKind.Save));
+    }
+
+    // The two older signatures are unchanged by #92, which is the whole point of
+    // the outcome being dropped for them rather than added to what they return.
+    [Fact]
+    public async Task The_save_and_preview_paths_still_answer_exactly_what_they_did()
+    {
+        var client = ClientThat((_, _) => Json(Suggestion));
+
+        Assert.Equal(new CategorySuggestion("eating-out", "rules"), await Ask(client));
+        Assert.Equal(new CategorizerAnswer("eating-out", "rules"), await Preview(client));
     }
 }

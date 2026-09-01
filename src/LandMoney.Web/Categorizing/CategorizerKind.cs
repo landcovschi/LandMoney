@@ -13,12 +13,20 @@ namespace LandMoney.Web.Categorizing;
 // asked, and #64's rule holds unchanged -- a value that reaches a metric tag is
 // a closed vocabulary this application owns, never text from elsewhere.
 //
-// Bounded at two, and that is what makes tagging it safe. The trap #64 names is
-// cardinality: a dimension whose values come from data multiplies the number of
-// time series for ever. Two constants cannot.
+// Bounded at three, and that is what makes tagging it safe. The trap #64 names
+// is cardinality: a dimension whose values come from data multiplies the number
+// of time series for ever. Three constants cannot.
 public static class CategorizerKind
 {
-    /// <summary>A transaction being written. The answer is stored.</summary>
+    /// <summary>A transaction being written, inside the request that writes it.</summary>
+    // **Nothing produces this any more, as of #92, and the constant stays.** The
+    // create path used to categorise before SaveChangesAsync; it now writes the
+    // row, answers 201, and leaves the category to the sweep. So `save=0` is the
+    // correct reading from here on -- and `save>0` means something is
+    // categorising inline again, which is the whole of what this change undid.
+    // A word that has to keep meaning what it meant cannot be re-pointed at the
+    // new caller, which is why Sweep is its own constant rather than this one
+    // reused.
     public const string Save = "save";
 
     /// <summary>A description being typed. Nothing is written and nothing is stored.</summary>
@@ -27,6 +35,13 @@ public static class CategorizerKind
     // separates these two is whether anything came of it.
     public const string Preview = "preview";
 
-    /// <summary>Both, in the order a summary reads them out.</summary>
-    public static readonly IReadOnlyList<string> All = [Save, Preview];
+    /// <summary>A row already in the database, being categorised after the fact. #92.</summary>
+    // What used to be `save`, moved out of the request. The two are counted apart
+    // rather than together because they fail differently in the one way that
+    // matters: a save that could not be categorised used to be a save the user
+    // waited on, and a sweep that cannot be is a row that will be tried again.
+    public const string Sweep = "sweep";
+
+    /// <summary>All three, in the order a summary reads them out.</summary>
+    public static readonly IReadOnlyList<string> All = [Save, Preview, Sweep];
 }

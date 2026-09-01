@@ -71,6 +71,25 @@ export interface Transaction {
   categorySource: string | null
 
   /**
+   * Is a category still coming for this row? #92.
+   *
+   * The save no longer waits for the categorizer: the server writes the row,
+   * answers 201, and a sweep fills the category in a few seconds later. This is
+   * what says the wait is still on, and it is what `App` polls on.
+   *
+   * **Not derivable from `category === null`, and that is the whole reason the
+   * field exists.** The categorizer abstains on roughly a third of the labelled
+   * set, and an abstention is a final answer that leaves the category null for
+   * ever -- so a client polling on a null category would poll for ever on exactly
+   * the rows nothing is ever going to fill in. It also goes false when the server
+   * has given up on a row, which is a state the category alone cannot show.
+   *
+   * True is a promise about the server's intention, never about the outcome: the
+   * category that arrives may still be null, because "I do not know" is an answer.
+   */
+  categoryPending: boolean
+
+  /**
    * C# `DateTimeOffset`, ISO 8601 with an offset.
    *
    * An instant, unlike `occurredAt` -- so this one *is* converted to local time

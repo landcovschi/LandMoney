@@ -115,7 +115,6 @@ public static class TransactionEndpoints
     private static async Task<Created<TransactionResponse>> CreateAsync(
         CreateTransactionRequest request,
         AppDbContext db,
-        CategorizerClient categorizer,
         CancellationToken cancellationToken)
     {
         var transaction = new Transaction
@@ -142,55 +141,47 @@ public static class TransactionEndpoints
             Description = request.Description,
 
             // Category is still not set here, and the request type still does not
-            // offer the field, so a client cannot pre-empt it. It is filled in
-            // below instead of at the initializer because the value comes from
-            // another process and may not arrive.
+            // offer the field, so a client cannot pre-empt it. As of #92 it is not
+            // set anywhere in this method: the row is written without one and
+            // CategorizerSweep fills it in afterwards.
             // CreatedAt is left to the entity's initializer.
+
+            // #92. The one line that replaces the call that used to be here. It
+            // says "a category is owed for this row", which is what the sweep
+            // selects on -- see PendingCategorization, and the column's own comment
+            // for why an explicit marker rather than `category IS NULL`.
+            CategorizationAttempts = PendingCategorization.Owing,
         };
 
-        // #39. The category is a guess about the user's data and the transaction
-        // is the user's data, so this line may not be allowed to cost the row:
-        // CategorizerClient turns every failure -- unreachable, slow, a body it
-        // cannot read -- into null, and null is the state Category has been
-        // designed for since #1. Nothing here needs a try/catch, and adding one
-        // would only catch the exceptions that class deliberately lets past,
-        // which is the caller's own cancellation.
+        // **#92 removed the categorizer call that stood here**, and the paragraph
+        // it removed is worth keeping in outline because this reverses an explicit
+        // decision rather than filling a gap. #39 categorised before
+        // SaveChangesAsync so that the row was written exactly once, and named the
+        // alternative -- save first, update when the answer arrives -- along with
+        // its costs: two writes, a second code path, and a window in which the API
+        // has answered 201 with a category the database does not have. It chose
+        // against it because the failure it protects against is one where the
+        // user's transaction is lost, and #59's two-second connect budget already
+        // bounded the window to two seconds.
         //
-        // Before SaveChangesAsync rather than after, so the row is written once.
-        // What lost: saving first and updating the row when the answer comes
-        // back, which survives this process dying mid-call and costs two writes,
-        // a second code path and a window in which the API has answered 201 with
-        // a category the database does not have yet. The failure it protects
-        // against is one where the user's transaction is lost, and the tight
-        // timeout in Program.cs already bounds that window to two seconds.
+        // What changed is not the argument but the number in it. With the rules
+        // behind the port a save cost 142 ms and nobody noticed; with a model it is
+        // about 2.1 s of somebody's save, every time, and that is the *working*
+        // case rather than the broken one. A timeout can be made short; a model
+        // answering correctly cannot.
         //
-        // transaction.Currency, not request.Currency: the handler uppercases it
-        // above, and the categorizer should be shown what is about to be stored
-        // rather than what was typed.
+        // So the costs above are now paid on purpose. The window is real and it is
+        // seconds rather than milliseconds -- and what is in it is a row that is
+        // correct and uncategorised, which is a state this application has handled
+        // since #1 because Category has always been allowed to be absent. The
+        // failure #39 was protecting against is gone entirely: nothing between here
+        // and the response can fail, so a categorizer that is down no longer costs
+        // the save anything at all. That is #92's third acceptance test, and this
+        // shape gets it for free rather than by tuning a timeout towards it.
         //
-        // #59: the category and the name of what produced it are set together, from
-        // one nullable value, so the two columns cannot disagree. Writing them from
-        // two separate calls -- or defaulting the source to "rules" here -- is what
-        // the single record exists to prevent: a row saying `model` because
-        // configuration said so rather than because a model answered.
-        var suggestion = await categorizer.SuggestCategoryAsync(
-            transaction.Description, transaction.Amount, transaction.Currency, cancellationToken);
-
-        // #63: a prediction never writes over a human correction. Trivially true
-        // here -- the transaction was constructed thirty lines above and has no
-        // source at all, so the guard cannot currently be false -- and it is written
-        // anyway, because this is the only place in the application where a
-        // prediction is stored and it is therefore what a backfill or a
-        // re-categorise gets copied from. The issue allows the rule to exist in code
-        // and be commented rather than be exercised by a scenario, and this is the
-        // shape that survives: a call somebody has to delete on purpose, rather than
-        // a sentence in an issue that closed.
-        if (CategorySources.MayOverwrite(transaction.CategorySource))
-        {
-            transaction.Category = suggestion?.Category;
-            transaction.CategorySource = suggestion?.Source;
-        }
-
+        // #63's never-overwrite rule went with the call, and did not disappear: it
+        // is in PendingCategorization.Owed, where it guards both the sweep's SELECT
+        // and its UPDATE. That is the first place it is not trivially true.
         db.Transactions.Add(transaction);
         await db.SaveChangesAsync(cancellationToken);
 
@@ -273,6 +264,22 @@ public static class TransactionEndpoints
                 t.Description,
                 t.Category,
                 t.CategorySource,
+
+                // #92, and it must say the same thing as ToResponse below. The two
+                // spellings cannot be shared: this one is an expression tree that
+                // Postgres evaluates, so it cannot call a method, and that one runs
+                // in memory over an entity. TransactionResponseTests pins them to
+                // each other for the four states that matter.
+                //
+                // The null is spelled out here and would be redundant in C#, where
+                // `null < 30` is simply false. In SQL it is *unknown*, and a
+                // projection that hands unknown to a non-nullable bool is a
+                // difference that shows up only against a real database -- which is
+                // the same class of trap as #88's leading slash: correct on the
+                // machine it was written on, wrong where it runs.
+                t.CategorizationAttempts != null
+                    && t.CategorizationAttempts < PendingCategorization.DefaultMaxAttempts,
+
                 t.CreatedAt))
             .ToListAsync(cancellationToken);
 
@@ -746,5 +753,32 @@ public static class TransactionEndpoints
         transaction.Description,
         transaction.Category,
         transaction.CategorySource,
+
+        // #92. Owed *and* still within the cap -- the same pair of conditions
+        // PendingCategorization.Owed puts in the WHERE clause, so the screen says
+        // "a category is coming" exactly when the sweep would still go and get one.
+        // A row that has been given up on says false and reads as an ordinary
+        // uncategorised row, which is what it is.
+        //
+        // The null is spelled out although C# would answer false for it anyway --
+        // `null < 30` is false, no check needed. It is written because ListAsync
+        // above has to spell it out, in SQL, where the same expression is *unknown*
+        // rather than false, and two projections of one field that disagree in
+        // shape are two projections somebody will eventually make disagree in
+        // meaning.
+        //
+        // **A mutation sweep confirmed no test can kill the removal of this line,
+        // and that is correct rather than a gap.** Deleting it changes nothing this
+        // process does: it is an equivalent mutant, kept for the symmetry above and
+        // not for behaviour. Writing a test that appeared to catch it would be
+        // asserting that C# evaluates `null < 30` the way C# evaluates it.
+        //
+        // The default rather than the configured cap, knowingly. Threading
+        // IConfiguration into a static projection to get a spinner right buys a
+        // client that polls a few extra times and then stops; the cap itself is
+        // applied where it matters, in the sweep.
+        transaction.CategorizationAttempts != null
+            && transaction.CategorizationAttempts < PendingCategorization.DefaultMaxAttempts,
+
         transaction.CreatedAt);
 }

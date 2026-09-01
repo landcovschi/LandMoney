@@ -128,6 +128,48 @@ public class Transaction
     [MaxLength(CategorySourceMaxLength)]
     public string? CategorySource { get; set; }
 
+    /// <summary>How many times the categorizer has been asked about this row, or null when nothing is owed.</summary>
+    // #92. The save no longer waits for a category: CreateAsync writes the row,
+    // answers 201, and CategorizerSweep fills the column in afterwards. This is
+    // the whole of the work-tracking that change needs, and the shape of it is
+    // the decision worth reading.
+    //
+    // **Null means nothing is owed. A number means something is, and how many
+    // attempts it has cost.** One column doing both jobs rather than a `pending`
+    // flag beside a counter, because two columns can disagree -- `pending = false`
+    // with three attempts recorded is a state nothing should be able to produce,
+    // and the only way to make that impossible is to not have somewhere to write
+    // it.
+    //
+    // **The alternative was no column at all: sweep `WHERE category IS NULL`.**
+    // It needs no migration and it is wrong, for a reason #63 wrote down and
+    // deferred to exactly this change: clearing a category in the interface sets
+    // both `category` and `category_source` to null, so a row somebody
+    // deliberately cleared is indistinguishable from one nothing has ever
+    // touched. A sweep keyed on that predicate re-predicts over a person's "I do
+    // not know either" -- and #63's own text says to reopen the question "the day
+    // something re-categorises existing rows". This is that day, and an explicit
+    // marker answers it without changing what clearing means: a cleared row was
+    // never marked owed, so the sweep cannot see it. The rows that predate this
+    // column are null for the same reason and are equally out of reach, which is
+    // correct -- nothing asked for them to be categorised.
+    //
+    // **Counted, rather than a plain flag, because a retry that never stops is a
+    // bill.** Once the model is behind the port (#87) every attempt that reaches
+    // it is about 0.62 US cents, so a row the service keeps answering unusably
+    // would bill for ever at one call per sweep. The cap is configuration;
+    // CategorizerSweep is where it is applied and where the rule about which
+    // outcomes increment this lives -- the short version is that an attempt is
+    // only charged for when something was actually sent.
+    //
+    // A row that reaches the cap keeps a non-null value here and never becomes
+    // null, so "we tried and gave up" stays queryable -- `WHERE
+    // categorization_attempts >= 20` -- rather than being erased into the same
+    // state as a row nobody ever owed anything about. Reviving one is an UPDATE
+    // setting this back to 0; there is deliberately no endpoint for it, because
+    // nothing has yet needed one twice.
+    public int? CategorizationAttempts { get; set; }
+
     // When the row was recorded, which is a different fact from when the money was
     // spent. Set here rather than by a database default so the value is visible
     // without a round trip; the cost is that the application clock is

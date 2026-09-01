@@ -286,6 +286,23 @@ builder.Services.AddSingleton<CategorizerMetrics>();
 // happened, and nothing at all otherwise.
 builder.Services.AddHostedService<CategorizerSummary>();
 
+// #92. What categorises a transaction now that the save does not wait for it.
+//
+// Registered here and not conditionally: a deployment with no categorizer
+// configured still runs this, and the first call of each tick answers
+// `not-configured`, which stops the tick and charges nothing. That is deliberately
+// the same shape #61 was opened about -- an absent dependency must be *counted*
+// rather than silently skipped, and CategorizerOutcome.NotConfigured is the number
+// that separates "there is no categorizer" from "the categorizer answers nothing".
+// Gating the registration on BaseUrl would take that number away and leave rows
+// owing a category with nothing anywhere saying so.
+//
+// AddHostedService registers it as a singleton, which is why the class takes
+// IServiceScopeFactory rather than AppDbContext: a scoped context captured by a
+// singleton is a change tracker that never empties and a connection never
+// returned.
+builder.Services.AddHostedService<CategorizerSweep>();
+
 // **JSON on the console outside Development, and this is the half of #64 that is
 // not about the categorizer at all.** The default console formatter writes two
 // lines per entry -- a header, then the rendered sentence, indented -- and throws

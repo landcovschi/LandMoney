@@ -71,6 +71,33 @@ public static class CategorizerOutcome
     // timeout, not about the categorizer.
     public const string Abandoned = "abandoned";
 
+    /// <summary>Could this attempt have cost money? #92.</summary>
+    // The rule behind the sweep's retry ceiling, and the one place it is written.
+    // A row is retried until a cap because every attempt that reaches the model is
+    // about 0.62 US cents (#87) and a sweep that retries for ever is a bill with
+    // no ceiling -- #92's fourth trap. What the cap must count, then, is attempts
+    // that could have been charged for, not attempts that were made.
+    //
+    // **Two outcomes provably sent nothing.** `not-configured` never opened a
+    // socket, and `unreachable` is a refusal, a reset or a name that does not
+    // resolve -- no HTTP request completed, so no model ran. Charging the cap for
+    // either would abandon rows for the duration of an outage that cost nothing,
+    // which is the wrong way round: the row is still owed and the service will
+    // come back.
+    //
+    // **`timeout` is charged, and it is the uncomfortable one.** #64 records that
+    // a call the model answers at seven seconds is billed and still reads as a
+    // timeout here, and #39 measured that a *stopped container* also arrives here
+    // rather than as `unreachable`, because the SYN goes unanswered instead of
+    // being refused. So this branch cannot tell a free failure from a paid one.
+    // It is counted, because between "an outage abandons some rows, visibly and
+    // recoverably" and "a slow model bills for ever, silently", the first is the
+    // failure to choose. What it costs is written down on CategorizerSweep.
+    //
+    // Everything else got a response, so something ran at the other end.
+    public static bool CountsAgainstTheCap(string outcome) =>
+        outcome is not (NotConfigured or Unreachable);
+
     /// <summary>Every outcome, in the order a summary reads them out.</summary>
     // Ordered by how much attention each deserves rather than alphabetically:
     // the two normal answers, then the ways it fails, then the two that are not
