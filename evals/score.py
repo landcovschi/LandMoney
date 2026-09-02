@@ -426,6 +426,216 @@ def score(rows: Iterable[Row], predictor: Callable[[Row], str]) -> Report:
     )
 
 
+
+# --- what the run cost, #96 ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Spend:
+    """What a scored run spent: calls, tokens, money and wall-clock.
+
+    **Read off the adapter's own `model_call` log line rather than measured a
+    second time here**, which is #64's arithmetic reused rather than reimplemented.
+    That line already computes the cost from the tokens and the configured prices,
+    and its docstring says out loud that it is `key=value` "because this is the line
+    something will eventually parse". This is the something. Two arithmetics for one
+    charge is two numbers that can disagree, and the one in the log is the one the
+    deployed service reports.
+
+    It is also why nothing here reaches into the predictor: `Predictor` returns a
+    category and a source, and widening that port so the scorer could read a token
+    count is exactly what #65 refused when the cache wanted the same thing.
+
+    Every field is a total over the run. `input_tokens` and `output_tokens` are None
+    when any call declined to report usage -- `unknown` in the log line -- because a
+    sum that silently treats a missing number as zero is worse than no sum.
+    """
+
+    calls: int
+    input_tokens: int | None
+    output_tokens: int | None
+
+    # None when the prices were not configured, which the log line writes as
+    # `unpriced`. #64 keeps the price out of the code deliberately -- a rate written
+    # into a file stays confident and becomes wrong -- so a run without
+    # CATEGORIZER_PRICE_INPUT_PER_MTOK reports tokens and no money, and says so.
+    cost_usd: float | None
+
+    # Every call's own elapsed_ms, in the order they happened.
+    latencies_ms: tuple[float, ...]
+
+    @property
+    def cost_per_1000(self) -> float | None:
+        """What a thousand transactions would cost at this run's rate. #96 asks for it.
+
+        Scaled from the run rather than from a price list, so it carries whatever
+        the prompt actually weighed on the day -- which is the number that moves
+        when somebody edits `prompt.py`, and the reason the fingerprint is printed
+        beside it.
+
+        **It is one call per transaction and the application makes two to four**
+        (#67's preview plus the save, and #87 measured that), so this is a rate for
+        comparing models and not a forecast of a bill.
+        """
+        if self.cost_usd is None or not self.calls:
+            return None
+
+        return self.cost_usd / self.calls * 1000
+
+    @property
+    def seconds_per_call(self) -> float | None:
+        """The median call, in seconds."""
+        return None if not self.latencies_ms else self._percentile(50) / 1000
+
+    @property
+    def p95_seconds(self) -> float | None:
+        """The slow end, printed beside the median for the reason #64 prints both.
+
+        A mean describes no call that happened; a median with nothing beside it
+        hides the tail that decides whether a timeout is survivable. Nearest-rank,
+        so every number printed is a duration that occurred.
+        """
+        return None if not self.latencies_ms else self._percentile(95) / 1000
+
+    def _percentile(self, p: int) -> float:
+        ordered = sorted(self.latencies_ms)
+        # Nearest-rank: ceil(p/100 * n), clamped into the list. #64's CategorizerMetrics
+        # does the same arithmetic on the .NET side, and the two agree on purpose.
+        rank = max(1, -(-p * len(ordered) // 100))
+        return ordered[min(rank, len(ordered)) - 1]
+
+
+class SpendLog(logging.Handler):
+    """Collects the adapter's `model_call` lines while a run is in flight.
+
+    A handler rather than a capture of stdout, because the line is a log record and
+    the format is the adapter's to change. Parsing `key=value` out of the rendered
+    message rather than reading `record.args` by position is the deliberate half:
+    the argument order is an implementation detail and the key names are the
+    documented contract.
+
+    Attached to the `categorizer` logger and not to the root, so nothing else this
+    process logs is collected, and detached in `finally` -- a handler left on a
+    module-level logger outlives the run that wanted it.
+    """
+
+    LOGGER = "categorizer"
+    MARKER = "model_call "
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.calls: list[dict[str, str]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+
+        if not message.startswith(self.MARKER):
+            return
+
+        fields = {}
+        for pair in message[len(self.MARKER):].split():
+            key, _, value = pair.partition("=")
+            fields[key] = value
+
+        self.calls.append(fields)
+
+    def __enter__(self) -> "SpendLog":
+        logger = logging.getLogger(self.LOGGER)
+
+        # The level has to be set as well as the handler attached. A module logger
+        # is NOTSET by default, so its effective level comes from the root -- which
+        # is WARNING here, since nothing in this script calls basicConfig. Attaching
+        # a handler and forgetting this collects nothing, silently, and the run
+        # reports a model that apparently made no calls.
+        self._previous_level = logger.level
+        logger.setLevel(logging.INFO)
+        logger.addHandler(self)
+
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        logger = logging.getLogger(self.LOGGER)
+        logger.removeHandler(self)
+        logger.setLevel(self._previous_level)
+
+    def spend(self) -> Spend:
+        """What was collected, reduced to totals."""
+        return Spend(
+            calls=len(self.calls),
+            input_tokens=_total_of(self.calls, "input_tokens"),
+            output_tokens=_total_of(self.calls, "output_tokens"),
+            cost_usd=_cost_of(self.calls),
+            latencies_ms=tuple(
+                float(call["elapsed_ms"]) for call in self.calls if "elapsed_ms" in call
+            ),
+        )
+
+
+def _total_of(calls: list[dict[str, str]], key: str) -> int | None:
+    """The sum, or None if any call did not report it.
+
+    `unknown` is what #64 writes when a response carried no usage, and it is
+    deliberately not `0` there for the same reason it is not `0` here: a call that
+    reported nothing and a call that used nothing are different facts, and adding
+    them together produces a total that is quietly too small.
+    """
+    values = [call.get(key) for call in calls]
+
+    if not values or any(value is None or value == "unknown" for value in values):
+        return None
+
+    return sum(int(value) for value in values)  # type: ignore[arg-type]
+
+
+def _cost_of(calls: list[dict[str, str]]) -> float | None:
+    """The bill, or None when any call could not be priced.
+
+    All or nothing, rather than a sum over the priced ones: a partial total looks
+    like a whole one and there is nothing on the line to say which calls it left
+    out. #64 writes `unpriced` when neither price variable is set, which is the
+    ordinary state of a machine that has not been told the rates.
+    """
+    values = [call.get("cost_usd") for call in calls]
+
+    if not values or any(value is None or value == "unpriced" for value in values):
+        return None
+
+    return sum(float(value) for value in values)  # type: ignore[arg-type]
+
+
+def render_spend(spend: Spend) -> str:
+    """The cost half of a run, under the score. #96.
+
+    Printed only when there were calls, so the rules path -- which makes none --
+    prints nothing rather than a row of zeroes and dashes that invite the reader to
+    compare a substring scan with a model on price.
+    """
+    lines = ["", f"calls         {spend.calls:>6}"]
+
+    if spend.input_tokens is not None and spend.output_tokens is not None:
+        lines.append(
+            f"tokens        {spend.input_tokens:>6} in, {spend.output_tokens} out"
+            f"  ({spend.input_tokens / spend.calls:.0f} in per call)"
+        )
+
+    seconds = spend.seconds_per_call
+    if seconds is not None:
+        lines.append(f"seconds/call  {seconds:>6.2f}   (p95 {spend.p95_seconds:.2f})")
+
+    per_1000 = spend.cost_per_1000
+    if per_1000 is None:
+        # Named rather than left blank, and it names the two variables: a table row
+        # with no price in it is the commonest way #96's table ends up incomplete,
+        # and the reason is always this.
+        lines.append(
+            "USD/1000      unpriced (set CATEGORIZER_PRICE_INPUT_PER_MTOK "
+            "and CATEGORIZER_PRICE_OUTPUT_PER_MTOK)"
+        )
+    else:
+        lines.append(f"USD/1000      {per_1000:>6.2f}   (one call per transaction)")
+
+    return "\n".join(lines)
+
 def render(report: Report, path: Path, predictor: str) -> str:
     width = max(len(c.name) for c in report.per_category)
     lines = [
@@ -998,7 +1208,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    report = score(rows, predictor)
+    # #96. The handler is attached around the scoring and nothing else, so what it
+    # collects is one run's calls -- a cost line that quietly included a warm-up
+    # request or a retry from an earlier attempt would be the kind of number that is
+    # wrong in the direction nobody checks.
+    with SpendLog() as spending:
+        report = score(rows, predictor)
+
+    spend = spending.spend()
 
     if failures.count:
         # Deliberately before anything is printed. A number produced by a run in
@@ -1019,6 +1236,13 @@ def main(argv: list[str] | None = None) -> int:
     # "the number moved" sends whoever reads it back to run the scorer by hand,
     # and the per-category table is the thing that says which rule did it.
     print(render(report, args.path, label))
+
+    # #96. Only when something was actually called, so the rules path prints a score
+    # and no cost block -- rather than a row of zeroes inviting a comparison between
+    # a substring scan and a model on price.
+    if spend.calls:
+        print(render_spend(spend))
+
     if args.confusion:
         print()
         print(render_confusion(report))

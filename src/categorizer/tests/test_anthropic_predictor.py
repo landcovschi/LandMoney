@@ -99,11 +99,17 @@ def predictor_for(
     cache: object | None = None,
     model: str = "claude-opus-5",
     examples: object | None = None,
+    effort: str = "low",
 ) -> tuple[AnthropicPredictor, StubClient]:
     client = StubClient(*answers)
     return (
         AnthropicPredictor(
-            client, model=model, prices=prices, cache=cache, examples=examples
+            client,
+            model=model,
+            effort=effort,
+            prices=prices,
+            cache=cache,
+            examples=examples,
         ),
         client,
     )
@@ -320,6 +326,65 @@ def test_the_request_carries_the_prompt_the_schema_and_the_effort():
     assert sent["output_config"]["format"]["schema"] == RESPONSE_SCHEMA
     assert sent["output_config"]["effort"] == "low"
     assert sent["messages"] == [{"role": "user", "content": sent["messages"][0]["content"]}]
+
+
+def test_an_empty_effort_is_left_out_of_the_request_rather_than_sent_empty():
+    """#96, and it is the difference between measuring a cheap model and not.
+
+    `output_config.effort` is an Opus-family parameter. `claude-haiku-4-5` rejects
+    it, so a request that always attaches one cannot reach that model at all -- and
+    the failure is a 400 for every row, which reads as the model being unavailable
+    rather than as one key too many.
+
+    Sent as `"effort": ""` it is worse than absent: an empty string is not a valid
+    level on the models that *do* take the parameter, so the mistake would break the
+    Opus runs too.
+    """
+    from categorizer.anthropic_predictor import NO_EFFORT
+
+    predictor, client = predictor_for(answering("groceries"), effort=NO_EFFORT)
+
+    predictor.categorize(a_transaction())
+    sent = client.messages.calls[0]
+
+    assert "effort" not in sent["output_config"]
+
+
+def test_the_sentinel_is_the_empty_string_because_that_is_what_an_unset_variable_is():
+    """#96, and it is what a mutation asked for.
+
+    Every other test names `NO_EFFORT` symbolically, so changing its *value* changes
+    both sides of the comparison at once and kills nothing. The value is load-bearing
+    on its own: `CATEGORIZER_EFFORT=` in a shell, and an environment variable set to
+    nothing, both arrive as the empty string. A sentinel of "none" would leave that
+    arriving as a literal effort level, and every request would be a 400 on every
+    model -- including the Opus runs, which do take the parameter.
+
+    It lives here rather than in `evals/test_score.py`, where it was written first,
+    because that file runs on the runner's own python and is stdlib-only by decision:
+    importing this module reaches `contracts`, which imports pydantic. CI caught it,
+    which is the one place that property is ever checked.
+    """
+    from categorizer.anthropic_predictor import NO_EFFORT
+
+    assert NO_EFFORT == ""
+
+
+def test_the_schema_is_sent_whether_or_not_there_is_an_effort():
+    """The half of `output_config` that is never optional. #96.
+
+    Dropping `effort` is a decision about how hard the model thinks; dropping
+    `format` changes the task -- unconstrained prose, every answer outside the
+    vocabulary, and a score about a different question.
+    """
+    from categorizer.anthropic_predictor import NO_EFFORT
+    from categorizer.prompt import RESPONSE_SCHEMA
+
+    predictor, client = predictor_for(answering("groceries"), effort=NO_EFFORT)
+
+    predictor.categorize(a_transaction())
+
+    assert client.messages.calls[0]["output_config"]["format"]["schema"] == RESPONSE_SCHEMA
 
 
 @pytest.mark.parametrize(
