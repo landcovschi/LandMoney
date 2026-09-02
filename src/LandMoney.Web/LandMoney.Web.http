@@ -305,3 +305,42 @@ GET {{host}}/api/transactions/labelled
 ### about 0.62 US cents each, which is why the screen shows the count before the
 ### button rather than the number afterwards.
 POST {{host}}/api/transactions/backfill-categories
+
+### #94. Correct the four fields somebody typed. PUT rather than a second PATCH:
+### PATCH means "change these and leave the rest", which is the reading #63 refused
+### to let an amount travel under. Here every field is stated, so nothing arrives
+### from a copy of the row that a screen was holding.
+###
+### Paste an id from the list above. Expect 200 and the stored row back.
+###
+### The rules are CreateTransactionRequest's, reached by inheritance rather than by
+### copy -- change the amount to 12.345 or the date to 2016-01-01 and this answers
+### 400 with the same sentences the create path sends.
+PUT {{host}}/api/transactions/00000000-0000-0000-0000-000000000000
+Content-Type: application/json
+
+{
+  "occurredAt": "2026-06-14",
+  "amount": 78.50,
+  "currency": "EUR",
+  "description": "coffee at the cafe"
+}
+
+### The same request against another account's row, or one that does not exist.
+### Expect 404 and never 403: the global query filter means the row is not found at
+### all, and a 403 would confirm that somebody else's id exists.
+
+### #94. Remove a row. Expect 204, and 404 the second time -- a hard delete, so
+### there is no undo and nothing left in the table. That is deliberate: the
+### import's duplicate detection reads this table, so a soft-deleted row would go
+### on blocking a re-import of the very line that was deleted by mistake.
+###
+### Worth doing after the export above rather than before it: a deleted row leaves
+### the labelled set too, which is right -- a row deleted as a mistake should not
+### go on training anything.
+DELETE {{host}}/api/transactions/00000000-0000-0000-0000-000000000000
+
+### An id that is not a guid. Expect 404 from routing rather than 400 from the
+### binder, which is what the {id:guid} constraint buys: an id that cannot exist
+### and an id that does not exist are the same fact to a caller.
+DELETE {{host}}/api/transactions/not-a-guid

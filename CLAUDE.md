@@ -3729,6 +3729,230 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   three states are checked by `tsc`, by `oxlint` and by reading. The screen was
   not opened in a browser, because signing in means typing a password.
 
+- **Removing a row and correcting the four fields somebody typed:
+  `DELETE /api/transactions/{id}` and `PUT /api/transactions/{id}` -- decided
+  2026-09-02** (#94). `CategorizerQuestion.cs` is the one place the three fields a
+  predictor reads are named; the screens are
+  `src/landmoney.client/src/components/RowActions.tsx` and
+  `EditTransactionForm.tsx`, with `TransactionFields.tsx` extracted so the add form
+  and the edit form cannot hold two sets of rules. 36 new .NET tests, no new
+  dependency, and no migration.
+
+  **What it fixes is not hypothetical, and the evidence is in `evals/`.** The eval
+  set carries a typo copied verbatim out of the deployed database, because there
+  was no way to fix it. This application could create, list, import and re-label,
+  and could not remove a row entered by mistake or correct a misspelled shop.
+
+  **Hard delete, and #94's third trap is what decides it.** The import's duplicate
+  detection (#62) reads the table, so a soft-deleted row would go on blocking a
+  re-import of the very line that was deleted by mistake -- a failure that reads as
+  a broken import, names the right line number for the wrong reason, and cannot be
+  fixed from the interface. The rest of the cost is the shape it puts on everything
+  else: the ownership filter is global and unforgettable, which is the property #89
+  chose an endpoint over a `psql` script for, and a second condition beside it is
+  one every later query inherits and every `ExecuteUpdate`, every raw statement and
+  every `IgnoreQueryFilters` call -- the sweep is already one -- has to remember.
+  The export would have to exclude them too, or a row deleted as a mistake would go
+  on training an eval set. What is given up is an undo, knowingly: there is none,
+  and the confirmation on the client is the only thing between a stray tap and a
+  year of history.
+
+  **`ExecuteDelete` is scoped by the global query filter, measured rather than
+  assumed.** Against the compose database: account B deleting account A's row
+  affects **0 rows**, so the endpoint answers 404; A deleting their own affects 1;
+  the row is then absent even with `IgnoreQueryFilters`. No ownership condition
+  appears anywhere in the statement, which is the whole point -- a hand-written
+  `WHERE id = @id AND owner_id = @owner` is one clause away from deleting somebody
+  else's row and would look exactly right. 404 and never 403, which is #63's rule:
+  a 403 confirms the id exists, and lets one account enumerate another's by
+  watching which ids are refused differently.
+
+  **PUT, and last-write-wins -- #94's first trap answered rather than shrugged
+  at.** What #63 refused was a *hidden* write: a PATCH whose job is one field, so
+  any other field travelling in that body arrives from whatever copy of the row a
+  screen happened to be holding, and somebody correcting a category in a tab opened
+  an hour ago silently rewrites an amount they never looked at. This endpoint is
+  the opposite shape -- every field it writes is one somebody read on their screen
+  and either changed or chose to leave, and the form is prefilled from the row. A
+  stale value can still win, and it is a value the person was looking at.
+
+  What that costs exactly: two tabs open on one row, both edited, and the second
+  save wins with no warning -- on an application one person uses weekly, in an
+  account only they can sign in to. **What the fix would be is written on the
+  endpoint so nobody has to find it twice:** Postgres gives every row an `xmin`
+  system column, and Npgsql maps it as a concurrency token with
+  `UseXminAsConcurrencyToken()` -- **no migration and no new column**. It buys
+  nothing until the version travels to the client and back, which is a field on
+  `TransactionResponse`, a field on the request, and a 409 the client must have
+  something to say about. That is machinery for a race this application cannot
+  currently run.
+
+  **`UpdateTransactionRequest` is an empty record deriving from
+  `CreateTransactionRequest`, and the emptiness is the whole of #94's fourth
+  trap.** "Any new path must go through the same `Validator` call, or the two ways
+  into this table drift." Inheritance is the strongest available form of that:
+  there is no rule to copy, so there is no rule to forget, and a `[Range]` added to
+  the create path is on this type before anybody remembers there is a second way
+  in. `CategorySuggestionRequest` had to make the copy and pay for it with a
+  reflection test, because it deliberately has one fewer field; this one has the
+  same four. The same call was already made one hop away and in another language --
+  #93's `BatchItem` inherits from `CategorizeRequest` in `contracts.py`. What it
+  costs is the mirror image: a field added to the create path becomes editable here
+  without anyone deciding that it should be, which is the right default today
+  because all four are things a person types and can mistype.
+
+  **An edit re-asks the categorizer only when it changed something a predictor
+  reads**, which is #94's second trap decided rather than left open.
+  `CategorizerQuestion` is the record that says what those are -- description,
+  amount, currency -- and **the date is deliberately not among them**, so
+  correcting a mistyped year is the one edit that costs no model call. The old
+  category is cleared rather than kept until a new one arrives: keeping it leaves a
+  word on screen predicted from text nobody can see any more, which is a quieter
+  kind of wrong than five seconds of "Categorizing...". Both columns go together,
+  which is #59's invariant.
+
+  **`MayOverwrite` is load-bearing here in a second way that is easy to miss.** It
+  is what makes a human label survive, as #94 says it should -- and the sweep's own
+  predicate excludes rows whose source is `human`, so marking one as owing a
+  category would produce a row that owes something nothing will ever collect:
+  `categoryPending` true for ever, and a client polling until its budget runs out.
+  Without that guard this endpoint can write a state the rest of the application
+  cannot get out of. The other half, said out loud: a row somebody labelled and
+  then edited keeps a label chosen for the old text. That is correct rather than
+  tolerated -- the label is about what was bought, and a different spelling of the
+  shop's name does not un-say it.
+
+  **The sweep's UPDATE gained the same value as a second guard, and that is the one
+  change here that is about correctness rather than shape.** A batch is the better
+  part of a minute against a model (#93), so a row can be edited between the
+  question and the answer -- and without the clause the answer is stored anyway,
+  describing text that is no longer in the row and looking entirely plausible. This
+  is #92's staleness argument one field along, and it fails well: the UPDATE
+  matches nothing, the row keeps the marker the edit put back on it, and the next
+  tick asks the question that is actually on the screen. Measured, and the
+  statement is worth keeping:
+
+      WHERE t.id = @id AND t.categorization_attempts IS NOT NULL
+        AND t.categorization_attempts < @maxAttempts
+        AND (t.category_source <> 'human' OR t.category_source IS NULL)
+        AND t.description = @description AND t.amount = @amount
+        AND t.currency = @currency
+
+  **`ChargeAsync` deliberately does not take that guard**, and the asymmetry is the
+  point. Storing is about a fact -- an answer about the wrong text is worthless.
+  Charging is about a bill: the call was made and, against a model, paid for,
+  whether or not the row moved underneath it. Guarding the charge as well would
+  also make repeated editing a way to never exhaust the cap, which is exactly the
+  unbounded retry the cap exists to stop.
+
+  **Decimal scale is what makes an edit that changed nothing cost nothing**, and it
+  had to be checked on Postgres rather than reasoned about. A row saved as `78.5`
+  is stored `numeric(18,2)` and read back as `78.50` -- different bit patterns,
+  equal values. Measured against the running database: the guard's WHERE matches
+  the row whether the parameter is written `78.5` or `78.50`, and matches **0 rows**
+  when any one of the description, the amount or the currency is different. If that
+  had gone the other way, every edit form opened and saved untouched would have
+  cleared the row's category and bought it again.
+
+  **`CategorizerQuestion.Unchanged()` cannot silently become an in-memory filter,
+  and the compiler is what says so** -- which is unusual enough to write down. The
+  mutation that turns the `Expression` into a `Func` is the failure
+  `PendingCategorization`'s comment warns about at length, and here it **does not
+  compile**: `.Where(Func)` degrades the chain to `IEnumerable<Transaction>`, and
+  `ExecuteUpdateAsync` is an `IQueryable` extension that then cannot bind. The
+  protection is a property of this call site ending in `ExecuteUpdate`, not of the
+  method, so it does not transfer to a chain ending in `ToListAsync`.
+
+  **On the client: two rows per transaction, and `window.confirm` lost.** The edit
+  form is a `<tr>` of its own spanning the table rather than the row turning into
+  inputs -- four inputs and their messages do not fit in cells sized for a date and
+  an amount, and on a phone, where each row is drawn as a grid, there is nowhere to
+  put them. The delete's confirmation is inline and two clicks. The browser's own
+  dialog is free and loses on three things, the first of which decides it: it
+  blocks the page synchronously, so #92's polling and any request in flight stop
+  until somebody reads it. It also cannot be styled, and several browsers now let a
+  page suppress it for the rest of its life, which turns "are you sure" into
+  "deleted" with nothing reporting it.
+
+  **`TransactionFields` was extracted, and the `id` collision is the reason it is a
+  component rather than a copy.** An `id` is document-wide and the edit form opens
+  while the add form is still above it, so two inputs called `amount` is not a lint
+  error and not a runtime one -- the browser resolves a duplicate `id` to the
+  *first* match, so clicking the edit form's "Amount" label focuses the add form's
+  input and `aria-describedby` points a screen reader at the wrong sentence. Both
+  are invisible until somebody uses a label or a screen reader. The prefix is the
+  row's own id. The other half of the extraction is #68's argument reused: what
+  drifts between two copies of a form is not the values but *which rules are
+  present*, and `CURRENCIES` and `unattachedMessages` went to `src/fields.ts`
+  because a file exporting both a component and a constant breaks fast refresh --
+  the smaller reason, as it was there.
+
+  **A currency the row holds and the list does not offer is rendered anyway**,
+  which is `CategoryCell`'s trap arriving at a second control: the import validates
+  a currency's *shape* and not its membership of the three, so a file carrying RON
+  stores RON, and a controlled select whose value matches no option shows the first
+  one instead -- opening the edit form would silently offer to change that row to
+  EUR.
+
+  **Deleting and correcting both replace the list in place rather than fetching it,
+  with one exception the sort order forces.** Removing one row from an ordered list
+  cannot reorder the rest, and a correction to the description, the amount or the
+  currency moves nothing -- the order is `(OccurredAt desc, CreatedAt desc)`. **A
+  correction to the date is exactly the case that does move it**, so that one asks
+  for the list again; the test is the response rather than what was sent. It
+  matters more for a delete than for a create: the reader is looking straight at
+  the row when it goes, and blanking the table to "Loading..." at that moment
+  answers "did that work?" with a spinner.
+
+  **Verified against the real application and a real Postgres**, through a
+  throwaway `WebApplicationFactory` pointed at the compose database and then
+  deleted -- real routing, the real `ValidationFilter`, the real handlers, real EF,
+  with authentication as the one stub, because a real sign-in is `UserManager` and
+  a password. All three of #94's acceptance tests plus the re-prediction rules: a
+  delete is 204 and the row is gone; a second delete is 404; another account's row
+  is 404 for both verbs and is untouched; `12.345` is refused and `2016-01-01` is
+  refused, by the create path's own rules through inheritance; `78.5` is stored
+  `78.50` and clears the guess; a date-only correction keeps the category and the
+  null marker; an edit that changes nothing keeps both; a `human` label survives a
+  renamed description **and the row is not marked as owing one**; and `mdl` is
+  stored `MDL`.
+
+  **Checked by breaking it, per #21: 17 mutations, one at a time, reverted with
+  `git checkout` from the commit.** Eight were caught, eight survived and one the
+  compiler refused. **Every one of the eight survivors is inside a handler or the
+  sweep -- code that reaches `AppDbContext`, which this suite may not open** -- and
+  every one of the eight was killed by hand instead, by the run above and by the
+  guard's WHERE clause exercised in `psql`. That is the honest shape of the wall
+  `AuthorizationTests` and #62 both document, measured rather than asserted: the
+  suite protects the contract, the routing and the SQL, and nothing it can run
+  protects the eleven lines inside the two handlers.
+
+  The harness carries the three traps this repository has already paid for -- it
+  builds before it tests and reports a build failure as invalid rather than as a
+  kill (#89), it refuses a substitution matching zero or two places (#21), and
+  nothing is stashed around a sweep that runs `git checkout -- .` (#93). The second
+  one fired: `var currency = request.Currency.ToUpperInvariant();` is written
+  identically on the import path four hundred lines up, so the mutation that looked
+  like one place was two, and without the refusal it would have changed the import
+  instead and reported whatever that did.
+
+  **What is not automated, said plainly.** The eleven lines inside `UpdateAsync`
+  and `DeleteAsync`, per the paragraph above. The sweep's new guard beyond its
+  generated SQL -- reproducing the race needs a categorizer slow enough to be
+  edited around, and what was measured instead is the statement EF emits and that
+  clause's behaviour against the real column. And the whole client half, which
+  still has no test framework (#67 recorded the same for its own debounce), so the
+  two-step confirmation, the edit row and the currency fallback are checked by
+  `tsc`, by `oxlint` and by reading. The screen was not opened in a browser,
+  because signing in means typing a password.
+
+  **Mentioned rather than fixed, per this file's rule about adjacent problems:**
+  the throwaway factory above is roughly forty lines and covers what five issues in
+  a row have each verified by hand and thrown away. An opt-in integration suite --
+  one that CI does not run and `dotnet test` does not require -- is the shape that
+  would keep it, and it is a change to how testing works here rather than part of
+  #94.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as

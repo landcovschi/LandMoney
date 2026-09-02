@@ -675,6 +675,21 @@ again by itself after 7 days.
        of what it changes for this box: it makes the chore shorter, and the chore
        is still somebody's afternoon
 
+       **#94 removed the fifth, on 2026-09-02, and this box is still empty.** A
+       row can now be deleted and its description, amount, date and currency
+       corrected -- `DELETE /api/transactions/{id}` and
+       `PUT /api/transactions/{id}`, both from the list. The reason that belongs
+       to this checkbox rather than to the application generally is written into
+       the issue: **`evals/transactions.csv` carries a typo copied verbatim out
+       of the deployed database, because there was no way to fix it.** So the
+       rows this box is waiting for could be produced and could not be tidied,
+       and a labelling session had to work around its own mistakes rather than
+       correct them. Five issues have now each removed an excuse -- #62 the
+       typing, #63 the labelling, #89 the getting-out, #93 the waiting, #94 the
+       mistakes -- and none of them can tick this box, for the reason that has
+       not changed since #89 wrote it down: what it asks for is data, and every
+       one of them is a route
+
 2. [x] **A rules baseline.** String matching on the description. Score it.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat
