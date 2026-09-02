@@ -1052,6 +1052,14 @@ the thing that produced the number can be shown.
       names, reproduced rather than argued about. The first screen is 12 KB
       against about 1.2 MB
 
+      **27 mutations, seventeen killed and nine survived**, which is the worst
+      ratio any sweep here has produced -- and three of the nine were real gaps:
+      a parse that could follow the ambient calendar, a token with a field too
+      many, and a `MonthRange` guard whose comment was wrong about what it
+      caught. The guard is deleted rather than explained. Three more are
+      equivalent mutants and now say so in the code, so nobody later removes
+      them on the evidence that no test cares
+
 - [x] The categorizer is visible while a transaction is typed -- #67,
       2026-08-29. `POST /api/transactions/category-suggestion` answers what the
       categorizer would say for a description that is not saved yet, and a badge

@@ -56,14 +56,27 @@ public sealed record TransactionCursor(DateOnly OccurredAt, DateTimeOffset Creat
     // value read back out of the database has a zero in the seventh and survives the
     // round trip exactly -- which is the only case there is, because a cursor is
     // always built from a row that has just been read.
+    //
+    // **The InvariantCulture passed beside it is inert, and a mutation proved it
+    // rather than a reading.** Removing it kills nothing: the round-trip specifier
+    // is culture-independent by definition, so unlike DayFormat above it cannot
+    // produce a Hijri year. It is written anyway, and it is the one argument in this
+    // file kept for symmetry rather than for behaviour -- the day this format string
+    // is changed to anything else, the culture is already named.
     private const string InstantFormat = "O";
 
     /// <summary>How long a token may be before it is refused unread.</summary>
     // The three parts are 10, 33 and 36 characters plus two separators: 81, which
     // base64 rounds up to 108. Twice that leaves room for a change of format and is
-    // far less than a URL will carry. It exists so that a query string full of
-    // rubbish is refused by a length check rather than by allocating a decode buffer
-    // the size of whatever was sent.
+    // far less than a URL will carry.
+    //
+    // **It is a cost guard and not a behaviour, and a mutation is what settled
+    // that.** Deleting it kills nothing, because a megabyte of rubbish decodes to
+    // rubbish, splits into one field and is refused by the shape check below either
+    // way. What it stops is the decode buffer being allocated at the size of
+    // whatever was sent. Said out loud because the line reads like a validation rule
+    // and is not one, and because the alternative to writing this down is somebody
+    // later deleting it on the evidence that no test cares.
     private const int MaxEncodedLength = 256;
 
     /// <summary>The token that asks for the rows after this one.</summary>
@@ -133,9 +146,14 @@ public sealed record TransactionCursor(DateOnly OccurredAt, DateTimeOffset Creat
         }
 
         // RoundtripKind, so the offset in the token is the offset that comes back
-        // rather than being converted into this machine's local time. The stored
-        // values are UTC, and a cursor that quietly moved by two hours would skip or
-        // repeat every row inside that window.
+        // rather than being converted into this machine's local time.
+        //
+        // **Inert here, and a mutation is what says so**: DateTimeOffset.ParseExact
+        // keeps the offset it parsed whatever the styles are, so swapping this for
+        // None kills nothing. The flag earns its place the day this parses a
+        // DateTime instead, where it is the difference between an instant and a
+        // local reading of one -- and it is kept for that reason rather than
+        // deleted, because the type is the only thing making it unnecessary.
         if (!DateTimeOffset.TryParseExact(
                 parts[1],
                 InstantFormat,

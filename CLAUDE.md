@@ -4114,6 +4114,55 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   an order and carries no authority; the global query filter is applied to a paged
   query the way it is applied to every other, without the query mentioning ownership.
 
+  **Checked by breaking it, per #21: 27 mutations, one at a time, reverted with `git
+  checkout` from the commit. Seventeen killed, one refused by the compiler, and nine
+  survived** -- which is a worse ratio than any sweep in this repository so far, and
+  the nine are why the hour was worth spending.
+
+  **Three were real gaps.** The culture tests set `CurrentCulture` while *writing* a
+  cursor and parsed under the default, so switching the parse to the ambient culture
+  killed nothing -- and that is the sharper half of the two, because a cursor is
+  written by one request and read by the next on the same machine: an
+  ambient-calendar parse answers 400 to a token this server wrote a second earlier,
+  and a Saudi reader's list ends after one page. `parts.Length != 3` weakened to
+  `< 3` survived: too few fields is refused either way and too many was read as the
+  first three, so a token with a trailing bar would have been accepted as a position
+  rather than refused as a stranger. Both now have tests, and both mutations were
+  re-run against them and died.
+
+  **One was a guard whose comment was wrong.** `MonthRange` checked the length before
+  parsing, on the belief that `"yyyy-MM"` is a minimum-width pattern and
+  `TryParseExact` would take `"2026-8"`. It does not -- `MM` wants exactly two digits
+  -- so the guard caught nothing and the comment above it said otherwise. **Deleted
+  rather than explained**: a guard that catches nothing is worse than no guard,
+  because it is read as protection.
+
+  **Three are equivalent mutants and now say so in the code**, which is the shape #92
+  recorded for its `null < 30`: the length ceiling on a token is a cost guard and not
+  a behaviour, `DateTimeStyles.RoundtripKind` is inert for a `DateTimeOffset`, and
+  `"O"` is culture-independent by definition. Each is kept, and each carries the
+  sentence that stops a later reader deleting it on the evidence that no test cares.
+
+  **The last two live behind the database, and one of them was not killed by the
+  by-hand run I thought had killed it.** `Take(pageSize + 1)` -> `Take(pageSize)` and
+  the summary losing its upper bound are both covered by the compose-stack
+  verification -- without the lookahead every page is exactly full, so `hasMore` is
+  never true and the walk stops at page one rather than reaching a hundred; without
+  the bound the March total would have carried four more months. But the backfill
+  count's predicate replaced by `Category == null` passed *and* matched, because
+  every seeded row had a null marker. Five rows built to tell them apart settle it:
+  **the endpoint answers 3 where the naive predicate answers 5**, the two extra being
+  rows already in the sweep's queue, which is the idempotence #93 relies on.
+
+  **And one the sweep did not find, because reading did.** A category arriving
+  through the poll moves money out of the summary's uncategorised row into a named
+  one, and the poll did not bump the write counter -- so the breakdown stayed as it
+  was until the next create, import, edit or correction. Correct totals, wrong rows,
+  and nothing on the screen saying which. Before paging, the summary read the very
+  array the poll had just replaced and followed along for nothing. **A mutation sweep
+  measures the tests that exist; it says nothing about the behaviour nobody wrote one
+  for**, and this half of the change has no test framework at all.
+
   **What is not automated, said plainly.** Everything about the rows: that a page is
   fifty long, that the cursor lands where it should, and that the summary adds up the
   month all need Postgres, which is the wall `AuthorizationTests` and #62 both
