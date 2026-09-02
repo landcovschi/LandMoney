@@ -1,42 +1,88 @@
-import type { Transaction } from '../api/types'
-import { formatMinorUnits } from '../money'
-import { monthOf, summariseMonth, UNCATEGORISED } from '../summary'
+import { useEffect, useState } from 'react'
+import { monthSummary } from '../api/transactions'
+import type { MonthSummary as Totals } from '../api/types'
+import { formatAmount } from '../money'
+import { monthOf, UNCATEGORISED } from '../summary'
 
 interface MonthSummaryProps {
-  /** The rows the list is showing. The same array, not a second fetch. */
-  transactions: readonly Transaction[]
+  /**
+   * Bumped by every write, to ask again. #95.
+   */
+  // A number rather than the rows, and that swap is the whole of what #95 did to
+  // this component. It used to be handed the array the list was about to draw, which
+  // made its totals and that table incapable of disagreeing; a paged list is no
+  // longer the table, so the totals are a query of their own and this is how it
+  // learns that one of them is stale.
+  //
+  // Every mutation bumps it -- a create, an import, a delete, an edit, and a
+  // category correction, which changes no total but moves money between two rows of
+  // this table. That last one is the one an author forgets, because it is the only
+  // write that does not change what the list shows.
+  version: number
 }
 
+/** What the panel knows at a given moment. */
+// The same union shape the list and the other cards use. There is no 'failed' state
+// rendered as a banner: see below.
+type SummaryState =
+  | { status: 'loading' }
+  | { status: 'ready'; totals: Totals }
+  | { status: 'failed' }
+
 /** #68. Where this month's money went, by category, largest first. */
-// **It adds up what is already on the screen, and there is no endpoint behind
-// it.** The list is fetched whole, so the client holds every row already, and
-// summing those is one pass over an array the page has anyway -- against a second
-// round trip, a `GROUP BY` in EF, a third contract to keep in step with
-// `api/types.ts` by hand, and a window in which the totals and the table below
-// them could disagree because they were fetched at different moments. Here they
-// cannot: the numbers come from the very array the table renders, which makes
-// #68's first acceptance test -- "the totals equal the sums of the rows on the
-// list" -- true by construction rather than by checking.
+// **Added up by Postgres since #95, and the reason is in #68's own text**: it summed
+// the rows the browser was holding, and wrote down that this "stops being fine
+// silently" the day the list grows a page -- the component would keep rendering and
+// start describing fifty transactions as though they were a month, with no error and
+// a number that looks entirely plausible. The fix it named was "a sum on the server
+// in decimal, not a bigger page", and that is what this now asks for.
 //
-// **What that costs is the trap the issue names: it stops being fine silently.**
-// `GET /api/transactions` has no paging and no limit, decided in #3 and written
-// down there in those words. The day it grows one, this component keeps rendering
-// and starts describing the page it was handed rather than the month -- with no
-// error, no warning, and a number that looks entirely plausible. The fix on that
-// day is a sum on the server in `decimal`, not a bigger page. It is written down
-// here rather than built, because building it today would be a second contract
-// guarding against a change nobody has made.
-//
-// Rendered only when the list is ready, which is why there is no loading state
-// and no failed state in this file. The list underneath already says both of
-// those things, and a second "Loading..." stacked above the first is noise.
-export function MonthSummary({ transactions }: MonthSummaryProps) {
-  // Read during render rather than held in state, so a tab left open across
-  // midnight on the 31st is one reload away from being right instead of being
-  // wrong until it is closed. Freezing it in `useState` is the version that
-  // cannot recover.
+// What is given up is the property that made #68's first acceptance test true by
+// construction: the totals and the rows below them came from one array. They are two
+// requests now, so a transaction saved between them appears in one and not the other
+// until the next write bumps `version`. That window is milliseconds and the
+// alternative is a screen that adds up part of a month.
+export function MonthSummary({ version }: MonthSummaryProps) {
+  // Read during render rather than held in state, so a tab left open across midnight
+  // on the 31st is one reload away from being right instead of being wrong until it
+  // is closed. Freezing it in `useState` is the version that cannot recover.
   const now = new Date()
-  const currencies = summariseMonth(transactions, monthOf(now))
+  const month = monthOf(now)
+
+  const [state, setState] = useState<SummaryState>({ status: 'loading' })
+
+  // `month` is a dependency as well as `version`, which costs nothing and closes the
+  // one case the version counter cannot: a tab open across midnight on the last of
+  // the month re-renders for some other reason, `monthOf` answers the new month, and
+  // the totals underneath it would otherwise still be September's.
+  useEffect(() => {
+    const controller = new AbortController()
+
+    monthSummary(month, controller.signal)
+      .then((totals) => setState({ status: 'ready', totals }))
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setState({ status: 'failed' })
+        }
+      })
+
+    return () => controller.abort()
+  }, [month, version])
+
+  // Nothing at all while it is on its way, and nothing at all if it did not arrive.
+  //
+  // The second half is the decision. Every other card in this application reports
+  // its own failure, and this one must not: it is rendered above a table that is
+  // fetched separately, so the ordinary way for this request to fail is that the
+  // list's request failed too -- and the list says so, with a retry button. A banner
+  // here would be the same sentence twice, above the one that can do something about
+  // it. A summary that is missing is a screen with no summary on it, which is
+  // legible on its own.
+  if (state.status !== 'ready') {
+    return null
+  }
+
+  const { currencies } = state.totals
 
   return (
     <section className="entry summary" aria-labelledby="summary-heading">
@@ -52,9 +98,10 @@ export function MonthSummary({ transactions }: MonthSummaryProps) {
 
       {currencies.length === 0 ? (
         // An empty month, which #68 asks to render as a month with nothing in it
-        // rather than as a blank or a broken screen. It is also what a brand new
-        // account sees, and the sentence is true of both without this having to
-        // tell them apart.
+        // rather than as a blank or a broken screen. App only mounts this when the
+        // account has rows at all, so this sentence is about the month rather than
+        // about a new account -- which is the distinction that keeps it from being
+        // stacked on top of the list's "Nothing recorded yet".
         <p className="field-hint">Nothing recorded this month.</p>
       ) : (
         currencies.map((totals) => (
@@ -76,7 +123,7 @@ export function MonthSummary({ transactions }: MonthSummaryProps) {
             <caption>
               {totals.currency} &mdash; {totals.count}{' '}
               {totals.count === 1 ? 'transaction' : 'transactions'},{' '}
-              {formatMinorUnits(totals.totalMinorUnits, totals.currency)} in total
+              {formatAmount(totals.total, totals.currency)} in total
             </caption>
 
             {/*
@@ -131,8 +178,14 @@ export function MonthSummary({ transactions }: MonthSummaryProps) {
 
                   <td className="numeric">{row.count}</td>
 
+                  {/*
+                    `formatAmount` and not the minor-unit version #68 wrote: the
+                    number arrives as a decimal added by Postgres, so there is
+                    nothing to convert back from. It is formatted and never added
+                    to anything, which is the condition its exactness comes with.
+                  */}
                   <td className="numeric">
-                    {formatMinorUnits(row.totalMinorUnits, totals.currency)}
+                    {formatAmount(row.total, totals.currency)}
                   </td>
                 </tr>
               ))}

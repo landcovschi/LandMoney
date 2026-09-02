@@ -20,11 +20,32 @@ import { RowActions } from './RowActions'
 export type ListState =
   | { status: 'loading' }
   | { status: 'failed'; message: string }
-  | { status: 'ready'; transactions: readonly Transaction[] }
+  | {
+      status: 'ready'
+      transactions: readonly Transaction[]
+
+      /** The token for the next page, or null when this is the whole table. #95. */
+      // Part of the list's state rather than a separate one, because "these rows"
+      // and "where they stop" are one fact: a handler that replaces the rows and
+      // forgets the cursor would offer to load a page it has already loaded. The
+      // in-place handlers in App spread the object for exactly that reason.
+      //
+      // Null is the end and is knowable without asking: the server fetches one row
+      // further than it returns, so it can say so inside the page that raised the
+      // question. Without that the button could only disappear after a request that
+      // came back empty.
+      nextCursor: string | null
+    }
 
 interface TransactionListProps {
   state: ListState
   onRetry: () => void
+
+  /** Appends the next page. Resolves when it is on screen; rejects with the reason. #95. */
+  // A promise, like onChangeCategory and onDeleteTransaction, and for the same
+  // reason: the button below holds its own in-flight and failed state, so it needs
+  // to know when the request finished and whether it worked. App does not catch it.
+  onLoadMore: () => Promise<void>
 
   /** The closed list of eleven, from the server. Empty if it could not be fetched. */
   // Passed down rather than fetched here, so there is one request for it per page
@@ -48,6 +69,7 @@ interface TransactionListProps {
 export function TransactionList({
   state,
   onRetry,
+  onLoadMore,
   categories,
   onChangeCategory,
   onEditTransaction,
@@ -68,6 +90,16 @@ export function TransactionList({
   // form is open leaves an id matching nothing, which renders nothing. Clearing it
   // on every list change would also close the form on every two-second poll.
   const [editing, setEditing] = useState<string | null>(null)
+
+  // #95. What the "Load more" button is doing, and what to say if it failed.
+  //
+  // Local rather than lifted into ListState, which is the same call CategoryCell and
+  // RowActions make for their own writes: nothing outside this element needs to know
+  // that a page is on its way, and putting it in App would mean every component
+  // under it re-rendering on a state change about one button.
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [moreFailed, setMoreFailed] = useState<string | null>(null)
+
   if (state.status === 'loading') {
     return (
       <p className="list-status" role="status">
@@ -104,6 +136,24 @@ export function TransactionList({
     )
   }
 
+  async function handleLoadMore() {
+    setLoadingMore(true)
+    setMoreFailed(null)
+
+    try {
+      await onLoadMore()
+    } catch (error: unknown) {
+      setMoreFailed(
+        error instanceof Error ? error.message : 'Could not load any more transactions.',
+      )
+    } finally {
+      // `finally`, so the button comes back whether the page arrived or not. Without
+      // it a failed request leaves a permanently disabled control under an error
+      // message telling the reader to try again.
+      setLoadingMore(false)
+    }
+  }
+
   return (
     // Every role here is the one the element already has, so none of it does
     // anything at a width where the table is drawn as a table. They are
@@ -120,8 +170,20 @@ export function TransactionList({
     // nothing keeping them equal, and screen readers read generated content --
     // so the label arrives twice. The card in App.css prints no labels at all
     // instead, which is why it does not need them.
+    <>
     <table className="transactions" role="table">
-      <caption>Everything recorded, newest first.</caption>
+      {/*
+        #95. It no longer is everything: the server answers fifty rows and the
+        button below asks for the next fifty. The caption says what is on the
+        screen rather than what is in the database, because a caption promising
+        "everything" above a page is the silent half of paging -- the same failure
+        #68's summary would have had, in a sentence instead of a number.
+      */}
+      <caption>
+        {state.nextCursor === null
+          ? 'Everything recorded, newest first.'
+          : `The ${state.transactions.length} most recent, newest first.`}
+      </caption>
 
       <thead role="rowgroup">
         <tr role="row">
@@ -275,6 +337,46 @@ export function TransactionList({
         nothing in this element adds two currencies together.
       */}
     </table>
+
+    {/*
+      #95. A button, and deliberately not an IntersectionObserver loading the next
+      page as the reader nears the bottom.
+
+      Infinite scrolling is what a list of this shape usually gets, and it loses on
+      three things here. It cannot be reached from a keyboard at all, so the only way
+      to see the older half of the table would be to scroll a mouse; it fetches
+      whether or not anybody wanted more, which on a container that scales to zero
+      (#61) is a request that wakes it up; and it is the one part of this feature
+      with no test of any kind behind it -- this client still has no test framework
+      (#67 recorded the same for its own debounce), so a scroll listener racing the
+      two-second poll would be checked by reading and nothing else. A button is one
+      element with one event, and pressing it is a decision the reader made.
+
+      It is outside the <table> rather than in a <tfoot>. A footer row would be
+      announced as a row of the table, which it is not -- there is no transaction in
+      it -- and below 640px App.css redraws every row as a card, so it would be drawn
+      as a card containing a button.
+    */}
+    {state.nextCursor !== null && (
+      <p className="list-status">
+        <button type="button" onClick={handleLoadMore} disabled={loadingMore} aria-busy={loadingMore}>
+          {loadingMore ? 'Loading...' : 'Load more'}
+        </button>
+      </p>
+    )}
+
+    {/*
+      The failure sits under the button rather than replacing the table, which is
+      the same call CategoryCell makes for a correction: the rows on screen are
+      still correct and still the ones the reader was reading, and the only thing
+      that did not happen is the next page.
+    */}
+    {moreFailed !== null && (
+      <div className="banner banner-error" role="alert">
+        <p>{moreFailed}</p>
+      </div>
+    )}
+    </>
   )
 }
 

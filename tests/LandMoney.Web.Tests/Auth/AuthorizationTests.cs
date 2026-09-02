@@ -27,8 +27,18 @@ public class AuthorizationTests
     // docs/evals.md. It is that it is a group of its own, so it inherits nothing:
     // MapCategoryEndpoints without a RequireAuthorization beside it in Program.cs
     // compiles, works, and is public. This is the line that reports that.
+    //
+    // #95 added the last two. The summary is a `GROUP BY` over one person's spending
+    // and reads as an aggregate, which is exactly the shape somebody argues is not
+    // really data; it is one account's month, and it is refused. The count is a
+    // single integer and is refused for the sharper reason: the POST beside it
+    // spends money, so a number that says how much would be the first half of
+    // deciding whether it is worth reaching for.
     [Theory]
     [InlineData("/api/transactions")]
+    [InlineData("/api/transactions?limit=5")]
+    [InlineData("/api/transactions/summary?month=2026-08")]
+    [InlineData("/api/transactions/backfill-categories")]
     [InlineData("/api/categories")]
     [InlineData("/api/me")]
     public async Task An_anonymous_request_for_data_is_refused_with_401(string path)

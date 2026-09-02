@@ -129,10 +129,25 @@ public class AppDbContext : IdentityDbContext<IdentityUser>
         // the directions are mixed. Writing DESC here would be copying the LINQ
         // and would cost an index Postgres cannot also use for the ascending case.
         //
+        // Id joined it in #95, and it is a correctness column rather than a
+        // performance one. The list is paged by a keyset cursor now, and a cursor
+        // needs a *total* order to walk: OccurredAt ties within a day by design
+        // (#17), and CreatedAt ties too -- measured at about fourteen rows per
+        // identical value in a three-hundred row import, which is the arithmetic on
+        // TransactionCursor. Without the primary key as a third key the order inside
+        // those ties is whatever Postgres finds cheapest, and a page boundary landing
+        // in one repeats or drops rows.
+        //
+        // It has to be *in the index* and not merely in the ORDER BY. With three sort
+        // keys and two indexed columns Postgres can still walk the index and then
+        // sort each tie group -- an incremental sort, cheap and bounded -- but that
+        // is a sort step, and #95's acceptance test is an EXPLAIN with none. The
+        // width it costs is 16 bytes an entry on one index.
+        //
         // The name comes from EFCore.NamingConventions like everything else:
-        // ix_transactions_owner_id_occurred_at_created_at.
+        // ix_transactions_owner_id_occurred_at_created_at_id.
         modelBuilder.Entity<Transaction>()
-            .HasIndex(t => new { t.OwnerId, t.OccurredAt, t.CreatedAt });
+            .HasIndex(t => new { t.OwnerId, t.OccurredAt, t.CreatedAt, t.Id });
 
         // #52, and this line is the whole of the issue's sharpest warning: "every
         // query gains a filter, and the one that forgets it is a data leak rather

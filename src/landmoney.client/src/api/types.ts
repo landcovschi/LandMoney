@@ -248,3 +248,89 @@ export interface CategorySuggestion {
 export interface BackfillResult {
   marked: number
 }
+
+/** One page of `GET /api/transactions`: `TransactionPage`. #95. */
+// **The list stopped being an array, and that break is the point rather than the
+// cost.** Until #95 the endpoint answered every row there was and this client held
+// all of them, which is what let #68 add up a month in the browser and #93 count
+// what a backfill would cost. Paging ends both, and it ends them silently if the
+// shape does not change: fifty rows still render, still total, still count, and
+// every number is about a page while the screen says it is about a month. An
+// envelope makes that a compile error here instead.
+export interface TransactionPage {
+  items: Transaction[]
+
+  /**
+   * The token that asks for the rows after the last one here, or `null` at the end.
+   *
+   * Opaque: it is built and read only by the server, and nothing in this client may
+   * take it apart. `null` is what ends the walk, and it is knowable inside the page
+   * that raised it -- the server fetches one row further than it returns -- so
+   * "there is more" never costs a request that comes back empty.
+   */
+  nextCursor: string | null
+}
+
+/** What `GET /api/transactions/summary` answers: `MonthSummaryResponse`. #95. */
+// The month, added up by Postgres in `numeric`. #68 did this arithmetic here, in
+// integer minor units, and its own comment named what would end it: "the day
+// `GET /api/transactions` grows a page, this component keeps rendering and starts
+// describing the page it was handed rather than the month". So `summariseMonth` and
+// `toMinorUnits` are gone, and with them the whole class of question about adding
+// doubles -- there is nothing left in this client that adds two amounts together.
+export interface MonthSummary {
+  /** Busiest first: by transaction count, never by total. */
+  // #68's rule, now the server's: ordering currency blocks by their totals would
+  // put 500 MDL above 400 EUR, which is the same mistake as adding them.
+  currencies: CurrencyTotals[]
+}
+
+/** Everything spent in one currency, in one month. #95. */
+// A currency is the outer grouping and not a column, which is #68's first trap
+// answered by the shape rather than by care: there is nowhere in this type to put a
+// number that mixes EUR and MDL.
+export interface CurrencyTotals {
+  currency: string
+
+  /** Largest first, then by name. The server decides. */
+  categories: CategoryTotal[]
+
+  /** The sum of the rows above. One currency, so this is a legal addition. */
+  total: number
+
+  count: number
+}
+
+/** One category's share of one currency, for one month. #95. */
+export interface CategoryTotal {
+  /**
+   * `null` is a row rather than a gap.
+   *
+   * Three things produce it and the screen names all three: the categorizer
+   * abstained (#39), it was never called (an import, #62), or it was not running
+   * (#61). All three are the same null in the column.
+   */
+  category: string | null
+
+  /**
+   * C# `decimal`, on the wire as a JSON number -- a *total*, not one amount.
+   *
+   * The same round-trip guarantee `Transaction.amount` carries, and it holds for
+   * the same reason with more room to spare than it looks: a double is exact to
+   * fifteen significant digits, and this is a month of one person's spending. It is
+   * formatted and never added to anything, which is the condition that guarantee
+   * comes with. Adding two of these is the mistake the shape above prevents.
+   */
+  total: number
+
+  count: number
+}
+
+/** What `GET /api/transactions/backfill-categories` answers: `BackfillCountResponse`. #95. */
+// How many rows the POST at the same path would mark. #93 counted them here, out of
+// the loaded list, and paging breaks that in the direction that costs money: the
+// button would offer the fifty rows on screen while the server marked every
+// uncategorised row in the table.
+export interface BackfillCount {
+  count: number
+}

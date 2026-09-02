@@ -8,7 +8,7 @@ import {
   updateCategory,
   updateTransaction,
 } from './api/transactions'
-import type { NewTransaction, UpdateTransaction } from './api/types'
+import type { NewTransaction, Transaction, UpdateTransaction } from './api/types'
 import { BackfillCategories } from './components/BackfillCategories'
 import { ExportLabelled } from './components/ExportLabelled'
 import { ImportForm } from './components/ImportForm'
@@ -51,9 +51,44 @@ const POLL_INTERVAL_MS = 2_000
 // no change at all stops it, and a reload starts it again.
 const MAX_IDLE_POLLS = 30
 
+/** The same rows, with anything the server has since changed about them. #95. */
+// **It replaces rows and never chooses which rows there are.** The poll asks for a
+// window as deep as the reader has scrolled; anything that came back is swapped in
+// by id, and anything that did not is left exactly where it was. So a row deleted in
+// another tab stays on screen until the next reload, and a row inserted above the
+// reader does not appear -- both correct, because discovering rows is what `reload`
+// is for and a background request must not rearrange a table somebody is reading.
+//
+// A Map rather than a `find` per row: this runs every two seconds over as many rows
+// as are loaded, and the nested version is the quadratic one.
+function merge(
+  current: readonly Transaction[],
+  fresh: readonly Transaction[],
+): readonly Transaction[] {
+  const byId = new Map(fresh.map((transaction) => [transaction.id, transaction]))
+
+  return current.map((transaction) => byId.get(transaction.id) ?? transaction)
+}
+
 function App() {
   const [list, setList] = useState<ListState>({ status: 'loading' })
   const [session, setSession] = useState<SessionState>({ status: 'loading' })
+
+  // #95. Bumped by every write, and read by the two panels that now ask the server
+  // their own question instead of counting the rows on screen.
+  //
+  // **It is separate from `reloads` because the two mean different things.**
+  // `reloads` says "fetch the list again", and three of the five write handlers
+  // deliberately do not: a correction, an edit and a delete change the rows in place
+  // rather than dropping the table to "Loading...". Every one of those five still
+  // changes the month's totals or the number of uncategorised rows, so folding the
+  // two counters into one would either refetch the list after a correction -- which
+  // #63 argued against at length -- or leave the summary describing the state before
+  // it.
+  //
+  // The one that is easiest to forget is the category correction: it moves money
+  // between two rows of the summary and changes nothing the list is showing.
+  const [writes, setWrites] = useState(0)
 
   // #63. The eleven, fetched from the server so this client holds no copy of them.
   //
@@ -87,7 +122,12 @@ function App() {
   const reload = () => {
     setList({ status: 'loading' })
     setReloads((count) => count + 1)
+    setWrites((count) => count + 1)
   }
+
+  // #95. What a write that does *not* refetch the list still has to announce. The
+  // three in-place handlers call this instead of `reload`.
+  const wrote = () => setWrites((count) => count + 1)
 
   // #92. What is left of the polling budget, and how many rows were waiting last
   // time it was looked at.
@@ -142,8 +182,12 @@ function App() {
     // request.
     const controller = new AbortController()
 
-    listTransactions(controller.signal)
-      .then((transactions) => setList({ status: 'ready', transactions }))
+    // #95. The first page, at the server's own default size. No `limit` is sent:
+    // the number belongs to the server, which is where the cost of a larger one is
+    // paid, and a client that named it would be a second place to change it.
+    listTransactions({}, controller.signal)
+      .then((page) =>
+        setList({ status: 'ready', transactions: page.items, nextCursor: page.nextCursor }))
       .catch((error: unknown) => {
         // Aborted means this effect was superseded or the component went away.
         // Nobody is left to read a message, and writing state here would land
@@ -223,6 +267,22 @@ function App() {
     // but is the right moment to start from a full budget.
     if (pendingLastSeen.current === null || pending < pendingLastSeen.current) {
       pollsLeft.current = MAX_IDLE_POLLS
+
+      // #95. **A category arriving is a write this application did not make**, and
+      // it moves money out of the summary's uncategorised row into a named one.
+      // Before paging, the summary read the very array the poll had just replaced
+      // and followed along for nothing; it is a query of its own now, so something
+      // has to tell it. Without this the breakdown stays as it was until the next
+      // create, import, edit or correction -- correct totals, wrong rows, and
+      // nothing on the screen saying which.
+      //
+      // Only on a *decrease*, and the `!== null` above is what makes that the
+      // reading: the first look is the list arriving rather than progress, and
+      // `reload` announced that already. A rise means new uncategorised rows, which
+      // is a write that has announced itself by definition.
+      if (pendingLastSeen.current !== null) {
+        wrote()
+      }
     }
 
     pendingLastSeen.current = pending
@@ -236,8 +296,30 @@ function App() {
     const timer = setTimeout(() => {
       pollsLeft.current -= 1
 
-      listTransactions(controller.signal)
-        .then((transactions) => setList({ status: 'ready', transactions }))
+      // #95. **The rows it is showing, refreshed in place -- never a different set
+      // of rows.** Before paging this asked for the list and replaced it, which was
+      // the same thing; it is not any more, and the two obvious ways of keeping it
+      // simple are both wrong. Asking for the first page would silently truncate a
+      // reader who has pressed "Load more". Walking every loaded page would be one
+      // request per fifty rows, every two seconds.
+      //
+      // So it asks for a window as deep as the reader has scrolled and merges by
+      // id: a row that came back is replaced, and a row that did not is left exactly
+      // where it was. Which rows are on screen is `reload`'s business, and the poll
+      // is not allowed to change it -- that is what stops a background request
+      // rearranging the table somebody is reading.
+      //
+      // The window is `length` and is not clamped here, deliberately. The server's
+      // ceiling is the server's number (TransactionPaging.MaxPageSize), and writing
+      // it down on this side would be a second place to change it; a list grown past
+      // it simply stops being refreshed beyond that depth until the next reload,
+      // which is a stale spinner on a row nobody has scrolled back to.
+      listTransactions({ limit: list.transactions.length }, controller.signal)
+        .then((page) =>
+          setList((current) =>
+            current.status === 'ready'
+              ? { ...current, transactions: merge(current.transactions, page.items) }
+              : current))
 
         // Swallowed, and this is the second place in this file where that is right.
         // Nobody asked for this request: it is the application checking on itself,
@@ -254,6 +336,36 @@ function App() {
       controller.abort()
     }
   }, [list, session.status])
+
+  // #95. The next page, appended. The button that calls this lives in
+  // TransactionList and holds its own in-flight and failed state, the way
+  // CategoryCell and RowActions do -- so nothing is caught here, and the rejection
+  // is what the button needs to put a reason beside itself.
+  async function handleLoadMore() {
+    if (list.status !== 'ready' || list.nextCursor === null) {
+      return
+    }
+
+    const page = await listTransactions({ cursor: list.nextCursor })
+
+    setList((current) => {
+      // The cursor is compared and not merely the status, and it is the whole of
+      // what makes this safe to race. A poll or a write can have replaced the list
+      // while this request was in flight; appending to *that* list with rows fetched
+      // from *this* cursor would put the same transactions in twice, which is
+      // precisely the failure #95's third acceptance test is written about -- and it
+      // would look like a duplicate row in the database rather than a bug here.
+      if (current.status !== 'ready' || current.nextCursor !== list.nextCursor) {
+        return current
+      }
+
+      return {
+        status: 'ready',
+        transactions: [...current.transactions, ...page.items],
+        nextCursor: page.nextCursor,
+      }
+    })
+  }
 
   // Deliberately not caught here. The form needs the ApiError itself to put the
   // server's messages beside its own fields, and catching it in this function
@@ -324,13 +436,22 @@ function App() {
       // back on the screen underneath a newer request that is still arriving.
       current.status === 'ready'
         ? {
-            status: 'ready',
+            // Spread rather than rebuilt, so `nextCursor` survives. #95: a
+            // correction changes a row and never where the list stops, and
+            // rewriting the object without that field would quietly retract the
+            // "Load more" button on every write that does not refetch.
+            ...current,
             transactions: current.transactions.map((transaction) =>
               transaction.id === updated.id ? updated : transaction,
             ),
           }
         : current,
     )
+
+    // #95. The list is right without a refetch and the two panels above it are not:
+    // a correction moves money from one row of the summary to another and takes a
+    // transaction out of the backfill's count.
+    wrote()
   }
 
   // #94, and it takes handleChangeCategory's route rather than handleCreate's --
@@ -365,13 +486,19 @@ function App() {
       // stale table under a newer request that is still arriving.
       current.status === 'ready'
         ? {
-            status: 'ready',
+            // Spread rather than rebuilt, so `nextCursor` survives. #95: a
+            // correction changes a row and never where the list stops, and
+            // rewriting the object without that field would quietly retract the
+            // "Load more" button on every write that does not refetch.
+            ...current,
             transactions: current.transactions.map((transaction) =>
               transaction.id === updated.id ? updated : transaction,
             ),
           }
         : current,
     )
+
+    wrote()
   }
 
   // #94. Removed in place rather than by asking for the list again, which is the
@@ -391,13 +518,20 @@ function App() {
     setList((current) =>
       current.status === 'ready'
         ? {
-            status: 'ready',
+            // Spread, for the reason the two handlers above are: `nextCursor` is
+            // part of this state now and a delete does not move it. The row that
+            // goes is above the boundary, so the boundary is unchanged -- what it
+            // costs is that the page is one row shorter until the next reload, which
+            // is what removing a row from a list looks like.
+            ...current,
             transactions: current.transactions.filter(
               (transaction) => transaction.id !== id,
             ),
           }
         : current,
     )
+
+    wrote()
   }
 
   async function handleSignOut() {
@@ -493,26 +627,36 @@ function App() {
             with no category. It renders nothing when there is nothing to ask about,
             so the ordinary screen -- everything categorised -- is unchanged by it.
 
-            It is given the same array the list is about to draw rather than a fetch
-            of its own, which is #68's argument arriving at a second component: the
-            count on the button and the blanks in the table below it cannot disagree,
-            because they are the same rows counted twice.
+            **It counted the loaded array until #95 and now asks the server**, which
+            is the trap paging springs on it: a loaded page is not the table, so the
+            button would have offered the fifty rows on screen while the POST marked
+            every uncategorised row there is. A wrong total on a screen is a wrong
+            total; this one is a bill.
+
+            What that gives up is the property #68 gained by handing it the same
+            rows: the count and the blanks in the table below it were two counts of
+            one array and could not disagree. They are two queries now, made a
+            moment apart.
 
             `reload` rather than a handler of its own, for the reason ImportForm gets
             it: the queued rows have to come back carrying `categoryPending`, and the
             poll above starts on its own once anything on screen is waiting.
           */}
           {list.status === 'ready' && (
-            <BackfillCategories transactions={list.transactions} onBackfilled={reload} />
+            <BackfillCategories version={writes} onBackfilled={reload} />
           )}
 
           {/*
-            #68. Between the import and the list, and rendered off the very array
-            the list is about to draw rather than off a fetch of its own -- which
-            is what makes the totals and the rows below them incapable of
-            disagreeing. It is also why there is nothing to show while the list is
-            loading or has failed: the component underneath already says both of
-            those things, once.
+            #68. Between the import and the list. It summed the very array the list
+            was about to draw until #95, which made the totals and the rows below
+            them incapable of disagreeing -- and #68's own text named the day that
+            would end: a paged client can only add up what it happens to hold. So
+            it is a `GROUP BY` on the server now, and the two can disagree for the
+            few milliseconds between two requests.
+
+            It still shows nothing while its own request is in flight or after it
+            fails, for the reason it never had those states: the list underneath
+            says both of those things once, with a retry button.
 
             The second half of the condition is about a screen rather than about
             the data. An empty *month* is a real state and MonthSummary renders it
@@ -523,12 +667,13 @@ function App() {
             only one of them tells the reader what to do about it.
           */}
           {list.status === 'ready' && list.transactions.length > 0 && (
-            <MonthSummary transactions={list.transactions} />
+            <MonthSummary version={writes} />
           )}
 
           <TransactionList
             state={list}
             onRetry={reload}
+            onLoadMore={handleLoadMore}
             categories={categories}
             onChangeCategory={handleChangeCategory}
             onEditTransaction={handleEditTransaction}
