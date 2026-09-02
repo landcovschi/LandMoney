@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { getMe, logout, type Me } from './api/auth'
 import {
   createTransaction,
+  deleteTransaction,
   listCategories,
   listTransactions,
   updateCategory,
+  updateTransaction,
 } from './api/transactions'
-import type { NewTransaction } from './api/types'
+import type { NewTransaction, UpdateTransaction } from './api/types'
 import { BackfillCategories } from './components/BackfillCategories'
 import { ExportLabelled } from './components/ExportLabelled'
 import { ImportForm } from './components/ImportForm'
@@ -331,6 +333,73 @@ function App() {
     )
   }
 
+  // #94, and it takes handleChangeCategory's route rather than handleCreate's --
+  // with one exception that the sort order forces.
+  //
+  // A correction to the description, the amount or the currency cannot move the
+  // row: the order is (OccurredAt desc, CreatedAt desc) and neither of those is
+  // one of them, so replacing the row in place is not a guess about where the
+  // server would have put it. **A correction to the date is exactly the case that
+  // is**, so it asks for the list again. Sorting client-side would mean writing
+  // the server's comparator a second time in another language, which is the
+  // trade handleCreate already refused.
+  //
+  // The cheap test for it is the response rather than what was sent: if the
+  // stored date differs from the one the row had, the row has moved.
+  async function handleEditTransaction(id: string, edited: UpdateTransaction) {
+    const before = list.status === 'ready'
+      ? list.transactions.find((transaction) => transaction.id === id)
+      : undefined
+
+    const updated = await updateTransaction(id, edited)
+
+    if (before && before.occurredAt !== updated.occurredAt) {
+      reload()
+      return
+    }
+
+    setList((current) =>
+      // The status is checked rather than assumed, for the reason
+      // handleChangeCategory checks it: the list can have gone back to 'loading'
+      // while this request was in flight, and writing rows into that state puts a
+      // stale table under a newer request that is still arriving.
+      current.status === 'ready'
+        ? {
+            status: 'ready',
+            transactions: current.transactions.map((transaction) =>
+              transaction.id === updated.id ? updated : transaction,
+            ),
+          }
+        : current,
+    )
+  }
+
+  // #94. Removed in place rather than by asking for the list again, which is the
+  // same argument as the correction above: taking one row out of an ordered list
+  // cannot reorder the rest, so there is nothing to guess.
+  //
+  // It matters more here than for a correction. A delete is confirmed, so the
+  // reader is looking straight at the row when it goes -- and blanking the whole
+  // table to "Loading..." at that moment answers "did that work?" with a spinner
+  // and then redraws everything they were reading.
+  //
+  // Nothing is caught: RowActions needs the rejection to keep the row on screen
+  // and put the reason beside it.
+  async function handleDeleteTransaction(id: string) {
+    await deleteTransaction(id)
+
+    setList((current) =>
+      current.status === 'ready'
+        ? {
+            status: 'ready',
+            transactions: current.transactions.filter(
+              (transaction) => transaction.id !== id,
+            ),
+          }
+        : current,
+    )
+  }
+
   async function handleSignOut() {
     await logout()
 
@@ -462,6 +531,8 @@ function App() {
             onRetry={reload}
             categories={categories}
             onChangeCategory={handleChangeCategory}
+            onEditTransaction={handleEditTransaction}
+            onDeleteTransaction={handleDeleteTransaction}
           />
         </>
       )}

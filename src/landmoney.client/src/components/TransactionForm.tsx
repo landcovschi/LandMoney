@@ -2,24 +2,12 @@ import { useState, type FormEvent } from 'react'
 import { useCategorySuggestion } from '../hooks/useCategorySuggestion'
 import { ApiError } from '../api/transactions'
 import type { FieldErrors, NewTransaction } from '../api/types'
-import { FieldMessages } from './FieldMessages'
 import { SourceTag } from './SourceTag'
-
-// The three codes the entity's own documentation names. A <select> rather than
-// a text input because the server validates the *shape* of a currency and not
-// the code: "^[A-Za-z]{3}$" catches "EU" and accepts "XYZ" without a murmur. A
-// list refuses the typo before it can be made.
-//
-// What that gives up is every other currency -- spending in RON or GBP cannot
-// be entered until this array grows. The right trade at one user with three
-// currencies, and the wrong one the day it is not; the fix then is a list
-// served by the API, not a longer array here.
-const CURRENCIES = ['EUR', 'MDL', 'USD']
-
-// The fields this form has somewhere to put a message. Anything the server
-// files under another key is shown at the top instead of being dropped -- see
-// where this is used.
-const OWN_FIELDS = new Set(['occurredAt', 'amount', 'currency', 'description'])
+import { CURRENCIES, unattachedMessages } from '../fields'
+import {
+  TransactionFields,
+  type TransactionFieldValues,
+} from './TransactionFields'
 
 /** Today, in the timezone the user is actually in, as "2026-08-19". */
 // Not `new Date().toISOString().slice(0, 10)`, which is today in *UTC*: at
@@ -47,27 +35,22 @@ interface TransactionFormProps {
   onSubmit: (transaction: NewTransaction) => Promise<void>
 }
 
-// What this form validates and what it deliberately leaves alone:
-//
-// `required`, `step` and `maxLength` describe the *shape* of a value -- a
-// number with at most two decimal places, a description that exists at all.
-// They are written here because the browser enforces them before a request is
-// made, which is faster than a round trip and costs nothing to keep.
-//
-// The *bounds* are not written here: five years back, one day ahead, the
-// ceiling of numeric(18,2). Those are policy, they live on
-// CreateTransactionRequest, and copying them into TypeScript would make two
-// numbers that have to change together and will not. The server refuses them
-// and the sentence it sends is shown beside the field -- which is the whole
-// reason ValidationFilter camelCases its keys in the first place.
+// The four inputs moved to TransactionFields in #94, when the edit form needed
+// the same four and a second copy of them would have been two sets of rules that
+// drift. What stayed here is everything that is about *adding*: the empty start,
+// the clearing, the suggestion, and the button.
 export function TransactionForm({ onSubmit }: TransactionFormProps) {
-  // Four useStates rather than one object holding four fields. The object needs
-  // a generic update helper before it saves a line, and the helper is where the
-  // typing gets interesting for no benefit at this size. #6 asked for boring.
-  const [occurredAt, setOccurredAt] = useState(today)
-  const [amount, setAmount] = useState('')
-  const [currency, setCurrency] = useState(CURRENCIES[0])
-  const [description, setDescription] = useState('')
+  // One object rather than the four useStates that were here, and the reason is
+  // the shared component rather than a change of mind: TransactionFields takes
+  // and returns the whole set, so four setters would be four lines assembling an
+  // object on every keystroke. #6's "boring" still applies -- there is no generic
+  // update helper, only a spread of four known keys, and it lives in one place.
+  const [values, setValues] = useState<TransactionFieldValues>({
+    occurredAt: today(),
+    amount: '',
+    currency: CURRENCIES[0],
+    description: '',
+  })
 
   // #67. What the categorizer would say about what is being typed, asked once the
   // typing stops. It is display only: nothing here is sent with the transaction and
@@ -75,7 +58,11 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
   // category is decided on the server when the transaction is created, from the
   // same three values -- see the endpoint for why it is asked twice rather than
   // sent back from here.
-  const suggestion = useCategorySuggestion(description, amount, currency)
+  const suggestion = useCategorySuggestion(
+    values.description,
+    values.amount,
+    values.currency,
+  )
 
   const [submitting, setSubmitting] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
@@ -94,17 +81,17 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
 
     try {
       await onSubmit({
-        occurredAt,
+        occurredAt: values.occurredAt,
 
         // The amount is held as text and becomes a number exactly once, here.
         // `Number` and not `parseFloat`: parseFloat reads as far as it
         // understands and silently ignores the rest, so "12abc" becomes 12,
         // where Number returns NaN. The input's own `required` and `step` have
         // already refused both, which is why this can be the only guard.
-        amount: Number(amount),
+        amount: Number(values.amount),
 
-        currency,
-        description,
+        currency: values.currency,
+        description: values.description,
       })
 
       // Cleared on success, and only these two. The date and the currency stay
@@ -112,8 +99,7 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
       // and in the same currency, and re-picking both every time is the small
       // tax that stops an app being used weekly -- which is the habit slice 4's
       // evals depend on existing.
-      setAmount('')
-      setDescription('')
+      setValues((current) => ({ ...current, amount: '', description: '' }))
     } catch (error) {
       if (error instanceof ApiError) {
         setFieldErrors(error.fieldErrors)
@@ -137,16 +123,9 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
     }
   }
 
-  // Messages the server filed under a key this form has no input for: the empty
-  // key it uses for a rule about the object as a whole, or a field added to the
-  // API and not yet added here. Shown at the top rather than dropped -- a 400
-  // that produces no visible message is indistinguishable from a button that
-  // did nothing.
-  const unattached = Object.entries(fieldErrors)
-    .filter(([field]) => !OWN_FIELDS.has(field))
-    .flatMap(([, messages]) => messages ?? [])
-
-  const bannerMessages = formError ? [formError] : unattached
+  const bannerMessages = formError
+    ? [formError]
+    : unattachedMessages(fieldErrors)
 
   return (
     // noValidate is not set, so the browser's own validation runs first and
@@ -167,165 +146,75 @@ export function TransactionForm({ onSubmit }: TransactionFormProps) {
         </p>
       )}
 
-      <div className="fields">
-        <div className="field field-date">
-          <label htmlFor="occurredAt">Date</label>
-          <input
-            id="occurredAt"
-            name="occurredAt"
-            type="date"
-            required
-            value={occurredAt}
-            onChange={(event) => setOccurredAt(event.target.value)}
-            aria-invalid={fieldErrors.occurredAt ? true : undefined}
-            aria-describedby={
-              fieldErrors.occurredAt ? 'occurredAt-error' : undefined
-            }
-          />
-          <FieldMessages
-            id="occurredAt-error"
-            messages={fieldErrors.occurredAt}
-          />
-        </div>
+      <TransactionFields
+        idPrefix="add"
+        values={values}
+        onChange={setValues}
+        fieldErrors={fieldErrors}
+      >
+        {/*
+          #67. The one visibly intelligent thing in this application, said out
+          loud before the transaction exists rather than after it is a row in a
+          table.
 
-        <div className="field field-amount">
-          <label htmlFor="amount">Amount</label>
-          <input
-            id="amount"
-            name="amount"
-            type="number"
-            inputMode="decimal"
-            // step is client-side scale validation for free, and it is the same
-            // rule DecimalScaleAttribute enforces on the server: two decimal
-            // places, because numeric(18,2) rounds a third one away in silence.
-            step="0.01"
-            min="0.01"
-            required
-            // Held as a string, never as a number. A half-typed "12." is not a
-            // number yet, and storing it as one would rewrite the field under
-            // the cursor while someone is still typing into it.
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-            aria-invalid={fieldErrors.amount ? true : undefined}
-            aria-describedby={fieldErrors.amount ? 'amount-error' : undefined}
-          />
-          {/*
-            No `max` attribute. The column's ceiling is 9999999999999999.99, and
-            that number does not survive being written in JavaScript: it is past
-            2^53, so the browser would parse the attribute as 1e16 and enforce a
-            limit slightly different from the server's. An absent rule beats a
-            lying one -- the server still refuses the amount, and says so here.
-          */}
-          <FieldMessages id="amount-error" messages={fieldErrors.amount} />
-        </div>
+          role="status" and not role="alert": it is announced politely, after
+          whatever is being typed, because it is not an error and interrupting
+          somebody mid-word to tell them about a guess is worse than saying
+          nothing. Deliberately not tied to the input with aria-describedby,
+          which would read it out again on every focus.
 
-        <div className="field field-currency">
-          <label htmlFor="currency">Currency</label>
-          <select
-            id="currency"
-            name="currency"
-            required
-            value={currency}
-            onChange={(event) => setCurrency(event.target.value)}
-            aria-invalid={fieldErrors.currency ? true : undefined}
-            aria-describedby={
-              fieldErrors.currency ? 'currency-error' : undefined
-            }
-          >
-            {CURRENCIES.map((code) => (
-              <option key={code} value={code}>
-                {code}
-              </option>
-            ))}
-          </select>
-          <FieldMessages id="currency-error" messages={fieldErrors.currency} />
-        </div>
+          **The paragraph is always in the document and only its contents come
+          and go**, which looks like an empty element for nothing and is the
+          whole of whether the announcement happens. A live region has to exist
+          before the text appears in it -- a region and its content inserted in
+          one go is announced by some screen readers and silently missed by
+          others, which is the same failure as having no region at all and is
+          harder to notice. App.css collapses its margin while it is empty.
 
-        <div className="field field-description">
-          <label htmlFor="description">Description</label>
-          <input
-            id="description"
-            name="description"
-            type="text"
-            required
-            // 500 to match [StringLength(500)] on the request. This one is
-            // copied on purpose where the bounds above were not: maxLength
-            // stops the typing rather than reporting it afterwards, and a
-            // description silently truncated by a 400 after four hundred
-            // characters is a genuinely annoying way to find out.
-            maxLength={500}
-            placeholder="Coffee and a croissant"
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            aria-invalid={fieldErrors.description ? true : undefined}
-            aria-describedby={
-              fieldErrors.description ? 'description-error' : undefined
-            }
-          />
-          <FieldMessages
-            id="description-error"
-            messages={fieldErrors.description}
-          />
+          Nothing is rendered while a request is in flight, and nothing at all is
+          rendered when one fails -- the reasoning is on SuggestionState. The
+          previous suggestion stays visible while a newer one is on the way,
+          which is the one place this shows something a beat out of date: it is
+          about the description as it was 400 ms ago. Clearing it per keystroke
+          was the alternative and it flickers, and the answer that matters is the
+          server's at save time rather than this one.
+
+          It is passed as a child of TransactionFields rather than living there,
+          because the edit form must not show one: #67's suggestion is about a
+          transaction that does not exist yet, and offering one for a row whose
+          category is already on screen is advice about a decision already made.
+        */}
+        <p className="suggestion" role="status">
+          {suggestion.status === 'suggested' && (
+            <>
+              <span className="suggestion-label">Suggested</span>
+              <span className="tag">{suggestion.category}</span>
+              <SourceTag source={suggestion.source} />
+            </>
+          )}
 
           {/*
-            #67. The one visibly intelligent thing in this application, said out
-            loud before the transaction exists rather than after it is a row in a
-            table.
-
-            role="status" and not role="alert": it is announced politely, after
-            whatever is being typed, because it is not an error and interrupting
-            somebody mid-word to tell them about a guess is worse than saying
-            nothing. Deliberately not tied to the input with aria-describedby,
-            which would read it out again on every focus.
-
-            **The paragraph is always in the document and only its contents come
-            and go**, which looks like an empty element for nothing and is the
-            whole of whether the announcement happens. A live region has to exist
-            before the text appears in it -- a region and its content inserted in
-            one go is announced by some screen readers and silently missed by
-            others, which is the same failure as having no region at all and is
-            harder to notice. App.css collapses its margin while it is empty.
-
-            Nothing is rendered while a request is in flight, and nothing at all is
-            rendered when one fails -- the reasoning is on SuggestionState. The
-            previous suggestion stays visible while a newer one is on the way,
-            which is the one place this shows something a beat out of date: it is
-            about the description as it was 400 ms ago. Clearing it per keystroke
-            was the alternative and it flickers, and the answer that matters is the
-            server's at save time rather than this one.
+            "No idea" is a normal answer -- the rules decline on roughly a third
+            of the labelled set -- so it is shown rather than treated as nothing
+            having happened. The badge names who declined, which is the
+            difference between a baseline that does not know this shop and a
+            model that does not.
           */}
-          <p className="suggestion" role="status">
-            {suggestion.status === 'suggested' && (
-              <>
-                <span className="suggestion-label">Suggested</span>
-                <span className="tag">{suggestion.category}</span>
-                <SourceTag source={suggestion.source} />
-              </>
-            )}
+          {suggestion.status === 'unknown' && (
+            <>
+              <span className="suggestion-label">No suggestion</span>
+              <span className="tag tag-empty">Uncategorised</span>
+              <SourceTag source={suggestion.source} />
+            </>
+          )}
 
-            {/*
-              "No idea" is a normal answer -- the rules decline on roughly a third
-              of the labelled set -- so it is shown rather than treated as nothing
-              having happened. The badge names who declined, which is the
-              difference between a baseline that does not know this shop and a
-              model that does not.
-            */}
-            {suggestion.status === 'unknown' && (
-              <>
-                <span className="suggestion-label">No suggestion</span>
-                <span className="tag tag-empty">Uncategorised</span>
-                <SourceTag source={suggestion.source} />
-              </>
-            )}
-
-            {suggestion.status !== 'none' && (
-              <span className="suggestion-note">
-                A guess, applied when you save. You can change it in the list.
-              </span>
-            )}
-          </p>
-        </div>
-      </div>
+          {suggestion.status !== 'none' && (
+            <span className="suggestion-note">
+              A guess, applied when you save. You can change it in the list.
+            </span>
+          )}
+        </p>
+      </TransactionFields>
 
       <button type="submit" disabled={submitting} aria-busy={submitting}>
         {submitting ? 'Adding...' : 'Add transaction'}

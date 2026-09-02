@@ -7,6 +7,7 @@ import type {
   ImportResult,
   NewTransaction,
   Transaction,
+  UpdateTransaction,
 } from './types'
 
 // ApiError is re-exported rather than moved out of sight: every component that
@@ -108,6 +109,60 @@ export function updateCategory(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     },
+    signal,
+  )
+}
+
+/** Replaces the four fields a person typed, and returns the row the server stored. #94. */
+// PUT with the same body a create takes, which is the client half of the C#
+// decision: `UpdateTransactionRequest` derives from `CreateTransactionRequest`, so
+// there is exactly one set of rules and this sends exactly the same four fields.
+// The type alias below says so; a second interface would be the drift that
+// inheritance exists to prevent, written in the other language.
+//
+// The returned row is the point, the same way it is for `updateCategory`: it lets
+// the caller put the corrected row on screen without dropping the whole table to
+// "Loading...". It may come back with no category at all -- an edit to the
+// description, the amount or the currency clears the old prediction and re-queues
+// the row -- which is why the response is used rather than the values that were
+// sent.
+export function updateTransaction(
+  id: string,
+  transaction: UpdateTransaction,
+  signal?: AbortSignal,
+): Promise<Transaction> {
+  return request<Transaction>(
+    `${TRANSACTIONS_URL}/${encodeURIComponent(id)}`,
+    {
+      method: 'PUT',
+
+      // The same header the POST and the PATCH need, and for the same two
+      // reasons: minimal APIs bind a JSON body only when the request says it is
+      // sending one, and a content type no cross-site form can produce is one of
+      // the two CSRF locks AuthenticationSetup.cs records.
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(transaction),
+    },
+    signal,
+  )
+}
+
+/** Removes one transaction. #94. */
+// Answers 204, so there is nothing to read: `request` returns undefined for a
+// body-less success, which is the branch #52 added for `/api/auth/logout`.
+//
+// A 404 arrives as an ApiError like any other refusal, and it is the answer for
+// both "there is no such row" and "it is not yours" -- the server cannot tell the
+// caller which without confirming that somebody else's id exists. A second delete
+// of the same row gets it too, which is the honest reading rather than a wart: the
+// row is gone either way.
+export function deleteTransaction(
+  id: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return request<void>(
+    `${TRANSACTIONS_URL}/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
     signal,
   )
 }

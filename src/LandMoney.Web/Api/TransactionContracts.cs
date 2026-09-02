@@ -30,7 +30,9 @@ namespace LandMoney.Web.Api;
 // side by side as one list. What lost: [Display] on OccurredAt alone -- the
 // smaller diff, and it leaves a rule that applies to one property with no way to
 // tell whether the other three were considered or forgotten.
-public sealed record CreateTransactionRequest
+// Not sealed as of #94, and the one line below is the whole reason. See
+// UpdateTransactionRequest.
+public record CreateTransactionRequest
 {
     /// <summary>How far ahead of today an entry may be dated. See the field comment.</summary>
     // One day, not zero. The comparison happens against UTC today, while
@@ -142,6 +144,40 @@ public sealed record CreateTransactionRequest
     [StringLength(500, MinimumLength = 1)]
     public required string Description { get; init; }
 }
+
+/// <summary>What a client is allowed to send when correcting a whole transaction. #94.</summary>
+// **An empty derived record, and the emptiness is the point.** #94's fourth trap:
+// "the rules are CreateTransactionRequest's and they are run through one Validator
+// call -- any new path must go through the same one, or the two ways into this
+// table drift". Inheritance is the strongest available form of that. There is no
+// rule to copy, so there is no rule to forget: a [Range] added above is on this
+// type before anyone remembers there is a second way in, and the compiler is what
+// says so rather than a test.
+//
+// The same call was already made one hop away and in another language -- #93's
+// `BatchItem` inherits from `CategorizeRequest` in contracts.py "so the per-row
+// shape is preserved by construction". This is that, in C#.
+//
+// **What lost: taking CreateTransactionRequest directly on the PUT.** It costs
+// nothing at all and is what the type system would be perfectly happy with, since
+// the fields are identical. It loses on the handler signature and on the
+// TypeScript this becomes: a method called UpdateAsync whose parameter is named
+// "create" reads as a copy-paste that nobody finished, and the reader then has to
+// find out whether it was deliberate.
+//
+// **What it costs, said out loud, because it is the mirror image of what it
+// buys:** a field added to CreateTransactionRequest becomes editable here without
+// anyone deciding that it should be. Today that is the right default -- all four
+// fields are the client's and all four are things somebody can mistype -- and the
+// day it stops being right, this record grows a `new` property or stops
+// inheriting. Taking the base type directly has exactly the same exposure and no
+// place to write the decision down.
+//
+// **CategorySuggestionRequest is deliberately not derived from either**, and the
+// reason is written on it: it has no date, because a field an endpoint does not
+// read is a field a caller can be refused for getting wrong. Inheriting would
+// have given it one.
+public sealed record UpdateTransactionRequest : CreateTransactionRequest;
 
 /// <summary>One transaction as the API reports it.</summary>
 // Amount travels as a JSON number (12.34), decided in #3. Not luck: JSON numbers
