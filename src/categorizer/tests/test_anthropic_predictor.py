@@ -350,6 +350,26 @@ def test_an_empty_effort_is_left_out_of_the_request_rather_than_sent_empty():
     assert "effort" not in sent["output_config"]
 
 
+def test_the_sentinel_is_the_empty_string_because_that_is_what_an_unset_variable_is():
+    """#96, and it is what a mutation asked for.
+
+    Every other test names `NO_EFFORT` symbolically, so changing its *value* changes
+    both sides of the comparison at once and kills nothing. The value is load-bearing
+    on its own: `CATEGORIZER_EFFORT=` in a shell, and an environment variable set to
+    nothing, both arrive as the empty string. A sentinel of "none" would leave that
+    arriving as a literal effort level, and every request would be a 400 on every
+    model -- including the Opus runs, which do take the parameter.
+
+    It lives here rather than in `evals/test_score.py`, where it was written first,
+    because that file runs on the runner's own python and is stdlib-only by decision:
+    importing this module reaches `contracts`, which imports pydantic. CI caught it,
+    which is the one place that property is ever checked.
+    """
+    from categorizer.anthropic_predictor import NO_EFFORT
+
+    assert NO_EFFORT == ""
+
+
 def test_the_schema_is_sent_whether_or_not_there_is_an_effort():
     """The half of `output_config` that is never optional. #96.
 

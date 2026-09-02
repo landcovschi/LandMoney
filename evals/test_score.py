@@ -926,19 +926,12 @@ class SpendTests(unittest.TestCase):
         finally:
             logger.setLevel(previous)
 
-    def test_the_sentinel_is_the_empty_string_because_that_is_what_an_unset_variable_is(self):
-        """#96, and it is what a mutation asked for.
-
-        Every other test here names `NO_EFFORT` symbolically, so changing its *value*
-        changes both sides of the comparison at once and kills nothing. The value is
-        load-bearing on its own: `CATEGORIZER_EFFORT=` in a shell, and an env var
-        set to nothing, both arrive as the empty string. A sentinel of "none" would
-        leave that arriving as a literal effort level, and every request would be a
-        400 on every model -- including the Opus runs, which do take the parameter.
-        """
-        from categorizer.anthropic_predictor import NO_EFFORT
-
-        self.assertEqual("", NO_EFFORT)
+    # **The `NO_EFFORT` value is asserted in the categorizer's own suite and not
+    # here, and CI is what said so.** This file may import `categorizer.categories`
+    # and `categorizer.rules` because those are stdlib-only; `anthropic_predictor`
+    # reaches `contracts`, which imports pydantic. `evals/` runs on the runner's
+    # own python precisely so that an accidental dependency is caught -- CLAUDE.md
+    # calls this "the only place that property is ever checked", and it checked it.
 
     def test_an_unpriced_run_says_which_variables_are_missing(self):
         """A table row with no price in it is the commonest way #96's table ends up

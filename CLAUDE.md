@@ -4292,6 +4292,28 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   calls were made**, so the rules path prints a score and no cost block rather than a
   row of zeroes inviting a comparison between a substring scan and a model on price.
 
+  **CI caught a stdlib-only violation this machine structurally cannot catch, and
+  that is the half of #96 worth keeping.** The `NO_EFFORT` test above was written in
+  `evals/test_score.py`, where it imports `categorizer.anthropic_predictor` -- which
+  reaches `contracts`, which imports pydantic. `evals/` runs on the runner's own
+  python precisely so an accidental dependency is caught, and CLAUDE.md already
+  called that "the only place that property is ever checked". It was: green here,
+  `ModuleNotFoundError: No module named 'pydantic'` there.
+
+  **It is green here for a reason no care would have fixed: the bare `python` on
+  this machine can import pydantic**, so a local run cannot fail the way the runner
+  does. Same structural shape as #57's green-build / red-deploy -- the two
+  environments differ, and no amount of attention in the one closes it.
+
+  Two things that stop it recurring. The test moved to the categorizer's own suite,
+  which runs under uv and may import anything the service depends on. And the
+  reproduction is a five-line `sys.meta_path` blocker that makes `pydantic`,
+  `anthropic` and `redis` unimportable and then runs the eval tests -- 63 pass under
+  it, which is the runner's condition checked here rather than assumed. Worth
+  knowing that `score.py` was already right about this: it imports the adapter
+  *inside* `build_predictor` rather than at module scope, so the import only happens
+  on `--predictor model`, which CI never runs.
+
   **`baseline.json` is untouched and `--check` still passes**, which was verified
   rather than assumed: the rules still score 56.1% / 56.6% over 53 rows after the
   scorer grew a measurement path. The model must never run on a pull request -- one
