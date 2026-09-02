@@ -267,6 +267,22 @@ function App() {
     // but is the right moment to start from a full budget.
     if (pendingLastSeen.current === null || pending < pendingLastSeen.current) {
       pollsLeft.current = MAX_IDLE_POLLS
+
+      // #95. **A category arriving is a write this application did not make**, and
+      // it moves money out of the summary's uncategorised row into a named one.
+      // Before paging, the summary read the very array the poll had just replaced
+      // and followed along for nothing; it is a query of its own now, so something
+      // has to tell it. Without this the breakdown stays as it was until the next
+      // create, import, edit or correction -- correct totals, wrong rows, and
+      // nothing on the screen saying which.
+      //
+      // Only on a *decrease*, and the `!== null` above is what makes that the
+      // reading: the first look is the list arriving rather than progress, and
+      // `reload` announced that already. A rise means new uncategorised rows, which
+      // is a write that has announced itself by definition.
+      if (pendingLastSeen.current !== null) {
+        wrote()
+      }
     }
 
     pendingLastSeen.current = pending

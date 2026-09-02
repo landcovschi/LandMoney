@@ -43,15 +43,18 @@ public static class MonthRange
         first = default;
         next = default;
 
-        // Length is checked before the parse rather than left to it, because
-        // "yyyy-MM" is a *minimum* width pattern: DateTime.TryParseExact accepts a
-        // one-digit month against "MM" in some cultures, so "2026-8" would parse and
-        // then be echoed back in a shape the client never sent.
-        if (month is not { Length: 7 })
-        {
-            return false;
-        }
-
+        // **There is no length check here, and there was one until a mutation said it
+        // caught nothing.** It was written on the belief that "yyyy-MM" is a minimum
+        // width pattern -- that TryParseExact would accept "2026-8" against "MM" and
+        // the endpoint would answer with August for a month the client never sent.
+        // Deleting the guard killed no test, and the reason is that the belief was
+        // wrong: "MM" wants exactly two digits under InvariantCulture, so "2026-8",
+        // "2026-013" and "2026" are all refused by the parse itself. A guard that
+        // catches nothing is worse than no guard, because it is read as protection.
+        //
+        // The null case goes the same way: TryParseExact answers false for null
+        // rather than throwing, so an absent month is refused without being asked
+        // about separately.
         if (!DateTime.TryParseExact(
                 month, Format, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
         {

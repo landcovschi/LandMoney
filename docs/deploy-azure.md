@@ -427,10 +427,16 @@ The random middle label is assigned per environment and cannot be chosen.
 | Check                                   | Result                                    |
 | --------------------------------------- | ----------------------------------------- |
 | `GET /`                                 | 200, `Cache-Control: no-cache`            |
-| `GET /api/transactions`                 | 200, `[]` before any data                 |
+| `GET /api/transactions`                 | 200, `{"items":[],"nextCursor":null}`      |
 | A transaction added through the form    | appears in the list                       |
 | `az containerapp revision restart`      | `"Restart succeeded"`                     |
 | `GET /api/transactions` after restart   | both rows still there                     |
+
+That row read `200, []` until #95 paged the list, and it is corrected out loud
+rather than quietly because the shape of that response is the one thing a
+deployment check reads without looking at it: an envelope with an empty `items`
+and a null `nextCursor` is an empty table, and a bare `[]` coming back from a
+deployed image now means the image predates the change.
 
 The `no-cache` on `/` is worth checking rather than assuming: `MapFallbackToFile`
 builds its own `StaticFileMiddleware`, so `/` and `/index.html` disagree unless

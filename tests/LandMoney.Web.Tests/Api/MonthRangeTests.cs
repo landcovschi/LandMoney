@@ -61,6 +61,11 @@ public class MonthRangeTests
     // ask about. The unpadded "2026-8" is the one worth naming: it is what a client
     // that forgot padStart sends, and a parse that accepted it would answer with
     // August while the screen's heading said something else.
+    //
+    // **It is refused by TryParseExact and not by any check of ours**, which a
+    // mutation established rather than a reading: deleting the length guard that used
+    // to sit above the parse killed nothing here, because "MM" wants exactly two
+    // digits. The guard is gone and this theory is what now holds the behaviour.
     [Theory]
     [InlineData(null)]
     [InlineData("")]
