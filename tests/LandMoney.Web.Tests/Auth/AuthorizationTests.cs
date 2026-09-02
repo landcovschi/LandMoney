@@ -161,6 +161,50 @@ public class AuthorizationTests
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    // #94. The correction endpoint is inside the group RequireAuthorization is
+    // applied to, and this is the assertion that it stayed there. The body is one
+    // that would be stored if it reached the handler, so a 200 here would mean an
+    // anonymous caller had rewritten somebody's spending.
+    //
+    // The id is one that cannot exist, and a 404 would be as bad as a 200 for the
+    // reason the category correction's test records: it would tell an anonymous
+    // caller whether somebody else's transaction exists.
+    [Fact]
+    public async Task An_anonymous_correction_of_a_whole_transaction_is_refused()
+    {
+        using var app = TestApp.WithInviteCode();
+        using var client = app.CreateNonFollowingClient();
+
+        var response = await client.PutAsJsonAsync(
+            $"/api/transactions/{Guid.NewGuid()}",
+            new
+            {
+                occurredAt = "2026-09-01",
+                amount = 42.50m,
+                currency = "EUR",
+                description = "linella",
+            });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    // #94. The delete endpoint is inside the group RequireAuthorization is applied
+    // to, and this is the only route in this application that destroys data. There
+    // is no undo -- the row is gone from Postgres, deliberately, because a soft
+    // delete would keep blocking the import's duplicate detection -- so a DELETE
+    // written outside the group would be one guessed URL between somebody's year of
+    // history and nothing.
+    [Fact]
+    public async Task An_anonymous_delete_is_refused()
+    {
+        using var app = TestApp.WithInviteCode();
+        using var client = app.CreateNonFollowingClient();
+
+        var response = await client.DeleteAsync($"/api/transactions/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     // #67. The suggestion endpoint is inside the group RequireAuthorization is
     // applied to, and this is the assertion that it stayed there. It matters more
     // than the shape of the endpoint suggests: it is the one route in this

@@ -1,6 +1,9 @@
-import type { Transaction } from '../api/types'
+import { Fragment, useState } from 'react'
+import type { Transaction, UpdateTransaction } from '../api/types'
 import { formatAmount } from '../money'
 import { CategoryCell } from './CategoryCell'
+import { EditTransactionForm } from './EditTransactionForm'
+import { RowActions } from './RowActions'
 
 /**
  * What the list knows at a given moment.
@@ -34,6 +37,12 @@ interface TransactionListProps {
   // finished, and whether it worked, to decide what its own select shows -- so
   // this cannot be a fire-and-forget callback.
   onChangeCategory: (id: string, category: string | null) => Promise<void>
+
+  /** Stores a correction to the four typed fields. Resolves when the server has it. #94. */
+  onEditTransaction: (id: string, transaction: UpdateTransaction) => Promise<void>
+
+  /** Removes the row. Resolves when it is gone; rejects with the reason. #94. */
+  onDeleteTransaction: (id: string) => Promise<void>
 }
 
 export function TransactionList({
@@ -41,7 +50,24 @@ export function TransactionList({
   onRetry,
   categories,
   onChangeCategory,
+  onEditTransaction,
+  onDeleteTransaction,
 }: TransactionListProps) {
+  // Which row's edit form is open, or none. #94.
+  //
+  // One id rather than a set, so opening a second form closes the first: two
+  // half-typed corrections on one screen is a way to save the wrong one, and
+  // there is no reason to be editing two rows at once.
+  //
+  // It lives here rather than inside each row because that is the only place that
+  // can enforce the "one at a time" above. The delete's own confirmation is the
+  // opposite call and lives inside RowActions -- it is about one row and nothing
+  // outside that row needs to know about it.
+  //
+  // The id can go stale, and harmlessly: a row deleted or filtered away while its
+  // form is open leaves an id matching nothing, which renders nothing. Clearing it
+  // on every list change would also close the form on every two-second poll.
+  const [editing, setEditing] = useState<string | null>(null)
   if (state.status === 'loading') {
     return (
       <p className="list-status" role="status">
@@ -114,16 +140,34 @@ export function TransactionList({
           <th scope="col" role="columnheader" className="numeric">
             Amount
           </th>
+
+          {/*
+            #94. A header with a word in it rather than an empty cell, because
+            scope="col" governs cells and a column of controls with no name is
+            announced as a column of unlabelled buttons. It is visually there and
+            it is short on purpose -- the buttons underneath say what they do.
+          */}
+          <th scope="col" role="columnheader">
+            Actions
+          </th>
         </tr>
       </thead>
 
       <tbody role="rowgroup">
         {state.transactions.map((transaction) => (
-          // key is the server's id, not the array index. React uses it to
-          // decide which row is which between renders, and an index says every
-          // row changed the moment one is inserted at the top -- which is
-          // exactly what adding a transaction does here.
-          <tr key={transaction.id} role="row">
+          // #94. A Fragment because one transaction is now up to two <tr>s -- the
+          // row, and the edit form under it when it is open. The key moves here
+          // from the <tr> for the same reason it was there: React needs one key
+          // per item in the map, and it is still the server's id rather than the
+          // array index.
+          //
+          // Two rows rather than one row that turns into a form. Turning it into
+          // one keeps the table narrow and puts four inputs and their messages
+          // into cells whose widths were chosen for a date and an amount -- and
+          // on a phone, where App.css draws each row as a grid, into a layout
+          // that has nowhere to put them. A second row is a plain block in both.
+          <Fragment key={transaction.id}>
+          <tr role="row">
             <td role="cell">
               {/*
                 The date printed exactly as it arrived. It is already
@@ -174,7 +218,48 @@ export function TransactionList({
             <td role="cell" className="numeric">
               {formatAmount(transaction.amount, transaction.currency)}
             </td>
+
+            <td role="cell" className="actions">
+              <RowActions
+                description={transaction.description}
+                editing={editing === transaction.id}
+                onEdit={() => setEditing(transaction.id)}
+                onCancelEdit={() => setEditing(null)}
+                onDelete={() => onDeleteTransaction(transaction.id)}
+              />
+            </td>
           </tr>
+
+          {editing === transaction.id && (
+            // A row of its own, spanning the whole table. `role="row"` and
+            // `role="cell"` for the same reason every other one here carries
+            // them: below 640px App.css changes what these elements are painted
+            // as, and changing an element's display takes its implicit role with
+            // it.
+            //
+            // colSpan is the table's column count and is the one number in this
+            // file that has to be kept equal to something else -- the five <th>
+            // above. Getting it wrong does not break the layout in any way a
+            // browser reports; the form simply stops short of the last column.
+            <tr className="row-edit" role="row">
+              <td colSpan={5} role="cell">
+                <EditTransactionForm
+                  transaction={transaction}
+                  onSave={async (edited) => {
+                    await onEditTransaction(transaction.id, edited)
+
+                    // Closed only on success, which is what leaves a refused
+                    // change on the screen with the server's sentence beside the
+                    // field it is about. Closing in a `finally` would throw away
+                    // both the message and what was typed.
+                    setEditing(null)
+                  }}
+                  onCancel={() => setEditing(null)}
+                />
+              </td>
+            </tr>
+          )}
+          </Fragment>
         ))}
       </tbody>
 

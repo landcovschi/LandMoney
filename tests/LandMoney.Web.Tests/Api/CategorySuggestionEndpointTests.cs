@@ -1,14 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
-using System.Security.Claims;
-using System.Text.Encodings.Web;
 using LandMoney.Web.Categorizing;
 using LandMoney.Web.Tests.Auth;
-using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace LandMoney.Web.Tests.Api;
 
@@ -27,37 +21,11 @@ namespace LandMoney.Web.Tests.Api;
 // authentication is stubbed because the alternative is UserManager, which is
 // Postgres, which is the property CLAUDE.md defends -- these tests need no
 // database, no Docker and no network. What that costs is written down at the end of
-// the file.
+// the file. The authentication half moved to Auth/SignedIn.cs in #94, when the
+// write endpoints needed the same door.
 public class CategorySuggestionEndpointTests
 {
     private const string Path = "/api/transactions/category-suggestion";
-
-    /// <summary>Signs every request in, without a password or a database.</summary>
-    // The smallest handler that can succeed. It exists because the endpoint under
-    // test is inside a RequireAuthorization group and there is no other way in: a
-    // real sign-in needs SignInManager, which needs the user store, which needs
-    // Postgres.
-    //
-    // It is registered only by the factory below, so nothing in the application can
-    // reach it and no production path grows a scheme that trusts everyone.
-    private sealed class AlwaysSignedIn(
-        IOptionsMonitor<AuthenticationSchemeOptions> options,
-        ILoggerFactory logger,
-        UrlEncoder encoder)
-        : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
-    {
-        public const string Name = "Test";
-
-        protected override Task<AuthenticateResult> HandleAuthenticateAsync()
-        {
-            var identity = new ClaimsIdentity(
-                [new Claim(ClaimTypes.NameIdentifier, "test-owner"), new Claim(ClaimTypes.Name, "tester")],
-                Name);
-
-            return Task.FromResult(AuthenticateResult.Success(
-                new AuthenticationTicket(new ClaimsPrincipal(identity), Name)));
-        }
-    }
 
     private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
     {
@@ -73,20 +41,7 @@ public class CategorySuggestionEndpointTests
 
     private static TestApp SignedInApp(StubHandler? categorizer) => TestApp.With(services =>
     {
-        services.AddAuthentication().AddScheme<AuthenticationSchemeOptions, AlwaysSignedIn>(
-            AlwaysSignedIn.Name, configureOptions: null);
-
-        // PostConfigure rather than AddAuthentication(defaultScheme:), and the
-        // difference decides whether any of this works. Identity's AddIdentityCookies
-        // sets the default schemes through Configure, and so would that overload --
-        // so the two would race on registration order. PostConfigure runs after
-        // every Configure there is, whoever registered it.
-        services.PostConfigure<AuthenticationOptions>(options =>
-        {
-            options.DefaultAuthenticateScheme = AlwaysSignedIn.Name;
-            options.DefaultChallengeScheme = AlwaysSignedIn.Name;
-            options.DefaultScheme = AlwaysSignedIn.Name;
-        });
+        SignedIn.AddTo(services);
 
         if (categorizer is null)
         {

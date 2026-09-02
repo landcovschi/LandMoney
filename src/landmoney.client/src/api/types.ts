@@ -110,6 +110,25 @@ export interface NewTransaction {
   description: string
 }
 
+/** What `PUT /api/transactions/{id}` accepts: `UpdateTransactionRequest`. #94. */
+// An alias and not a second interface, which is the TypeScript half of the C#
+// decision: `UpdateTransactionRequest` is an empty record deriving from
+// `CreateTransactionRequest`, so the two requests carry the same four fields by
+// construction rather than by anybody keeping them equal. Writing the fields out
+// again here would put back exactly the drift that inheritance removed -- and it
+// would drift in the direction that is hardest to see, since a field this file
+// omits is simply never sent and the server reads it as absent.
+//
+// It has a name of its own rather than `NewTransaction` appearing in a function
+// called `updateTransaction`, for the reason the C# record has one.
+//
+// **What it does not carry is the whole point of the endpoint's shape.** There is
+// no `category` and no `categorySource` here: a client that could send a source
+// could file a guess as a correction, which is the hole `transactions.category_source`
+// was added in #59 to close, and #63's PATCH is still the only way to change a
+// category. There is no id and no createdAt either -- those are the server's.
+export type UpdateTransaction = NewTransaction
+
 /** The three things that can have decided a category. Mirrors `CategorySources`. */
 // Only `human` is this application's own word -- the other two are the
 // categorizer's, arriving over HTTP. They are here so the badge can be styled and

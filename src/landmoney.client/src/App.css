@@ -436,7 +436,9 @@ button:not(.link)[aria-busy='true']::after {
   .transactions th:nth-child(3),
   .transactions td:nth-child(3),
   .transactions th:nth-child(4),
-  .transactions td:nth-child(4) {
+  .transactions td:nth-child(4),
+  .transactions th:nth-child(5),
+  .transactions td:nth-child(5) {
     width: 1%;
     white-space: nowrap;
   }
@@ -608,6 +610,115 @@ button:not(.link)[aria-busy='true']::after {
   flex-basis: 100%;
   font-size: var(--text-xs);
   color: var(--danger);
+}
+
+/* --- editing and deleting a row ------------------------------------------ */
+
+/* #94. Two link-buttons, and the confirmation that replaces them. Wrapping
+   rather than nowrap: the actions cell is `width: 1%` on a wide screen and the
+   whole width of a card on a phone, and "Delete?  Yes, delete  Keep" is three
+   things where there were two. */
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+}
+
+/* A destructive control, said in colour as well as in words. Only the colour
+   changes: it is still a .link, so it is still underlined text rather than a red
+   button, which would give deleting more visual weight on this screen than
+   adding has. */
+.link-danger {
+  color: var(--danger);
+}
+
+/* The two-step confirmation, kept on one line so the question and its answers
+   read as one sentence rather than as three controls that happen to be
+   adjacent. */
+.row-confirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+}
+
+.row-confirm-question {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+/* Beside the row and never in a banner at the top, for the reason
+   .category-error is: a delete that failed is a fact about one row, and the row
+   is where the person is looking. flex-basis so it takes its own line under the
+   buttons rather than pushing them apart. */
+.row-error {
+  flex-basis: 100%;
+  font-size: var(--text-xs);
+  color: var(--danger);
+}
+
+/* The edit form's row. It is a <tr> with one <td> spanning the table, so
+   everything the column rules do to a cell has to be undone -- the `width: 1%`
+   in particular, which is inherited by position and would collapse the form to
+   the width of its longest unbreakable word. */
+.transactions tr.row-edit td {
+  width: auto;
+  white-space: normal;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  background: var(--surface-sunken);
+}
+
+/* The form inside that cell. It reuses .entry so it is visibly the same kind of
+   thing as the add form, and only what differs is declared here: it is already
+   inside a card, so it brings no shadow and no second background of its own. */
+.entry-inline {
+  background: transparent;
+  box-shadow: none;
+  border-color: var(--border-strong);
+  gap: var(--space-3);
+}
+
+.entry-inline h3 {
+  margin: 0;
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+/* Said before the rule is met rather than after it surprises somebody: an edit
+   to the description, the amount or the currency asks the categorizer again.
+   Muted, because it is guidance and not an error -- the same treatment
+   .field-hint gets for the same reason. */
+.entry-note {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* Two buttons side by side. `align-self: flex-start` lives on the buttons
+   themselves, and inside a flex row it does nothing -- so the row is what has to
+   stop stretching, which `align-items: center` and an inline flow give it. */
+.entry-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* Cancel. A real button, because it is a choice and not a link to somewhere, and
+   a quiet one, because the choice it offers is "do nothing" -- an equally loud
+   pair makes the reader work out which of the two was the point. */
+button.secondary {
+  color: var(--text-strong);
+  background: transparent;
+  border-color: var(--border-strong);
+}
+
+@media (hover: hover) {
+  button.secondary:hover:not(:disabled) {
+    background: var(--surface-sunken);
+  }
 }
 
 /* --- the import ---------------------------------------------------------- */
@@ -985,6 +1096,37 @@ button:not(.link)[aria-busy='true']::after {
        above body size. */
     font-size: var(--text-md);
     font-weight: 600;
+  }
+
+  /* #94. Fifth in the markup and last down the card, under a rule that separates
+     the controls from the values above them. It spans both columns because
+     "Delete?  Yes, delete  Keep" does not fit beside anything. */
+  .transactions td:nth-child(5) {
+    grid-area: 4 / 1 / 5 / 3;
+    margin-top: var(--space-2);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border);
+  }
+
+  /* The edit form's row is not a card and must not be laid out as one: the grid
+     above would put its single cell in the first column of a two-column track
+     and hand the other half to nothing. It is drawn as the continuation of the
+     card above it instead, which is what it is -- the negative margin closes the
+     gap the tbody's `gap` puts between every pair of rows. */
+  .transactions tr.row-edit {
+    display: block;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    margin-top: calc(var(--space-3) * -1);
+  }
+
+  .transactions tr.row-edit td {
+    border: 1px solid var(--border);
+    border-top: 0;
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
   }
 
   /* The whole card is one surface now; tinting a cell inside it would paint a

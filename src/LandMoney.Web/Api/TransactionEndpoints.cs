@@ -66,6 +66,33 @@ public static class TransactionEndpoints
         group.MapPatch("/{id:guid}", UpdateCategoryAsync)
             .AddEndpointFilter<ValidationFilter<UpdateCategoryRequest>>();
 
+        // #94. PUT rather than a second PATCH, and the two live side by side on one
+        // route because they answer two different questions about the same row.
+        //
+        // A second PATCH is not available in any case -- one method plus one route
+        // is one endpoint -- but the interesting half is that it would be the wrong
+        // shape even if it were. PATCH means "change these fields and leave the rest
+        // as they are", and that is precisely the reading #63 refused to let an
+        // amount travel under: a body that may carry an amount and may omit it is a
+        // body a stale screen can use to overwrite money it was not editing. PUT
+        // means "this is what it is now", so every field it writes is a field the
+        // sender had to state -- and the four it does not carry (id, createdAt,
+        // category, categorySource) are the server's, which no method makes
+        // writable.
+        //
+        // The strict reading of PUT would have an omitted field cleared, and by that
+        // reading this is not quite one: `category` survives a PUT that does not
+        // mention it. The honest description is that the resource this replaces is
+        // *the four fields a person typed*, which is the whole of what a client owns
+        // here. A sub-resource -- PUT /{id}/details -- would say that in the URL and
+        // buys a path segment nobody would ever fetch on its own.
+        group.MapPut("/{id:guid}", UpdateAsync)
+            .AddEndpointFilter<ValidationFilter<UpdateTransactionRequest>>();
+
+        // #94. No filter and no body: the id is in the route, and there is nothing
+        // else a delete could get wrong.
+        group.MapDelete("/{id:guid}", DeleteAsync);
+
         // #67. A POST that writes nothing, which is the one thing about it worth
         // arguing over. A GET reads better for a question -- it is idempotent, it
         // is cacheable, and "does not write anything" is exactly what the method
@@ -661,6 +688,169 @@ public static class TransactionEndpoints
         await db.SaveChangesAsync(cancellationToken);
 
         return TypedResults.Ok(ToResponse(transaction));
+    }
+
+    /// <summary>#94. Corrects the four fields a person typed, and re-asks if it has to.</summary>
+    // **The concurrency question #94's first trap asks, answered rather than
+    // shrugged at: last write wins, deliberately, and there is no token.**
+    //
+    // What #63 refused was a *hidden* write. Its PATCH exists to change one field,
+    // so any other field travelling in that body arrives from whatever copy of the
+    // row the screen happened to be holding -- somebody correcting a category in a
+    // tab opened an hour ago would silently rewrite an amount they never looked at.
+    // That is a write nobody made a decision about, and no amount of care at the
+    // call site prevents it.
+    //
+    // This endpoint is the opposite shape. Every field it writes is a field
+    // somebody read on their screen and chose to leave alone or to change; the form
+    // is prefilled from the row and Save is an act. A stale value can still be
+    // saved here -- if the row changed underneath an open form -- but it is a value
+    // the person was looking at, which is the difference between a mistake and an
+    // invisible one.
+    //
+    // **What that costs, exactly:** two tabs open on one row, both edited, and the
+    // second save wins with no warning. That is the whole of it, on an application
+    // one person uses weekly, in an account only they can sign in to.
+    //
+    // **What the fix would be, so the next reader does not have to find it.**
+    // Postgres gives every row a system column, `xmin`, that changes on every
+    // update, and Npgsql maps it as a concurrency token with
+    // `UseXminAsConcurrencyToken()` -- **no migration and no new column**, which is
+    // unusual enough to be worth writing down. It buys nothing until the version
+    // also travels to the client and back, which is a field on TransactionResponse,
+    // a field on this request, and a 409 the client has to have something to say
+    // about. That is the price, and it is the reason it is not here: it is
+    // machinery for a race this application cannot currently run.
+    private static async Task<Results<Ok<TransactionResponse>, NotFound>> UpdateAsync(
+        Guid id,
+        UpdateTransactionRequest request,
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        // Loaded rather than updated in place with ExecuteUpdateAsync, the same call
+        // UpdateCategoryAsync makes and for the same reasons: the response carries
+        // the stored row back so the client can put it on screen without asking for
+        // the whole list again, and "did it exist" and "was it yours" both fall out
+        // of one SELECT. There is a third reason here -- the re-prediction decision
+        // below needs the old values to compare against.
+        //
+        // No ownership check, and its absence is the design: AppDbContext's global
+        // query filter means another account's row is not found at all, so this
+        // answers 404. That is #94's second acceptance test, and #63 already
+        // established why 404 rather than 403 -- a 403 confirms the id exists, which
+        // lets one account enumerate another's transactions by watching which ids
+        // are refused differently.
+        var transaction = await db.Transactions
+            .FirstOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+
+        if (transaction is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        // Uppercased before it is compared as well as before it is stored, or "eur"
+        // would read as a change from "EUR" and spend a model call on a row nothing
+        // about has moved. Same call CreateAsync makes, for the reason written
+        // there.
+        var currency = request.Currency.ToUpperInvariant();
+
+        var asked = CategorizerQuestion.About(transaction);
+        var asking = new CategorizerQuestion(request.Description, request.Amount, currency);
+
+        transaction.OccurredAt = request.OccurredAt;
+        transaction.Amount = request.Amount;
+        transaction.Currency = currency;
+        transaction.Description = request.Description;
+
+        // **#94's second trap: whether an edit re-predicts is a decision.** It does,
+        // when the edit changed something a predictor reads, and never otherwise --
+        // so fixing a mistyped year is free and fixing a misspelled shop is not.
+        //
+        // The old category is cleared rather than kept until a new one arrives.
+        // Keeping it leaves a word on the screen that was predicted from text
+        // nobody can see any more, which is a quieter kind of wrong than a blank
+        // that says "Categorizing..." for five seconds. Both columns go together,
+        // which is #59's invariant: a source exists exactly when a category does.
+        //
+        // **MayOverwrite is what makes a human label survive, and it is
+        // load-bearing in a second way that is easy to miss.** The sweep's own
+        // predicate excludes rows whose source is `human`, so marking one as owing
+        // a category would produce a row that owes something nothing will ever
+        // collect -- `categoryPending` true for ever, and a client polling until its
+        // budget runs out. The guard is not only about not overwriting a person's
+        // judgement; without it this endpoint can write a state the rest of the
+        // application cannot get out of.
+        //
+        // The other half of that decision, said out loud: a row somebody labelled by
+        // hand and then edited keeps a label chosen for the old text. That is
+        // correct rather than tolerated -- the label is about what was bought, and
+        // a different spelling of the shop's name does not un-say it. Clearing it is
+        // one dropdown away if they disagree.
+        if (asking != asked && CategorySources.MayOverwrite(transaction.CategorySource))
+        {
+            transaction.Category = null;
+            transaction.CategorySource = null;
+            transaction.CategorizationAttempts = PendingCategorization.Owing;
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+
+        return TypedResults.Ok(ToResponse(transaction));
+    }
+
+    /// <summary>#94. Removes one row, for good.</summary>
+    // **Hard delete, and #94's third trap is the argument that decides it.** A
+    // soft-deleted row is still in the table, and the import's duplicate detection
+    // reads the table -- so re-importing the line that was deleted by mistake would
+    // be skipped as a duplicate of a row that is not on the screen. That failure
+    // reads as a broken import, names the right line number for the wrong reason,
+    // and is unfixable from the interface.
+    //
+    // The rest of the cost is the shape a soft delete puts on everything else. The
+    // ownership filter is already global and unforgettable, which is the property
+    // #89 chose an endpoint over a psql script for; a second condition beside it is
+    // another thing every future query gets right by inheritance and every
+    // ExecuteUpdate, every raw statement and every `IgnoreQueryFilters` call -- and
+    // the sweep is already one of those -- has to remember. The export would have to
+    // exclude them, or a row deleted as a mistake would go on training an eval set.
+    //
+    // What that gives up is an undo, and it is given up knowingly: there is none,
+    // and the row is gone from Postgres the moment this returns. The confirmation
+    // step lives on the client, which is where the misclick is; #94 asks for it in
+    // as many words, and it is the only thing standing between a stray tap and a
+    // year of history.
+    private static async Task<Results<NoContent, NotFound>> DeleteAsync(
+        Guid id,
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        // ExecuteDelete rather than loading the row and calling Remove: there is
+        // nothing to read, nothing to return, and no decision to make from the old
+        // values -- which is exactly the case UpdateAsync above is not.
+        //
+        // **The global query filter applies to it**, the same way it applies to a
+        // SELECT and the same way #93's backfill depends on it applying to an
+        // ExecuteUpdate. So another account's row matches nothing, this answers 404,
+        // and no ownership condition appears anywhere in the statement. That is the
+        // property worth stating rather than assuming: the alternative -- a
+        // hand-written `WHERE id = @id AND owner_id = @owner` -- is one clause away
+        // from being a way to delete somebody else's row, and it would look exactly
+        // right.
+        //
+        // A row the sweep is in the middle of asking about is safe by construction:
+        // its UPDATE is guarded by the same primary key, so it matches nothing and
+        // writes nothing. Nothing has to be co-ordinated for that.
+        var deleted = await db.Transactions
+            .Where(transaction => transaction.Id == id)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        // 404 and never 403, for the reason UpdateAsync and #63 both record. It is
+        // also what a second DELETE of the same id answers, which is the honest
+        // reading rather than an inconvenience: the row is not there, and a client
+        // that shows the same message either way is right.
+        return deleted == 0
+            ? TypedResults.NotFound()
+            : TypedResults.NoContent();
     }
 
     /// <summary>How many rows the file holds, so the client can say so without parsing it.</summary>

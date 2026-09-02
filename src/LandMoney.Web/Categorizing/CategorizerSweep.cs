@@ -235,7 +235,18 @@ public sealed class CategorizerSweep(
             // the same question again would buy the same word at the same price.
             if (row.Answer.Source is not null)
             {
-                await StoreAsync(db, transaction.Id, maxAttempts, row.Answer.Suggestion, cancellationToken);
+                // The question is passed along with the answer, built from the entity
+                // as it was read at the top of this tick -- see StoreAsync for what it
+                // guards against. Built here rather than inside StoreAsync so that it
+                // cannot accidentally be built from a fresher copy of the row, which
+                // would make the guard compare a value against itself.
+                await StoreAsync(
+                    db,
+                    transaction.Id,
+                    CategorizerQuestion.About(transaction),
+                    maxAttempts,
+                    row.Answer.Suggestion,
+                    cancellationToken);
                 continue;
             }
 
@@ -280,9 +291,31 @@ public sealed class CategorizerSweep(
     // reached the cap -- matches nothing and no rows are written. This is the
     // caller CategorySources.MayOverwrite was written for in #63 and where it stops
     // being trivially true.
+    //
+    // **#94 added a second guard to the same clause, for the same reason one field
+    // along.** A row can now be *edited* while this call is in flight, and an edit
+    // that changes the description, the amount or the currency changes what the
+    // question was -- so the answer coming back describes text that is no longer in
+    // the row. Without the guard it would be stored anyway and would look entirely
+    // plausible: a category, a source, and no way to tell it was computed from a
+    // typo the person has since fixed.
+    //
+    // What happens instead is the good failure. The UPDATE matches nothing, so the
+    // row keeps the marker the edit put back on it, and the next tick asks the
+    // question that is actually on the screen. Nothing has to be co-ordinated and
+    // nothing is lost except one call.
+    //
+    // **ChargeAsync deliberately does not take the same guard**, and the asymmetry
+    // is the point rather than an oversight. This one is about a fact -- the answer
+    // is about the wrong text, so it is worthless. That one is about a bill: the
+    // call was made and, against a model, paid for, whether or not the row moved
+    // underneath it. Guarding the charge as well would also make repeated editing a
+    // way to never exhaust the cap, which is precisely the unbounded retry the cap
+    // exists to stop.
     private static Task StoreAsync(
         AppDbContext db,
         Guid id,
+        CategorizerQuestion asked,
         int maxAttempts,
         CategorySuggestion? suggestion,
         CancellationToken cancellationToken)
@@ -301,6 +334,7 @@ public sealed class CategorizerSweep(
             .IgnoreQueryFilters()
             .Where(transaction => transaction.Id == id)
             .Where(PendingCategorization.Owed(maxAttempts))
+            .Where(asked.Unchanged())
             .ExecuteUpdateAsync(
                 setters => setters
 
