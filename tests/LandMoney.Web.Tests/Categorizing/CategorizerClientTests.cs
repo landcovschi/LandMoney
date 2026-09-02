@@ -917,6 +917,28 @@ public class CategorizerClientTests
         Assert.Equal(CategorizerOutcome.Unusable, result.Rows["a"].Outcome);
     }
 
+    // **Added by a mutation sweep, and kept although that mutation survived** -- which
+    // is the interesting half. Weakening the guard above from "a non-empty id" to "an
+    // id at all" is an *equivalent* mutant: an answer keyed under the empty string
+    // matches no row this application sends, because every id is a Guid, so the row
+    // it was meant for reports as unanswered either way. #92 recorded the same shape
+    // for its `null < 30`.
+    //
+    // The test stays because it asserts the behaviour rather than the guard: an
+    // answer whose id says nothing does not get given to a row. The `Length: > 0`
+    // half of the pattern is kept for the symmetry with the null case and not for
+    // anything a test can hold.
+    [Fact]
+    public async Task An_answer_with_an_empty_id_is_dropped_too()
+    {
+        var client = ClientThat((_, _) => Json(
+            """{"answers":[{"id":"","category":"groceries","source":"rules"}]}"""));
+
+        var result = await SweepMany(client, default, Row("a"));
+
+        Assert.Equal(CategorizerOutcome.Unusable, result.Rows["a"].Outcome);
+    }
+
     // A row that was never sent cannot be written to, and the entries that were sent
     // are unaffected by one arriving. It is worth a log line and nothing more.
     [Fact]
