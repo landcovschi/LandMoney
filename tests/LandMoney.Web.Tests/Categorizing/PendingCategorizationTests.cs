@@ -180,7 +180,125 @@ public class PendingCategorizationTests
         Assert.DoesNotContain("owner_id", Where(Query()), StringComparison.Ordinal);
     }
 
+    // --- what a backfill may claim, #93 --------------------------------------
+
+    // The gap the sweep cannot reach on its own: it only ever sees rows something
+    // already marked, and the create path is the only thing that marks them. #62's
+    // imported rows are the ones this exists for.
+    [Fact]
+    public void A_row_with_no_category_that_nothing_is_asking_about_can_be_queued()
+    {
+        Assert.True(Backfillable(Row(attempts: null)));
+    }
+
+    // "Running it a second time changes nothing", which is one of #93's three
+    // acceptance criteria. A row the sweep is halfway through keeps the budget it
+    // has spent rather than having it reset by somebody pressing the button again.
+    [Theory]
+    [InlineData(PendingCategorization.Owing)]
+    [InlineData(1)]
+    [InlineData(Cap - 1)]
+    public void A_row_already_in_the_queue_is_left_where_it_is(int attempts)
+    {
+        Assert.False(Backfillable(Row(attempts: attempts)));
+    }
+
+    // The other half of what a backfill is for: "anything the categorizer missed
+    // while it was down". A row the sweep gave up on was marked once and would never
+    // be looked at again, so this is the only thing that can put it back.
+    [Theory]
+    [InlineData(Cap)]
+    [InlineData(Cap + 7)]
+    public void A_row_the_sweep_gave_up_on_can_be_queued_again(int attempts)
+    {
+        Assert.True(Backfillable(Row(attempts: attempts)));
+    }
+
+    // #93's first trap, and the same rule Owed carries: an unset source may be
+    // predicted over, a `human` one never. A backfill is an explicit act and still
+    // does not get to overwrite somebody's own labelling.
+    [Fact]
+    public void A_row_a_person_labelled_is_never_queued()
+    {
+        Assert.False(Backfillable(Row(attempts: null, source: CategorySources.Human)));
+    }
+
+    // A row that already has a category has nothing to ask about, whoever decided it.
+    // This is what makes a second backfill after a successful one mark nothing.
+    [Theory]
+    [InlineData(CategorySources.Rules)]
+    [InlineData(CategorySources.Model)]
+    [InlineData(CategorySources.Human)]
+    public void A_row_that_has_a_category_is_never_queued(string source)
+    {
+        Assert.False(Backfillable(Row(attempts: null, source: source)));
+    }
+
+    // **#63's hole, asserted rather than hidden**, and this is the test to read
+    // before changing any of the above. Clearing a category writes null to *both*
+    // columns, so a row a person deliberately blanked is indistinguishable from one
+    // nothing ever touched -- and a backfill therefore asks about it again.
+    //
+    // #63 said to reopen the question "the day something re-categorises existing
+    // rows", and this is that change. It is accepted rather than closed: the
+    // backfill is an explicit act by the same person who did the clearing, it
+    // overwrites a blank rather than a label, and the alternative #63 costed --
+    // storing `category = null, source = human` -- breaks the invariant that a
+    // source exists exactly when a category does, which three files now rely on.
+    //
+    // The day that trade stops being worth it, this test is what has to change and
+    // it names what changing it means.
+    [Fact]
+    public void A_row_a_person_cleared_is_queued_again_which_is_the_known_cost()
+    {
+        var cleared = new Transaction
+        {
+            Currency = "EUR",
+            Description = "linella",
+            Amount = 42.50m,
+            OccurredAt = new DateOnly(2026, 9, 1),
+            CategorizationAttempts = null,
+            CategorySource = null,
+            Category = null,
+        };
+
+        Assert.True(Backfillable(cleared));
+    }
+
+    // The same translation trap as Owed's, in a predicate that is written separately
+    // and could get it separately wrong: in C# `source != "human"` is true for null,
+    // and in SQL `category_source <> 'human'` is *unknown* for null and fails the
+    // WHERE. Every row a backfill exists for has a null source, so a literal
+    // translation would mark nothing at all -- and answer 200 while doing it.
+    [Fact]
+    public void The_null_source_survives_the_trip_into_SQL_for_a_backfill()
+    {
+        Assert.Contains("category_source IS NULL", BackfillQuery(), StringComparison.Ordinal);
+    }
+
+    // **The opposite of the sweep's, and the reason the endpoint won over a psql
+    // script (#89's argument, one issue along).** The sweep has no signed-in user and
+    // has to ignore the filter; a backfill runs inside a request and must not, or one
+    // person's button marks every account's rows and bills them for somebody else's
+    // spending. Nothing in the handler mentions ownership, which is what makes it
+    // impossible to forget -- and this is what says the filter is doing that work.
+    [Fact]
+    public void A_backfill_is_scoped_to_the_account_that_asked_for_it()
+    {
+        Assert.Contains("owner_id", Where(BackfillQuery()), StringComparison.Ordinal);
+    }
+
     // --- helpers -------------------------------------------------------------
+
+    private static bool Backfillable(Transaction transaction) =>
+        PendingCategorization.Backfillable(Cap).Compile()(transaction);
+
+    private static string BackfillQuery()
+    {
+        using var db = Context();
+
+        return db.Transactions.Where(PendingCategorization.Backfillable(Cap)).ToQueryString();
+    }
 
     private static bool Owed(Transaction transaction) =>
         PendingCategorization.Owed(Cap).Compile()(transaction);

@@ -101,6 +101,13 @@ services:
       # Thirty days unless told otherwise -- see cache.py. Here so that a session
       # experimenting with the prompt can shorten it without editing code.
       CATEGORIZER_CACHE_TTL_SECONDS: ${CATEGORIZER_CACHE_TTL_SECONDS:-}
+
+      # #93. How many rows of one batch are asked about at once -- see batch.py,
+      # which defaults it to eight and clamps it to sixteen. Here so that a session
+      # measuring what a backfill costs in wall-clock can move it without editing
+      # code; it changes when the calls happen and never how many there are, so it
+      # is not a lever on the bill.
+      CATEGORIZER_BATCH_CONCURRENCY: ${CATEGORIZER_BATCH_CONCURRENCY:-}
     ports:
       # Published so the host's `dotnet run` can reach it, and bound to
       # 127.0.0.1 for the same reason postgres is. The app *container* does not

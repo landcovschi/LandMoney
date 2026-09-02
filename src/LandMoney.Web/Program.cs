@@ -266,6 +266,54 @@ builder.Services
             builder.Configuration.GetValue("Categorizer:ConnectTimeoutSeconds", 2d)),
     });
 
+// #93. The same service, the same connect budget, a different overall one.
+//
+// **The eight seconds above is per call and is wrong for a batch**, which is that
+// issue's fourth trap. It was chosen in #59 against one model call at about 2.1 s;
+// twenty rows answered concurrently on the Python side are about six seconds and a
+// hundred are about twenty-six, so the same number would turn a working batch into a
+// timeout and leave every row in it still owed a category.
+//
+// Raising the single number instead is what makes this a second client rather than a
+// larger one. That budget is what #67's preview waits when the categorizer is not
+// there, on the path where somebody is typing, and #39's whole argument for a tight
+// one is about the broken case rather than the working one. Two budgets, because
+// there are two failures: a suggestion that has stopped being worth having, and a
+// backlog that is worth waiting for because nobody is watching it.
+//
+// **ConnectTimeout is deliberately the same two seconds.** "The service is not
+// there" costs the same whichever call found out, and it is the failure a sweep meets
+// most often -- the categorizer scales to zero (#61), so the first call after an idle
+// spell may find nothing listening. Only "it is thinking" is re-priced here.
+builder.Services
+    .AddHttpClient<CategorizerBatchHttp>(client =>
+    {
+        // Left null when nothing is configured, exactly as above: CategorizerClient
+        // reads that as "there is no categorizer" and answers without touching the
+        // network, which is what keeps a deployment with no categorizer from paying
+        // a timeout per sweep for ever.
+        if (categorizerUri is not null)
+        {
+            client.BaseAddress = categorizerUri;
+        }
+
+        // Sixty, against about twenty-six for a full hundred-row batch at the Python
+        // side's default concurrency. The headroom is for the cold start rather than
+        // for the model: the categorizer scales to zero, and a batch that arrives
+        // first pays that before a single row is looked at.
+        //
+        // Nothing waits on this. It bounds a background sweep, so the cost of it
+        // being generous is a tick that runs long and a next tick that starts late --
+        // PeriodicTimer does not queue -- rather than a person watching a spinner.
+        client.Timeout = TimeSpan.FromSeconds(
+            builder.Configuration.GetValue("Categorizer:BatchTimeoutSeconds", 60d));
+    })
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        ConnectTimeout = TimeSpan.FromSeconds(
+            builder.Configuration.GetValue("Categorizer:ConnectTimeoutSeconds", 2d)),
+    });
+
 // --- What the categorizer is actually doing -- #64 ---------------------------
 //
 // AddMetrics is what registers IMeterFactory, and it is written out although the

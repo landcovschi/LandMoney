@@ -216,3 +216,16 @@ export interface CategorySuggestion {
   category: string | null
   source: string | null
 }
+
+
+/** What `POST /api/transactions/backfill-categories` answers. #93. */
+// One number: how many rows now owe a category and will get one from the sweep.
+//
+// It is the number that was on the button a moment before, and comparing the two is
+// the point of returning it at all -- a backfill that marks fewer rows than the
+// screen offered means something else has been categorising in the meantime, and a
+// backfill that marks none means there was nothing to do. Those read very
+// differently on a screen that has just said what it was about to spend.
+export interface BackfillResult {
+  marked: number
+}

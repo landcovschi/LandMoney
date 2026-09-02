@@ -1,5 +1,6 @@
 import { request, send } from './http'
 import type {
+  BackfillResult,
   CategorySuggestion,
   CategorySuggestionQuery,
   CategoryUpdate,
@@ -259,5 +260,27 @@ export function suggestCategory(
     },
     signal,
     { timeoutMs: SUGGESTION_TIMEOUT_MS },
+  )
+}
+
+
+/** Puts every uncategorised row into the sweep's queue, and says how many. #93. */
+// A POST with no body at all, which is unusual enough here to be worth a line: every
+// other write in this file sends JSON, and the two CSRF locks
+// AuthenticationSetup.cs records are the SameSite=Lax cookie and a content type a
+// cross-site form cannot produce. Only the first of those applies to a bodyless
+// request -- there is nothing to type -- and it is the one that does the work: a Lax
+// cookie is withheld from every cross-site request that is not a top-level GET
+// navigation, so a form on another site cannot reach this.
+//
+// It is the one call in this client that spends money. Every row it marks is a model
+// call the sweep will make, at about 0.62 US cents each -- which is why the screen
+// shows the count first and this function takes no arguments: there is nothing to
+// get wrong between what was shown and what is marked.
+export function backfillCategories(signal?: AbortSignal): Promise<BackfillResult> {
+  return request<BackfillResult>(
+    `${TRANSACTIONS_URL}/backfill-categories`,
+    { method: 'POST' },
+    signal,
   )
 }

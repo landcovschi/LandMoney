@@ -98,6 +98,19 @@ public static class TransactionEndpoints
         // wanted.
         group.MapGet("/labelled", ExportLabelledAsync);
 
+        // #93. A POST, and here the argument is the plain one rather than #67's: this
+        // writes. It marks rows as owing a category, which is a change to the
+        // database and a decision to spend money -- every row it marks is a model
+        // call the sweep will make.
+        //
+        // No ValidationFilter and no body at all. Every option this could have taken
+        // -- a date range, a category, a limit -- is a way to disagree with the count
+        // the screen showed before the button was pressed, and that count is the only
+        // thing standing between a person and a bill they did not expect. What is
+        // marked is exactly what PendingCategorization.Backfillable selects, and the
+        // client counts the same rows out of the list it already has.
+        group.MapPost("/backfill-categories", BackfillCategoriesAsync);
+
         return group;
     }
 
@@ -743,6 +756,65 @@ public static class TransactionEndpoints
         // which opens the set as utf-8-sig, and would be one more difference between
         // the exported file and the one it is appended to.
         return TypedResults.Text(csv, CsvContentType, Encoding.UTF8);
+    }
+
+    /// <summary>#93. Puts the rows that have no category into the sweep's queue.</summary>
+    // **What this is for is a gap the sweep cannot reach on its own.** #92's sweep
+    // only ever sees rows something marked as owing a category, and the create path
+    // is the only thing that marks them. So #62's imported rows -- which arrive with
+    // no category by design, because one call per row against a service that is not
+    // there is a request that runs for minutes -- were never going to be categorised
+    // by anything. Neither were the rows the sweep gave up on while the categorizer
+    // was down, nor the rows that predate the column.
+    //
+    // **The import deliberately does not do this by itself**, which is the decision
+    // this endpoint exists to make possible. #92 wrote that marking imported rows was
+    // "one property assignment away", and it is; what that assignment does not do is
+    // #93's third trap -- "whatever runs this should know how many rows it is about
+    // to pay for before it starts". A three-hundred row file is three hundred model
+    // calls at 0.62 US cents each (#87), and a person who has just imported a year of
+    // statements should be told that number and press something, rather than discover
+    // it on a bill. So the count is on the screen before the button is, and the button
+    // is this.
+    //
+    // It also reaches what an automatic mark could not: a row abandoned at the cap
+    // was already marked once, so nothing about the import would ever look at it
+    // again.
+    private static async Task<Ok<BackfillResponse>> BackfillCategoriesAsync(
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        // ExecuteUpdate, so this is one statement rather than a table read followed
+        // by a change tracker full of entities nobody wants -- and so the predicate
+        // is evaluated by Postgres against the rows as they are now. That matters
+        // more than the allocation: a correction made while this was in flight is a
+        // row this must not claim, and an in-memory guard would be looking at a
+        // photograph.
+        //
+        // **No ownership condition, and that is the point rather than an omission.**
+        // AppDbContext's global query filter puts it there, and EF applies it to
+        // ExecuteUpdate the same way it applies it to a SELECT -- which is the
+        // property #89 chose an endpoint over a psql script for. A hand-written
+        // UPDATE that forgot the clause would queue every account's rows and bill one
+        // person for another person's spending, and it would look exactly right.
+        //
+        // The default cap rather than the configured one, knowingly, and for the same
+        // reason ToResponse reads the default: threading IConfiguration through here
+        // to decide which abandoned rows count as abandoned buys a handful of rows in
+        // or out of one run of a chore. The cap that matters is the one the sweep
+        // applies.
+        var marked = await db.Transactions
+            .Where(PendingCategorization.Backfillable(PendingCategorization.DefaultMaxAttempts))
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(
+                    transaction => transaction.CategorizationAttempts, PendingCategorization.Owing),
+                cancellationToken);
+
+        // Nothing else is returned, and in particular not the rows. The client
+        // already holds every transaction -- there is no paging (#3) -- and it asks
+        // for the list again anyway, because the sweep will have changed rows this
+        // response could not know about by the time it arrives.
+        return TypedResults.Ok(new BackfillResponse(marked));
     }
 
     private static TransactionResponse ToResponse(Transaction transaction) => new(

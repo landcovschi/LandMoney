@@ -119,6 +119,28 @@ public class AuthorizationTests
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    // #93. The backfill endpoint is inside the group RequireAuthorization is applied
+    // to, and this is the assertion that it stayed there. It is the one route in this
+    // application that spends money -- every row it marks is a model call the sweep
+    // will go and make -- so a POST written outside the group would be an unmetered
+    // way for anyone who guessed the path to run up somebody else's Anthropic bill,
+    // which is the same failure #61 kept the categorizer's ingress internal to
+    // prevent.
+    //
+    // Asserted with 401 rather than "not 200" for the reason the export is: the query
+    // filter would answer an anonymous caller by marking nothing, and "0 marked" and
+    // "refused" look alike from a distance and are not the same fact.
+    [Fact]
+    public async Task An_anonymous_backfill_is_refused()
+    {
+        using var app = TestApp.WithInviteCode();
+        using var client = app.CreateNonFollowingClient();
+
+        var response = await client.PostAsync("/api/transactions/backfill-categories", content: null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     // #63. The correction endpoint is inside the group RequireAuthorization is
     // applied to, and this is the assertion that it stayed there.
     //

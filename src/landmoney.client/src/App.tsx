@@ -7,6 +7,7 @@ import {
   updateCategory,
 } from './api/transactions'
 import type { NewTransaction } from './api/types'
+import { BackfillCategories } from './components/BackfillCategories'
 import { ExportLabelled } from './components/ExportLabelled'
 import { ImportForm } from './components/ImportForm'
 import { LoginForm } from './components/LoginForm'
@@ -416,6 +417,25 @@ function App() {
             and does not write.
           */}
           <ExportLabelled />
+
+          {/*
+            #93. Under the two CSV cards and above the summary, which is the order
+            the work happens in: import rows, then ask about the ones that arrived
+            with no category. It renders nothing when there is nothing to ask about,
+            so the ordinary screen -- everything categorised -- is unchanged by it.
+
+            It is given the same array the list is about to draw rather than a fetch
+            of its own, which is #68's argument arriving at a second component: the
+            count on the button and the blanks in the table below it cannot disagree,
+            because they are the same rows counted twice.
+
+            `reload` rather than a handler of its own, for the reason ImportForm gets
+            it: the queued rows have to come back carrying `categoryPending`, and the
+            poll above starts on its own once anything on screen is waiting.
+          */}
+          {list.status === 'ready' && (
+            <BackfillCategories transactions={list.transactions} onBackfilled={reload} />
+          )}
 
           {/*
             #68. Between the import and the list, and rendered off the very array

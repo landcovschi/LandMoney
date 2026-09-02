@@ -1,4 +1,4 @@
-using System.ComponentModel.DataAnnotations;
+﻿using System.ComponentModel.DataAnnotations;
 
 namespace LandMoney.Web.Api;
 
@@ -298,3 +298,16 @@ public sealed record CategorySuggestionRequest
 // sent them, and echoing them would invite a screen that trusts this response for
 // something other than the one word it is for.
 public sealed record CategorySuggestionResponse(string? Category, string? Source);
+
+
+/// <summary>What a backfill did: how many rows now owe a category. #93.</summary>
+// One number, because one number is the whole answer. It is also the number that
+// was on the button a moment earlier, so a caller can tell "there was nothing to do"
+// from "somebody else has been importing" -- and the two are different enough to be
+// worth telling apart on a screen that has just said what it was about to spend.
+//
+// Not a list of ids. The client asks for the list again immediately afterwards, and
+// by the time that answer arrives the sweep has already changed rows this response
+// could not have known about; a list here would be a snapshot that is wrong on
+// arrival and looks authoritative.
+public sealed record BackfillResponse(int Marked);
