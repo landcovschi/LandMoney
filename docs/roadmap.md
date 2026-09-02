@@ -1016,6 +1016,42 @@ the thing that produced the number can be shown.
       the same string, so this is a coincidence being turned into a property
       rather than a bug being fixed
 
+      **That day arrived on 2026-09-02, in #95, and the paragraph above is the
+      reason it cost nothing to find.** The list is paged now, so the summary is
+      a `GROUP BY` on the server, added up in `numeric` by Postgres -- and
+      `money.ts` lost both halves of its arithmetic with it, because there is no
+      addition left anywhere in the client. What was given up is written into
+      `MonthSummary.tsx`: the totals and the rows below them were one array
+      counted twice and are two queries now, so they can disagree for the few
+      milliseconds between them. That is the cheaper half of the trade against a
+      screen adding up part of a month and calling it one
+
+- [x] The list stops returning every row there is -- #95, 2026-09-02. Keyset
+      paging over `ix_transactions_owner_id_occurred_at_created_at_id`, fifty
+      rows a page with a ceiling of two hundred, and an opaque cursor. **The
+      cursor carries three keys and not the two the issue names**, because
+      `created_at` ties as badly as `occurred_at` does -- measured at 21 distinct
+      microsecond values across three hundred rows built the way an import builds
+      them, which is about fourteen rows per identical pair. The primary key is
+      the only column here that cannot tie, and it had to join the index as well
+      as the ORDER BY or the plan gains a sort step
+
+      **The finding worth keeping is that the correct predicate was not the fast
+      one.** The nested `OR` a cursor needs is not something Postgres will push
+      into an index, so the first version scanned back from the newest row and
+      discarded everything above the cursor -- OFFSET's work, arriving silently
+      through the change that exists to avoid it. A redundant
+      `occurred_at <= @d` beside it becomes an Index Cond and takes
+      `Rows Removed by Filter` from **1,925 to 25** on a page in the middle of
+      5,000 rows
+
+      Verified against 5,000 seeded rows with 197 tie groups of up to 26:
+      `Index Scan Backward`, no sort step, and a walk of all 100 pages returning
+      5,000 rows, 5,000 distinct, none skipped -- twice, identically. The same
+      walk with a two-key cursor **loses 75 rows**, which is the trap the issue
+      names, reproduced rather than argued about. The first screen is 12 KB
+      against about 1.2 MB
+
 - [x] The categorizer is visible while a transaction is typed -- #67,
       2026-08-29. `POST /api/transactions/category-suggestion` answers what the
       categorizer would say for a description that is not saved yet, and a badge

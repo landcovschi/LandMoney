@@ -26,8 +26,23 @@ Content-Type: application/json
   "description": "Coffee and a croissant"
 }
 
-### List them, newest first. Expect the row above.
+### List them, newest first. Expect the row above, and `nextCursor` null. #95.
 GET {{host}}/api/transactions
+
+### One page of five, to see the envelope with a cursor in it. #95.
+GET {{host}}/api/transactions?limit=5
+
+### A cursor this API did not issue. Expect 400, not an empty page. #95.
+GET {{host}}/api/transactions?cursor=nonsense
+
+### What a month cost, by currency then by category. Expect 200. #95.
+GET {{host}}/api/transactions/summary?month=2026-09
+
+### A month that does not exist. Expect 400. #95.
+GET {{host}}/api/transactions/summary?month=2026-13
+
+### How many rows a backfill would queue, and therefore pay for. #95.
+GET {{host}}/api/transactions/backfill-categories
 
 ### Amount zero. Expect 400, errors keyed on "amount".
 POST {{host}}/api/transactions

@@ -45,7 +45,26 @@ public static class TransactionEndpoints
         group.MapPost("/", CreateAsync)
             .AddEndpointFilter<ValidationFilter<CreateTransactionRequest>>();
 
+        // #95. Still no filter: `limit` and `cursor` are query parameters, not a
+        // body, so there is nothing for ValidationFilter<T> to find -- and both are
+        // answered inside the handler rather than by attributes, because their two
+        // wrong values want two different answers. A limit out of range is clamped
+        // and a cursor that does not parse is a 400, and the argument for the
+        // asymmetry is on ClampPageSize.
         group.MapGet("/", ListAsync);
+
+        // #95. A literal segment, registered before the {id:guid} routes for the
+        // reason /labelled and /category-suggestion are: routing would not confuse
+        // them in any case -- a constrained parameter does not match this word -- and
+        // the file reads specific-then-parameterised.
+        //
+        // A month is a query parameter rather than a path segment (/summary/2026-08),
+        // and the difference is what a wrong one means. A path names a resource, so a
+        // bad month there is a 404 about a thing that does not exist; here it is a
+        // 400 about a question that cannot be answered, which is what it is. It also
+        // leaves room for the parameter this will grow first -- a range rather than a
+        // month -- without inventing a second URL.
+        group.MapGet("/summary", MonthSummaryAsync);
 
         // #62. No ValidationFilter: there is no JSON body for it to find, and the
         // rules it would run are run per row inside the handler instead -- on the
@@ -137,6 +156,16 @@ public static class TransactionEndpoints
         // marked is exactly what PendingCategorization.Backfillable selects, and the
         // client counts the same rows out of the list it already has.
         group.MapPost("/backfill-categories", BackfillCategoriesAsync);
+
+        // #95. The same path, the other verb, and that is the argument for it: this
+        // answers "how many rows would that POST act on", so the two are one
+        // collection asked about in the two ways HTTP has -- count it, or do it. A
+        // URL of its own would be a second name for one predicate, and these two
+        // drifting apart is silent and is money.
+        //
+        // It exists because paging took the count away from the client: #93 counted
+        // the loaded rows, and a loaded page is no longer the table.
+        group.MapGet("/backfill-categories", CountBackfillableAsync);
 
         return group;
     }
@@ -274,19 +303,51 @@ public static class TransactionEndpoints
         return TypedResults.Ok(new CategorySuggestionResponse(answer.Category, answer.Source));
     }
 
-    private static async Task<Ok<IReadOnlyList<TransactionResponse>>> ListAsync(
+    /// <summary>One page of the list, newest first. #95.</summary>
+    // **`limit` and `cursor` are optional and the endpoint is unchanged for a caller
+    // that sends neither** -- it answers the newest fifty rather than every row there
+    // is, which is the whole of the change and the whole of the risk. A client that
+    // does not follow `nextCursor` now describes fifty transactions as though they
+    // were the table, which is why the response shape changed with it: an envelope is
+    // a compile error in the client, and a bare array with fewer rows in it is not.
+    //
+    // A bad cursor is a 400 and not an empty page. It is the same argument
+    // ClampPageSize makes in the other direction: a limit of 5,000 has an obvious
+    // reading and is answered, and a token that does not parse names a place that
+    // does not exist -- answering it with zero rows would look exactly like reaching
+    // the end of the list, which is the one wrong answer that is indistinguishable
+    // from a right one.
+    private static async Task<Results<Ok<TransactionPage>, ProblemHttpResult>> ListAsync(
         AppDbContext db,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? limit = null,
+        string? cursor = null)
     {
-        var transactions = await db.Transactions
-            // Two sort keys, and the second is not decoration. OccurredAt became
-            // a DateOnly in #17, so an ordinary week has several rows sharing a
-            // day; with one key their order within that day is whatever Postgres
-            // finds cheapest, which looks stable in testing and reshuffles after
-            // the table is next rewritten. CreatedAt is the tiebreak precisely
-            // because it kept full precision when OccurredAt gave it up.
-            .OrderByDescending(t => t.OccurredAt)
-            .ThenByDescending(t => t.CreatedAt)
+        TransactionCursor? after = null;
+
+        // Empty is read as absent rather than as a broken token, and the reason is
+        // the parameter beside it: `?limit=` binds to null because the framework
+        // reads an empty value for an int? that way, so `?cursor=` refusing would
+        // make two query parameters of one endpoint disagree about what an unset
+        // variable in a client's query string means. TransactionCursor.TryParse
+        // answers false for it either way -- the reading is the endpoint's, not the
+        // token's.
+        if (!string.IsNullOrEmpty(cursor) && !TransactionCursor.TryParse(cursor, out after))
+        {
+            return TypedResults.Problem(
+                detail: "The cursor is not one this API issued. Ask for the list again without it.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var pageSize = TransactionPaging.ClampPageSize(limit);
+
+        // The ordering and the cursor's comparison live together in
+        // TransactionPaging, because they are one decision written twice: a sort key
+        // added here without the matching condition in the cursor repeats rows, and
+        // the condition without the key skips them. Neither is visible in a table
+        // small enough to check by eye, which is the reason they are not written
+        // inline in this handler.
+        var page = TransactionPaging.NewestFirst(db.Transactions, after)
 
             // Projecting before ToListAsync is what puts these columns in the
             // SELECT list. Materialising entities first and mapping afterwards
@@ -320,17 +381,144 @@ public static class TransactionEndpoints
                 t.CategorizationAttempts != null
                     && t.CategorizationAttempts < PendingCategorization.DefaultMaxAttempts,
 
-                t.CreatedAt))
+                t.CreatedAt));
+
+        var (rows, hasMore) = await TransactionPaging.PageAsync(page, pageSize, cancellationToken);
+
+        // Built from the last row of the page rather than counted, which is what
+        // makes the token survive everything that happens to the table underneath
+        // it: rows inserted above the reader are rows they have already passed, and
+        // the row this was built from can be deleted without the position it names
+        // going anywhere. That is the property OFFSET does not have, and #95's second
+        // trap is exactly the failure of not having it.
+        var nextCursor = hasMore ? TransactionCursor.Encode(rows[^1]) : null;
+
+        return TypedResults.Ok(new TransactionPage(rows, nextCursor));
+    }
+
+    /// <summary>What one month cost, added up by Postgres. #95.</summary>
+    // **#68 did this in the browser and said what would end it**: "the day
+    // GET /api/transactions grows a page, this component keeps rendering and starts
+    // describing the page it was handed rather than the month -- with no error, no
+    // warning, and a number that looks entirely plausible. The fix on that day is a
+    // sum on the server in decimal, not a bigger page." This is that day and that
+    // fix.
+    //
+    // What is given up is the property that made #68's first acceptance test true by
+    // construction: the totals and the rows below them came from one array, so they
+    // could not disagree. They are two queries now, made a few milliseconds apart,
+    // and a transaction saved between them shows in one and not the other until the
+    // next reload. That is a real regression and it is the cheaper half of the trade
+    // -- the alternative is a client adding up a page and calling it a month.
+    //
+    // The month is required rather than defaulted to the server's own clock, which is
+    // MonthRange's paragraph: OccurredAt is a plain day with no zone (#17), so which
+    // month a row falls in is a question only the reader's calendar can answer.
+    private static async Task<Results<Ok<MonthSummaryResponse>, ProblemHttpResult>> MonthSummaryAsync(
+        AppDbContext db,
+        CancellationToken cancellationToken,
+        string? month = null)
+    {
+        if (!MonthRange.TryParse(month, out var first, out var next))
+        {
+            return TypedResults.Problem(
+                detail: "Ask for a month as four digits, a dash and two digits: 2026-08.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        // GroupBy translated into SQL, which is the whole point -- the rows never
+        // leave Postgres and what comes back is one line per (currency, category)
+        // pair, of which there are at most eleven plus one per currency.
+        //
+        // No ownership condition, and that is the property #89 chose an endpoint over
+        // a psql script for: AppDbContext's global filter puts it there, so a
+        // summary cannot be made to add up somebody else's spending by forgetting a
+        // clause. A hand-written WHERE would look exactly as right.
+        //
+        // The range is half-open on occurred_at and therefore served by the same
+        // index the list walks, with owner_id pinned by equality above it.
+        var groups = await db.Transactions
+            .Where(t => t.OccurredAt >= first && t.OccurredAt < next)
+            .GroupBy(t => new { t.Currency, t.Category })
+            .Select(g => new
+            {
+                g.Key.Currency,
+                g.Key.Category,
+
+                // Sum of a decimal, so Postgres adds numeric(18,2) values in
+                // numeric. That is the sentence money.ts exists to work around in
+                // JavaScript, and it is free here.
+                Total = g.Sum(t => t.Amount),
+                Count = g.Count(),
+            })
             .ToListAsync(cancellationToken);
 
-        // The explicit type argument is needed because List<T> is being widened
-        // to IReadOnlyList<T>, and inference would otherwise pin the return type
-        // to Ok<List<TransactionResponse>> and fail to match the signature.
-        return TypedResults.Ok<IReadOnlyList<TransactionResponse>>(transactions);
+        // The shaping and the ordering happen in memory, deliberately. There are a
+        // dozen rows by this point, so ordering them in SQL would buy nothing and
+        // would put #68's two ordering rules into a query where the reason for them
+        // cannot be written beside them. The rules are the ones that were in
+        // summary.ts, moved rather than changed.
+        var currencies = groups
+            .GroupBy(row => row.Currency)
+            .Select(byCurrency => new CurrencyTotals(
+                byCurrency.Key,
 
-        // No paging and no limit, matching #3. Worth saying out loud rather than
-        // forgetting: this returns the whole table, which is right for one
-        // person's weekly spending and wrong the moment it is not.
+                // Largest first, then by name, so two equal totals are ordered by a
+                // rule rather than by whichever row the grouping met first. The
+                // uncategorised row takes its place among the others by its own total
+                // and is pinned to neither end: it is a row like any other.
+                [.. byCurrency
+                    .Select(row => new CategoryTotal(row.Category, row.Total, row.Count))
+                    .OrderByDescending(row => row.Total)
+                    .ThenBy(row => row.Category ?? UncategorisedSortsLast, StringComparer.Ordinal)],
+
+                byCurrency.Sum(row => row.Total),
+                byCurrency.Sum(row => row.Count)))
+
+            // By how many transactions, and deliberately not by the total. Ordering
+            // the currency blocks by their totals would put 500 MDL above 400 EUR,
+            // which is the same mistake as adding them: it treats two numbers in
+            // different units as comparable, and nothing in this project converts
+            // between them. A count is a count in any currency.
+            .OrderByDescending(currency => currency.Count)
+            .ThenBy(currency => currency.Currency, StringComparer.Ordinal)
+            .ToList();
+
+        return TypedResults.Ok(new MonthSummaryResponse(currencies));
+    }
+
+    /// <summary>Where the uncategorised row sorts when totals tie.</summary>
+    // A sort key and never a value: nothing renders this string, and the client
+    // decides what the absent category is called (#68 calls it "Uncategorised").
+    // Sorting nulls with a word that begins with a tilde puts them after every real
+    // category name in an ordinal comparison, which is the arbitrary-but-stable half
+    // of a tiebreak -- the total decided the order already, and this only has to be
+    // the same answer twice.
+    private const string UncategorisedSortsLast = "~";
+
+    /// <summary>How many rows a backfill would mark. #95.</summary>
+    // The count #93 put on the button, which used to be arithmetic over the loaded
+    // rows and cannot be any more -- a paged client would offer to categorise the
+    // fifty on screen while the server marked every uncategorised row in the table.
+    // At about 0.62 US cents a call (#87) that is a bill discovered afterwards, which
+    // is the exact trap #93's third bullet exists to prevent.
+    //
+    // **It counts through the same expression the POST acts through**, which is the
+    // only thing that makes the number on the button true. Two predicates that mean
+    // the same thing are two predicates that drift, and the drift here is silent and
+    // is money.
+    private static async Task<Ok<BackfillCountResponse>> CountBackfillableAsync(
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        // CountAsync, so Postgres answers with a number rather than sending rows for
+        // this process to length-check. It reads the same index the sweep does and
+        // is scoped by the global filter without asking, the way the POST is.
+        var count = await db.Transactions
+            .Where(PendingCategorization.Backfillable(PendingCategorization.DefaultMaxAttempts))
+            .CountAsync(cancellationToken);
+
+        return TypedResults.Ok(new BackfillCountResponse(count));
     }
 
     /// <summary>The only content type this endpoint accepts, and it is a security control.</summary>

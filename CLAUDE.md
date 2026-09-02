@@ -3953,6 +3953,179 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   would keep it, and it is a change to how testing works here rather than part of
   #94.
 
+- **The list is paged, and the month is added up by Postgres -- decided
+  2026-09-02** (#95). `src/LandMoney.Web/Api/TransactionCursor.cs` is the token and
+  the comparison, `TransactionPaging.cs` the order and the page size, `MonthRange.cs`
+  the half-open month; the screens are the "Load more" button in
+  `TransactionList.tsx` and a `MonthSummary.tsx` that now fetches. 62 new .NET
+  tests, and they still need no Postgres, no Docker and no network. No new
+  dependency; one migration, and it is an index.
+
+  **`GET /api/transactions` answered every row there was, from #3 until now**, and
+  #68's summary and #93's backfill count were both arithmetic over the array that
+  arrived. #68's own comment named the day: "it stops being fine silently ... the
+  fix on that day is a sum on the server in decimal, not a bigger page."
+
+  **The cursor carries three keys and not the two #95 names, and the third is a
+  measurement rather than caution.** The trap the issue records -- a cursor holding
+  only the date repeats or drops rows that tie -- has a second floor under it:
+  `CreatedAt` ties too. Three hundred transactions constructed the way `ImportAsync`
+  constructs them, truncated to the microsecond Postgres stores, gave **21 distinct
+  values** -- about fourteen rows per identical `(occurred_at, created_at)` pair. The
+  primary key is the tiebreak because it is the only column here that cannot tie, and
+  it had to join **the index** and not only the ORDER BY: with three sort keys over a
+  two-column index Postgres walks the index and sorts each tie group, which is cheap,
+  correct, and the sort step #95's EXPLAIN asks not to see.
+
+  What that costs is that **.NET and Postgres do not agree how to order a uuid** --
+  `Guid.CompareTo` compares the first three fields as integers, Postgres compares
+  sixteen bytes. Nothing is broken, because both the comparison and the ORDER BY
+  happen in Postgres; it means the order cannot be reproduced in C#, so nothing may
+  sort a page client-side and expect to agree with the server.
+
+  **The finding worth more than the feature: the correct predicate was not the fast
+  one, and the difference is invisible in every test that does not read a plan.** The
+  nested comparison a cursor needs --
+  `a < @a OR (a = @a AND (b < @b OR (b = @b AND c < @c)))` -- is what makes the walk
+  correct, and Postgres will **not** push it into an index. Measured on 5,000 rows,
+  the same page in the middle of the list:
+
+      without:  Index Scan Backward ... Rows Removed by Filter: 1925
+      with:     Index Cond: (owner_id = @o AND occurred_at <= @d)
+                Rows Removed by Filter: 25
+
+  So the scan started at the newest row and discarded everything above the cursor --
+  **OFFSET's work, arriving silently through the change that exists to avoid it**. A
+  redundant `occurred_at <= @d` conjunct beside the disjunction fixes it: it changes
+  no row, because everything the disjunction matches already satisfies it, and it
+  becomes an Index Cond. The 25 that remain are the one tie group at the boundary,
+  which is irreducible. The alternative is the row-value form Postgres pushes in
+  whole, `(occurred_at, created_at, id) < (@d, @c, @i)`; **EF Core translates no
+  tuple comparison**, so taking it means `FromSql` and writing the SELECT list, the
+  projection and the owner filter out by hand -- the last of which is the thing
+  `AppDbContext`'s global filter exists to make impossible to forget.
+
+  **`Take(size + 1)` rather than a COUNT, and it is what makes the last page
+  knowable.** A cursor built from the final row of every page is always non-null, so
+  a client discovers the end by asking for a page that comes back empty -- one wasted
+  round trip per list, and a "Load more" button that survives the end of the table.
+  One extra row fetched and thrown away answers it inside the page that raised it.
+
+  **A bad cursor is a 400 and a bad limit is clamped**, and the asymmetry is the
+  decision. A limit of 5,000 names a real intention this server declines to honour in
+  full, and two hundred rows is a complete answer to it; a token that does not parse
+  names a place that does not exist, and answering it with an empty page is
+  indistinguishable from having reached the end -- the one wrong answer that looks
+  exactly like a right one. Zero and negative become the default for the same reason.
+  `?cursor=` empty is read as absent, because `?limit=` already is: the framework
+  binds an empty value to a null `int?`, and two query parameters of one endpoint
+  must not disagree about what an unset variable in a client's query string means.
+
+  **The response is an envelope and the break is deliberate.** A `Link` header
+  keeping the bare array is what GitHub's API does and loses on the thing this
+  repository keeps choosing: a header is a fact no type describes, so a proxy that
+  strips it turns paging off with nothing reporting it. The bare array's one real
+  virtue -- a client that never heard of paging keeps working -- is exactly what is
+  wrong with it now, because such a client silently starts describing fifty rows as
+  the table. A changed shape is a compile error in the one client there is.
+
+  **`GET /api/transactions/summary?month=YYYY-MM`, and the month is the client's.**
+  `OccurredAt` is a plain day with no zone (#17), so which month a row falls in is a
+  question only the reader's calendar answers; a server picking it off its own clock
+  would put the first and the last day of every month in the wrong bucket for most of
+  the world. It is required rather than defaulted, and refused rather than guessed.
+  `MonthRange` is half-open -- `>= 2026-08-01 AND < 2026-09-01` -- which needs no
+  arithmetic about 28, 30 or 31 and is served by the same index with `owner_id`
+  pinned above it.
+
+  **`money.ts` lost both halves of its arithmetic, and that is the larger half of the
+  deletion.** #68 added the month up in integer minor units because doubles do not
+  add exactly; Postgres adds `numeric`, so `toMinorUnits` and `formatMinorUnits` went
+  with the sum. **Nothing in this client adds two amounts together any more**, and it
+  is not enforced by anything there -- it is enforced by there being no total on the
+  screen that side computes.
+
+  **What is given up is #68's best property, said plainly**: the totals and the rows
+  below them came from one array and could not disagree. They are two requests now,
+  so a transaction saved between them shows in one and not the other until the next
+  write. Which is why `App` grew a **second counter**: `reloads` means "fetch the
+  list again" and three of the five write handlers deliberately do not, changing rows
+  in place instead (#63, #94). `writes` is bumped by all five. The one an author
+  forgets is the category correction -- it moves money between two rows of the
+  summary and changes nothing the list is showing.
+
+  **#93's count had to move too, and that one is money rather than a number.** It
+  counted the loaded rows, so a paged client would have offered to categorise the
+  fifty on screen while the POST marked every uncategorised row in the table -- at
+  about 0.62 US cents a call (#87), a year of imported statements discovered
+  afterwards, which is the exact trap #93's third bullet exists to prevent.
+  `GET /api/transactions/backfill-categories` answers through the same
+  `PendingCategorization.Backfillable` the POST acts through: the same collection,
+  asked about the two ways HTTP has. A URL of its own would be a second name for one
+  predicate.
+
+  **The poll refreshes the rows it is showing and never changes which rows those
+  are.** Before paging it fetched the list and replaced it, which was the same thing.
+  Asking for the first page would truncate a reader who has pressed "Load more";
+  walking every loaded page is one request per fifty rows every two seconds. So it
+  asks for a window as deep as the reader has scrolled and merges by id -- and the
+  window is deliberately **not clamped on the client**, because the ceiling is
+  `TransactionPaging.MaxPageSize` and writing it down twice is a second place to
+  change it. A list grown past 200 simply stops being refreshed beyond that depth
+  until the next reload.
+
+  **`handleLoadMore` compares the cursor and not only the status**, which is the one
+  race here. A poll or a write can replace the list while the request is in flight;
+  appending rows fetched from the old cursor to the new list puts the same
+  transactions in twice, and it would read as a duplicate row in the database rather
+  than as a bug in a browser.
+
+  **A button rather than an IntersectionObserver.** Infinite scroll cannot be reached
+  from a keyboard, fetches whether or not anybody wanted more -- which on a container
+  that scales to zero (#61) is a request that wakes it up -- and would be the one
+  part of this with no test of any kind behind it, since this client still has no
+  test framework (#67). The caption changed with it: "Everything recorded" above a
+  page is the silent half of paging written as a sentence, so it says how many are on
+  screen until the last page.
+
+  **Verified against 5,000 seeded rows with 197 tie groups of up to 26.** The plan is
+  `Index Scan Backward using ix_transactions_owner_id_occurred_at_created_at_id`,
+  with **no sort step**, on the first page and on a cursor page alike. Walking all
+  100 pages in SQL returned 5,000 rows, 5,000 distinct, none skipped; over HTTP the
+  same walk returned 5,000 distinct rows in 100 pages and **a second walk was
+  byte-identical to the first**, which is #95's third acceptance test. The summary
+  and the backfill count were cross-checked against `GROUP BY` and `count(*)` run
+  directly in `psql` and agreed exactly, currency by currency. The first screen is
+  **12,130 bytes** against about 1.2 MB for the whole table, derived from the 200-row
+  page at 242 bytes a row.
+
+  **Checked by breaking it, the way #21 asks and #95's own trap describes: the same
+  walk with a two-key cursor loses 75 of the 5,000 rows.** That is the classic bug
+  reproduced rather than argued about, and it is the whole justification for the
+  third key. It took two attempts to see: the first seed gave every day exactly 25
+  rows, so page boundaries at 50 fell precisely between tie groups and the broken
+  cursor passed. **A test whose data is too tidy to fail is a test that has never
+  been seen to catch anything** -- the same lesson #89 recorded about a culture test
+  that could not fail.
+
+  **And the #52 check, which is the one that has caught a real bug here before.** A
+  second account sees an empty list, an empty summary and a count of zero -- and
+  **using the first account's cursor sees nothing either**. A cursor is a position in
+  an order and carries no authority; the global query filter is applied to a paged
+  query the way it is applied to every other, without the query mentioning ownership.
+
+  **What is not automated, said plainly.** Everything about the rows: that a page is
+  fifty long, that the cursor lands where it should, and that the summary adds up the
+  month all need Postgres, which is the wall `AuthorizationTests` and #62 both
+  document. What the suite holds is the SQL both halves generate -- through
+  `ToQueryString`, which needs no connection -- the page-size rules, the lookahead
+  arithmetic, the cursor's round trip under `ar-SA` and `ro-RO`, and the two
+  refusals, which are the only part of these endpoints reachable end to end because
+  both happen before the handler touches the database. The client half has no test
+  framework at all, so the merge, the cursor race and the button are checked by
+  `tsc`, by `oxlint` and by reading. The screen was not opened in a browser, because
+  signing in means typing a password.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as

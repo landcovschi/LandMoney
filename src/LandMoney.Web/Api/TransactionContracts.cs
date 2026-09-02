@@ -347,3 +347,106 @@ public sealed record CategorySuggestionResponse(string? Category, string? Source
 // could not have known about; a list here would be a snapshot that is wrong on
 // arrival and looks authoritative.
 public sealed record BackfillResponse(int Marked);
+
+/// <summary>One page of the list, and where the next one starts. #95.</summary>
+// **An envelope rather than a bare array, and it is a breaking change made on
+// purpose.** GET /api/transactions answered `[...]` from #3 until now, and the
+// alternative was to keep that shape and put the cursor in a Link header the way
+// GitHub's API does. It loses on the thing this repository keeps choosing: a header
+// is a fact about the response that no type describes, so api/types.ts would gain a
+// parse of a string nothing checks, and a proxy that strips it turns paging off with
+// no error anywhere -- the same failure #89's X-Labelled-Rows accepts because
+// getting it wrong there costs a row count and here it would cost the rest of the
+// table.
+//
+// The bare array had one real virtue, which is that a client that never heard of
+// paging kept working. That is exactly what makes it wrong now: such a client
+// silently starts describing the first fifty rows as though they were all of them,
+// which is #68's "it stops being fine silently" arriving through the fix for it. A
+// changed shape is a compile error in the one client there is.
+public sealed record TransactionPage(
+    IReadOnlyList<TransactionResponse> Items,
+
+    /// <summary>The token that asks for the rows after the last one here, or null at the end.</summary>
+    // Null means there is nothing more, and it is knowable *inside* this response
+    // because the query fetched one row further than the page -- see
+    // TransactionPaging.PageAsync. A cursor built unconditionally from the last row
+    // would always be non-null, so the end of the list could only be discovered by
+    // asking for a page that comes back empty.
+    //
+    // Opaque, and TransactionCursor says why: a client that can read the parts is a
+    // client that will build one, and then the shape of it stops being this
+    // application's to change.
+    string? NextCursor);
+
+/// <summary>What one month cost, by currency and then by category. #95.</summary>
+// **Summed by Postgres in `numeric`, which is the point of moving it here.** #68 did
+// this arithmetic in the browser, in integer minor units, and argued for it: the
+// list was fetched whole, so the totals and the rows below them were the same array
+// counted twice and could not disagree. Paging ends that -- a client can only add up
+// what it happens to have loaded -- and #95's third trap says so.
+//
+// So the addition is a `decimal` in the database now, which removes the question
+// money.ts answered rather than answering it again: there is no double, no
+// conversion to minor units and back, and no floor under which the exactness was
+// only a coincidence about small numbers. The client formats what it is given.
+//
+// The nesting is #68's and is kept deliberately: **a currency is the outer grouping
+// and not a column**, so there is nowhere in this type to put a number that mixes
+// EUR and MDL. A flat list of {currency, category, total} rows carries exactly the
+// same facts and leaves that addition one GroupBy away, in whichever language reads
+// it next.
+public sealed record MonthSummaryResponse(
+    /// <summary>Busiest first: by transaction count, never by total.</summary>
+    // #68's rule and the reason the order is the server's now. Ordering currency
+    // blocks by their totals would put 500 MDL above 400 EUR, which is the same
+    // mistake as adding them -- it treats two numbers in different units as
+    // comparable, and nothing in this project converts between them. A count is a
+    // count in any currency, so it is the one quantity here that can order these.
+    IReadOnlyList<CurrencyTotals> Currencies);
+
+/// <summary>Everything spent in one currency, in one month. #95.</summary>
+public sealed record CurrencyTotals(
+    string Currency,
+
+    /// <summary>Largest first, then by name so that a tie is broken by a rule.</summary>
+    IReadOnlyList<CategoryTotal> Categories,
+
+    /// <summary>The sum of the rows above. One currency, so this is a legal addition.</summary>
+    decimal Total,
+
+    int Count);
+
+/// <summary>One category's share of one currency, for one month. #95.</summary>
+public sealed record CategoryTotal(
+    /// <summary>Null is a row rather than a gap.</summary>
+    // #68: uncategorised is "a row like any other, and an honest one -- it is what
+    // the fallback and the abstentions produce". Three different things make it --
+    // the categorizer abstained (#39), it was never called (an import, #62), or it
+    // was not running (#61) -- and all three are the same null in the column, which
+    // is why the screen's tooltip has to name all three.
+    //
+    // Null rather than a sentinel string, which is the same call summariseMonth made
+    // with its Map key: a sentinel is a value a real category could one day collide
+    // with, and null cannot collide with anything in the closed list of eleven.
+    string? Category,
+
+    decimal Total,
+
+    int Count);
+
+/// <summary>How many rows a backfill would mark, before one is asked for. #95.</summary>
+// #93 put that number on the button by counting the loaded rows, and paging breaks
+// it in the direction that costs money: the button would offer to categorise the
+// fifty transactions on screen and the server would mark every uncategorised row in
+// the table. At about 0.62 US cents a call (#87) a year of imported statements is a
+// couple of dollars, discovered afterwards -- which is exactly the trap #93's third
+// bullet exists to prevent, reopened by the change that pages the list.
+//
+// A GET on the path the POST already has, which is the one thing here worth
+// arguing. It reads as a verb in a URL and is not: what this answers is *the rows
+// that endpoint would act on*, so the two are the same collection asked about in the
+// two ways HTTP has -- count it, or do it. A separate /uncategorised-count would be
+// a second name for one predicate, and the failure of these two drifting apart is
+// silent and is money.
+public sealed record BackfillCountResponse(int Count);

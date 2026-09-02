@@ -97,8 +97,20 @@ public class OwnershipFilterTests
 
     // The index #52 replaced, asserted through the model rather than through a
     // plan. The query is now `WHERE owner_id = @p ORDER BY occurred_at DESC,
-    // created_at DESC`, and an index not starting with the equality column cannot
-    // serve the filter -- so this is the shape, in the order that matters.
+    // created_at DESC, id DESC`, and an index not starting with the equality column
+    // cannot serve the filter -- so this is the shape, in the order that matters.
+    //
+    // **Id joined it in #95 and it is a correctness column, not a wider one.** The
+    // list is walked by a keyset cursor now, which needs a total order: OccurredAt
+    // ties within a day by design (#17) and CreatedAt ties too, at about fourteen
+    // rows per value in a three-hundred-row import. It has to be in the *index* and
+    // not only in the ORDER BY, or Postgres walks the index and sorts each tie group
+    // -- correct, cheap, and a sort step, which is the thing #95's EXPLAIN asks not
+    // to see.
+    //
+    // The exact list rather than a StartsWith, because the failure this catches is a
+    // column added or reordered by somebody who did not read TransactionPaging: the
+    // order of the four is what makes the cursor's comparison and the index agree.
     [Fact]
     public void The_index_leads_with_the_column_the_query_filters_on()
     {
@@ -111,6 +123,7 @@ public class OwnershipFilterTests
                 nameof(Transaction.OwnerId),
                 nameof(Transaction.OccurredAt),
                 nameof(Transaction.CreatedAt),
+                nameof(Transaction.Id),
             ],
             index.Properties.Select(p => p.Name));
     }
