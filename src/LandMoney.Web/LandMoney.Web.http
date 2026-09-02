@@ -1,4 +1,4 @@
-# Requests for #3. Run the app first: dotnet run --project src/LandMoney.Web
+﻿# Requests for #3. Run the app first: dotnet run --project src/LandMoney.Web
 #
 # The http port, which is now the simpler of the two. UseHttpsRedirection is
 # gated to non-Development as of 2026-08-23, so nothing here is answered with a
@@ -291,3 +291,17 @@ occurred_at,amount,currency,description
 ### its category in the screen -- the dropdown in the list -- and run this. The row
 ### appears; every row whose category the categorizer guessed does not.
 GET {{host}}/api/transactions/labelled
+### #93. Put every uncategorised row into the sweep's queue. Expect 200 with a
+### count of how many were marked -- and then, within a sweep interval or two, those
+### rows carrying a category and a categorySource in the list above.
+###
+### It marks nothing that has a category and nothing labelled `human`, so running it
+### twice in a row marks only the rows the categorizer had no opinion about -- which
+### is deliberate: it is how a switch from the rules to the model reaches the rows
+### the rules declined. The quickest way to see it do its job is one of the imports
+### above, which store no category at all, then this.
+###
+### Every row it marks is one call to the categorizer. Against the model that is
+### about 0.62 US cents each, which is why the screen shows the count before the
+### button rather than the number afterwards.
+POST {{host}}/api/transactions/backfill-categories

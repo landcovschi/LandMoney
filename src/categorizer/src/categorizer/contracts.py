@@ -9,7 +9,7 @@ the same job `ValidationFilter<T>` does by hand on the .NET side.
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from categorizer.categories import CATEGORIES
 
@@ -98,3 +98,106 @@ class CategorizeResponse(BaseModel):
 
     category: Category | None
     source: Source
+
+
+# The most rows one batch request may carry -- #93.
+#
+# A bound rather than a preference. #93's second trap: "a year of imports in one
+# request is the same failure the per-row loop had, in a nicer coat" -- one HTTP
+# call whose duration grows with the file, against a caller that has to give up on
+# it eventually. Chunking is the caller's job; this is the number it has to chunk
+# to, and going over it is a 422 rather than a request that quietly takes minutes.
+#
+# It lives here rather than in `main.py` because the .NET side has to know it: a
+# sweep configured to send more would be refused, and a 422 reads from over there
+# as the categorizer misbehaving rather than as a number in `appsettings.json`.
+# `CategorizerBatchCapTests` reads this line the way `CategoriesTests` reads
+# `categories.py`, which is this repository's answer to a constant that has to
+# exist in two languages.
+#
+# A hundred at roughly 2.1 s a call (#60) is about 26 seconds at the default
+# concurrency, which is what the .NET budget is chosen against.
+MAX_BATCH_ITEMS = 100
+
+
+class BatchItem(CategorizeRequest):
+    """One row of a batch: a `CategorizeRequest`, plus the caller's own name for it.
+
+    **Inherited rather than retyped, and that is #93's last trap answered by the
+    type instead of by care.** A batch that answers positionally and drops a row
+    shows up as one transaction categorised as its neighbour -- silently, and long
+    afterwards. An id chosen by the caller makes a dropped row a *missing* row,
+    which the caller can see, instead of a shifted one, which it cannot.
+
+    Inheriting also means the per-row validation is the same declaration for one
+    row as for a hundred: an amount refused by `POST /categorize` is refused here,
+    with the same message, because it is the same field.
+
+    The id is opaque to this service and is never logged. The .NET side sends a
+    transaction id; nothing here may depend on that, and nothing here writes it
+    down -- #64's rule about keeping the user's own data out of logs applies to the
+    key as much as to the description it names.
+    """
+
+    id: str = Field(min_length=1, max_length=64)
+
+
+class CategorizeBatchRequest(BaseModel):
+    """Many rows in, one round trip. #93."""
+
+    items: list[BatchItem] = Field(min_length=1, max_length=MAX_BATCH_ITEMS)
+
+    @field_validator("items")
+    @classmethod
+    def _ids_must_be_unique(cls, items: list[BatchItem]) -> list[BatchItem]:
+        """Two rows with one id have no unambiguous answer, so the request is refused.
+
+        Answering both under one key loses one of them; answering one key twice
+        makes the response a list the caller has to disambiguate, which is the
+        positional bug wearing the id's clothes. A 422 naming the duplicate is the
+        only outcome that cannot be misread.
+        """
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+
+        for item in items:
+            if item.id in seen:
+                duplicates.add(item.id)
+
+            seen.add(item.id)
+
+        if duplicates:
+            raise ValueError(
+                f"ids must be unique within a batch; these repeat: {sorted(duplicates)}"
+            )
+
+        return items
+
+
+class BatchAnswer(CategorizeResponse):
+    """One answer, and the id of the row it answers.
+
+    Inherited from `CategorizeResponse` for the reason `BatchItem` is inherited
+    from `CategorizeRequest`: #93 asks that the per-row shape of the answer be
+    preserved, and the cheapest way to preserve a shape is not to write it a second
+    time. A field added to the single-row response is in the batch by construction.
+    """
+
+    id: str
+
+
+class CategorizeBatchResponse(BaseModel):
+    """The answers, in the order the items arrived.
+
+    **There may be fewer answers than items, and that is the contract rather than
+    an accident.** A predictor that raises on one row must not cost the other
+    ninety-nine their answers, so that row is left out and logged; the caller sees
+    an id it sent and did not get back, which is exactly the signal it needs in
+    order to try again. A response padded with nulls would say "asked and got
+    nothing", which is an abstention, and an abstention is a final answer.
+
+    The order is the request's, which is a convenience and never the contract: the
+    id is what pairs an answer with its row.
+    """
+
+    answers: list[BatchAnswer]

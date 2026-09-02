@@ -1,4 +1,5 @@
 using LandMoney.Web.Data;
+using LandMoney.Web.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace LandMoney.Web.Categorizing;
@@ -58,7 +59,11 @@ public sealed class CategorizerSweep(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var seconds = configuration.GetValue("Categorizer:SweepIntervalSeconds", DefaultIntervalSeconds);
-        var batchSize = configuration.GetValue("Categorizer:SweepBatchSize", DefaultBatchSize);
+        // Held inside what one request may carry -- see CategorizerBatch. A number over
+        // the cap would be a 422 on every tick, which is indistinguishable in a log
+        // from a categorizer that is misbehaving.
+        var batchSize = CategorizerBatch.HeldWithinOneRequest(
+            configuration.GetValue("Categorizer:SweepBatchSize", DefaultBatchSize));
         var maxAttempts = configuration.GetValue("Categorizer:MaxCategorizationAttempts", DefaultMaxAttempts);
 
         // Zero or negative turns the sweep off, and it is a supported state rather
@@ -105,7 +110,7 @@ public sealed class CategorizerSweep(
         }
     }
 
-    /// <summary>One tick: claim a batch, ask about each row, write what came back.</summary>
+    /// <summary>One tick: claim a batch, ask about all of it, write what came back.</summary>
     internal async Task SweepOnceAsync(int batchSize, int maxAttempts, CancellationToken cancellationToken)
     {
         // A scope per tick. This class is a singleton -- AddHostedService registers
@@ -156,41 +161,104 @@ public sealed class CategorizerSweep(
             .Take(batchSize)
             .ToListAsync(cancellationToken);
 
+        // Nothing owed is the ordinary state of this application, and it is not an
+        // event. Returning here rather than letting the client answer an empty batch
+        // keeps that true on both sides: the Python endpoint refuses a request that
+        // asks nothing, and a `refused` counted every five seconds would make the one
+        // line that is supposed to mean something is wrong mean nothing at all.
+        if (owed.Count == 0)
+        {
+            return;
+        }
+
+        // #93. One call for the whole batch, where #92 made one per row.
+        //
+        // The saving is not the round trips -- twenty requests to a service on the
+        // same network cost a few milliseconds more than one. It is that the Python
+        // side asks about the rows concurrently, so twenty model calls at about 2.1 s
+        // each are about six seconds rather than forty-two. #62's imported rows are
+        // the reason that matters at all: a three-hundred row file drains in a couple
+        // of minutes instead of ten.
+        var result = await categorizer.SweepCategoriesAsync(
+            [.. owed.Select(transaction => new CategorizerBatchRow(
+                Key(transaction), transaction.Description, transaction.Amount, transaction.Currency))],
+            cancellationToken);
+
+        // **The call failed as a whole, and only the oldest row is charged for it.**
+        //
+        // This is the one place #93 changes what #92 measured, and it is deliberately
+        // written so that it does not. A batch failure says nothing about any
+        // particular row in it -- the service is down, or slow, or refused the shape
+        // of the request -- so charging all twenty would abandon a whole backlog after
+        // two and a half minutes of outage, where #92's per-row loop cost one row in
+        // the same time. Charging the oldest keeps that behaviour exactly: one call
+        // per tick, one attempt per tick, and a backlog that survives an outage and
+        // drains when the service comes back.
+        //
+        // It still terminates, which is the property the cap is actually for. The
+        // batch is ordered oldest-first, so the row being charged is always the head
+        // of the queue; a permanent failure retires it after `maxAttempts` ticks and
+        // then starts on the next one. Nothing is retried for ever.
+        //
+        // What it gives up against CountsAgainstTheCap's own reasoning, said plainly:
+        // a batch that timed out may have reached the model for every row in it and
+        // been billed for all of them, and only one attempt is recorded. That
+        // reasoning was written for a call that carried one row. The bill is bounded
+        // by the row count and by the spend limit at Anthropic (#87), never by this
+        // counter; what this counter bounds is an infinite retry, and it still does.
+        if (result.CallFailure is { } failure)
+        {
+            if (CategorizerOutcome.CountsAgainstTheCap(failure))
+            {
+                await ChargeAsync(db, owed[0].Id, maxAttempts, cancellationToken);
+            }
+
+            return;
+        }
+
         foreach (var transaction in owed)
         {
-            var result = await categorizer.SweepCategoryAsync(
-                transaction.Description, transaction.Amount, transaction.Currency, cancellationToken);
+            // Every row that was sent has an entry, including the ones the service
+            // did not answer for -- CategorizerClient fills those in as `unusable`
+            // rather than leaving a hole, so there is no missing-key case to decide
+            // about here. The lookup is still guarded, because a dictionary this
+            // method did not build is not a dictionary this method may assume about.
+            if (!result.Rows.TryGetValue(Key(transaction), out var row))
+            {
+                continue;
+            }
 
             // The source is what says something answered at all -- #67's rule,
             // unchanged. A suggestion and an abstention both mean the question has
             // been put and answered, so the row stops owing one either way: the
             // rules decline on roughly a third of the labelled set and asking them
             // the same question again would buy the same word at the same price.
-            if (result.Answer.Source is not null)
+            if (row.Answer.Source is not null)
             {
-                await StoreAsync(db, transaction.Id, maxAttempts, result.Answer.Suggestion, cancellationToken);
+                await StoreAsync(db, transaction.Id, maxAttempts, row.Answer.Suggestion, cancellationToken);
                 continue;
             }
 
-            // Nothing usable came back, so the rest of this batch is not worth
-            // asking about: whatever is wrong is a property of the service rather
-            // than of this row. Charging the attempt first is what keeps the
-            // ceiling honest -- see CountsAgainstTheCap for which outcomes are
-            // charged and why a timeout is among them.
-            //
-            // Stopping the tick is what keeps an outage cheap. Without it a
-            // categorizer that is down burns one attempt on every owed row every
-            // five seconds, and a backlog would be abandoned in a couple of
-            // minutes; with it, an outage costs one attempt on the oldest row per
-            // tick and everything behind it is untouched.
-            if (CategorizerOutcome.CountsAgainstTheCap(result.Outcome))
+            // The call worked and this row still got nothing usable out of it, so
+            // whatever went wrong is about this row rather than about the service --
+            // which is why the rest of the batch is still written rather than
+            // abandoned, and why #92's `break` is gone from here. Charging the attempt
+            // is what keeps the ceiling honest; see CountsAgainstTheCap for which
+            // outcomes are charged and why a timeout is among them.
+            if (CategorizerOutcome.CountsAgainstTheCap(row.Outcome))
             {
                 await ChargeAsync(db, transaction.Id, maxAttempts, cancellationToken);
             }
-
-            break;
         }
     }
+
+    /// <summary>What the categorizer calls this row while it is being asked about.</summary>
+    // The primary key, as a string, and written once so the two sides of the lookup
+    // cannot spell it differently -- which would be a batch that answers nothing and
+    // charges everything. "D" is Guid's default format and is named rather than
+    // implied, because the key has to round-trip through JSON and a format chosen by
+    // the default is a format that can change under a runtime upgrade.
+    private static string Key(Transaction transaction) => transaction.Id.ToString("D");
 
     /// <summary>Writes the answer, and only if the row still wants one.</summary>
     // ExecuteUpdate rather than mutating the tracked entity and calling

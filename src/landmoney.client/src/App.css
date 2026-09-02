@@ -708,6 +708,23 @@ button:not(.link)[aria-busy='true']::after {
   align-self: flex-start;
 }
 
+/* --- the backfill (#93) ----------------------------------------------------- */
+
+/* Exactly what .export declares, and declared as a second selector on those rules
+   rather than as its own block: this card has the same shape -- a paragraph, a
+   button, and an .import-report underneath -- so anything that made the two differ
+   would be a difference nobody chose. Written here rather than by adding .backfill
+   to the two selectors above because the section comments are how this file is
+   read, and a rule under "the export" that also styles the backfill is a rule
+   somebody edits without knowing what else it moves. */
+.backfill {
+  gap: var(--space-3);
+}
+
+.backfill button {
+  align-self: flex-start;
+}
+
 /* --- the month at a glance (#68) ------------------------------------------- */
 
 /* Reuses .entry for the card, like the import form, so the three blocks above the

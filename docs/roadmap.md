@@ -664,6 +664,17 @@ again by itself after 7 days.
        getting-out -- and none of them can tick this box, because what it asks
        for is data and every one of them is a route
 
+       **#93 removed the fourth, on 2026-09-02, and this box is still empty.**
+       An imported row now gets a category without anybody asking it to one at a
+       time: `POST /categorize/batch` on the Python service asks about many rows
+       in one round trip and answers them concurrently, and a button marks every
+       uncategorised row as owing one so the sweep goes and gets it. So a bank
+       export can be imported and categorised in about the time it takes to make
+       coffee, and the correcting -- which is what actually produces a labelled
+       row -- starts from suggestions rather than from blanks. That is the whole
+       of what it changes for this box: it makes the chore shorter, and the chore
+       is still somebody's afternoon
+
 2. [x] **A rules baseline.** String matching on the description. Score it.
        This number is what everything later has to beat, and it is often
        embarrassingly hard to beat

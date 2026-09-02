@@ -44,6 +44,19 @@ public class CategorizerClientTests
     private const string Suggestion = "{\"category\":\"eating-out\",\"source\":\"rules\"}";
     private const string Abstention = "{\"category\":null,\"source\":\"rules\"}";
 
+    /// <summary>The id the one-row batch below sends, and the id its answers carry.</summary>
+    // #93. The sweep no longer asks about one row at a time, so every test in the
+    // sweep section now goes through the batch endpoint -- which is the point rather
+    // than a cost: the properties #92 asserted about a swept row have to survive the
+    // change of transport, and they are asserted through it rather than beside it.
+    private const string SweptRow = "row-1";
+
+    private const string BatchSuggestion =
+        "{\"answers\":[{\"id\":\"" + SweptRow + "\",\"category\":\"eating-out\",\"source\":\"rules\"}]}";
+
+    private const string BatchAbstention =
+        "{\"answers\":[{\"id\":\"" + SweptRow + "\",\"category\":null,\"source\":\"rules\"}]}";
+
     /// <summary>Replaces the transport. Every test here is a different answer from it.</summary>
     private sealed class StubHandler(
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
@@ -67,13 +80,33 @@ public class CategorizerClientTests
             Timeout = timeout ?? TimeSpan.FromSeconds(30),
         };
 
+        // #93. The batch call goes through a second HttpClient with its own budget,
+        // and here it is the same stub behind both -- so one `respond` answers
+        // whichever path a test asks for, and a test that means to exercise the batch
+        // simply returns a batch body.
+        //
+        // The timeout is deliberately the same one rather than something larger. The
+        // reason there are two clients in production is that eight seconds is wrong
+        // for a batch; the reason there is one number here is that a test asserting
+        // "it gave up" wants to control when, and a second knob would only mean two
+        // ways to write the same test wrongly.
+        var batch = new HttpClient(new StubHandler(respond))
+        {
+            BaseAddress = new Uri(Endpoint),
+            Timeout = timeout ?? TimeSpan.FromSeconds(30),
+        };
+
         // NullLogger rather than a spy. What is asserted here is the return value
         // and the outcome recorded beside it, and a test that also pinned the log
         // message would fail on a reworded sentence, which is not a behaviour
         // change. The outcome word is the part that is promised to stay still --
         // that is what CategorizerOutcome is for -- and it is asserted through the
         // metrics rather than through the prose that carries it.
-        return new CategorizerClient(http, metrics ?? NewMetrics(), NullLogger<CategorizerClient>.Instance);
+        return new CategorizerClient(
+            http,
+            new CategorizerBatchHttp(batch),
+            metrics ?? NewMetrics(),
+            NullLogger<CategorizerClient>.Instance);
     }
 
     /// <summary>A metrics instance of its own, so one test cannot see another's counts.</summary>
@@ -105,19 +138,41 @@ public class CategorizerClientTests
         => client.PreviewCategoryAsync("Dinner at the pizza place", 42.50m, "EUR", cancellationToken);
 
     /// <summary>The #92 path, the only one that gets the outcome as well as the answer.</summary>
-    private static Task<CategorizerResult> Sweep(
+    // A batch of one since #93, unwrapped back to the single result the assertions in
+    // that section were written against. The unwrapping is what those tests are
+    // entitled to assume: when the call itself failed there are no rows, and when it
+    // did not there is exactly one entry per row that was sent.
+    private static async Task<CategorizerResult> Sweep(
         CategorizerClient client, CancellationToken cancellationToken = default)
-        => client.SweepCategoryAsync("Dinner at the pizza place", 42.50m, "EUR", cancellationToken);
+    {
+        var result = await SweepMany(client, cancellationToken, Row(SweptRow));
+
+        return result.CallFailure is { } failure
+            ? new CategorizerResult(CategorizerAnswer.Nothing, failure)
+            : result.Rows[SweptRow];
+    }
+
+    /// <summary>The #93 path as the sweep really calls it: many rows, one call.</summary>
+    private static Task<CategorizerBatchResult> SweepMany(
+        CategorizerClient client, CancellationToken cancellationToken, params CategorizerBatchRow[] rows)
+        => client.SweepCategoriesAsync(rows, cancellationToken);
+
+    private static CategorizerBatchRow Row(string id) =>
+        new(id, "Dinner at the pizza place", 42.50m, "EUR");
 
     /// <summary>A client with nothing configured, which is a legal state since #57.</summary>
     // Not reachable through ClientThat: that one sets a base address, which is the
     // whole difference between "the categorizer said nothing" and "there is no
     // categorizer". The handler throws rather than answering, so a test that
     // accidentally sent a request would fail loudly instead of passing.
-    private static CategorizerClient UnconfiguredClient(CategorizerMetrics metrics) =>
-        new(new HttpClient(new StubHandler((_, _) => throw new InvalidOperationException("No request should be sent."))),
-            metrics,
-            NullLogger<CategorizerClient>.Instance);
+    private static CategorizerClient UnconfiguredClient(CategorizerMetrics metrics)
+    {
+        static HttpClient Silent() => new(new StubHandler(
+            (_, _) => throw new InvalidOperationException("No request should be sent.")));
+
+        return new CategorizerClient(
+            Silent(), new CategorizerBatchHttp(Silent()), metrics, NullLogger<CategorizerClient>.Instance);
+    }
 
     // --- the two normal answers ----------------------------------------------
 
@@ -314,7 +369,11 @@ public class CategorizerClientTests
         }));
         // Deliberately not setting BaseAddress at all.
         var metrics = NewMetrics();
-        var client = new CategorizerClient(http, metrics, NullLogger<CategorizerClient>.Instance);
+        var client = new CategorizerClient(
+            http,
+            new CategorizerBatchHttp(new HttpClient(new StubHandler((_, _) => Json(Suggestion)))),
+            metrics,
+            NullLogger<CategorizerClient>.Instance);
 
         Assert.Null(await Ask(client));
         Assert.False(called);
@@ -701,7 +760,8 @@ public class CategorizerClientTests
     [Fact]
     public async Task The_sweep_is_told_why_there_was_no_answer()
     {
-        var tooLong = "{\"category\":\"" + new string('x', 101) + "\",\"source\":\"rules\"}";
+        var tooLong = "{\"answers\":[{\"id\":\"" + SweptRow + "\",\"category\":\""
+            + new string('x', 101) + "\",\"source\":\"rules\"}]}";
         var unreachable = ClientThat((_, _) => throw new HttpRequestException("no route"));
         var unusable = ClientThat((_, _) => Json(tooLong));
 
@@ -723,7 +783,7 @@ public class CategorizerClientTests
     [Fact]
     public async Task A_swept_row_that_gets_a_category_reports_it_with_its_source()
     {
-        var result = await Sweep(ClientThat((_, _) => Json(Suggestion)));
+        var result = await Sweep(ClientThat((_, _) => Json(BatchSuggestion)));
 
         Assert.Equal(CategorizerOutcome.Suggested, result.Outcome);
         Assert.Equal(new CategorySuggestion("eating-out", "rules"), result.Answer.Suggestion);
@@ -736,7 +796,7 @@ public class CategorizerClientTests
     [Fact]
     public async Task A_swept_row_the_categorizer_declines_is_still_an_answer()
     {
-        var result = await Sweep(ClientThat((_, _) => Json(Abstention)));
+        var result = await Sweep(ClientThat((_, _) => Json(BatchAbstention)));
 
         Assert.Equal(CategorizerOutcome.Abstained, result.Outcome);
         Assert.Null(result.Answer.Suggestion);
@@ -772,7 +832,7 @@ public class CategorizerClientTests
     public async Task A_swept_row_is_counted_as_a_sweep_and_never_as_a_save()
     {
         var metrics = NewMetrics();
-        var client = ClientThat((_, _) => Json(Suggestion), metrics: metrics);
+        var client = ClientThat((_, _) => Json(BatchSuggestion), metrics: metrics);
 
         await Sweep(client);
 
@@ -791,5 +851,213 @@ public class CategorizerClientTests
 
         Assert.Equal(new CategorySuggestion("eating-out", "rules"), await Ask(client));
         Assert.Equal(new CategorizerAnswer("eating-out", "rules"), await Preview(client));
+    }
+
+    // --- the batch, #93 ------------------------------------------------------
+
+    // **The test this whole shape exists for.** #93's last trap is a batch that
+    // answers positionally: drop one row and every answer after it belongs to its
+    // neighbour, which is wrong data, stored, with nothing about it that looks wrong
+    // afterwards. So the stub deliberately answers in the *reverse* order and gives
+    // each row a different category -- the one arrangement in which a positional
+    // implementation is caught rather than passing by luck.
+    [Fact]
+    public async Task Each_row_gets_the_answer_that_names_it_and_never_its_neighbours()
+    {
+        var client = ClientThat((_, _) => Json(
+            """
+            {"answers":[
+              {"id":"c","category":"health","source":"rules"},
+              {"id":"a","category":"groceries","source":"rules"},
+              {"id":"b","category":"transport","source":"model"}
+            ]}
+            """));
+
+        var result = await SweepMany(client, default, Row("a"), Row("b"), Row("c"));
+
+        Assert.Null(result.CallFailure);
+        Assert.Equal(new CategorySuggestion("groceries", "rules"), result.Rows["a"].Answer.Suggestion);
+        Assert.Equal(new CategorySuggestion("transport", "model"), result.Rows["b"].Answer.Suggestion);
+        Assert.Equal(new CategorySuggestion("health", "rules"), result.Rows["c"].Answer.Suggestion);
+    }
+
+    // The Python side is allowed to answer fewer rows than it was sent -- a row whose
+    // predictor raised is left out, so the rest keep the answers they were already
+    // paid for. Every row that was sent still gets an entry here, so the sweep never
+    // has to decide what a missing key means.
+    [Fact]
+    public async Task A_row_the_batch_did_not_answer_is_unusable_and_still_owed()
+    {
+        var client = ClientThat((_, _) => Json(
+            """{"answers":[{"id":"a","category":"groceries","source":"rules"}]}"""));
+
+        var result = await SweepMany(client, default, Row("a"), Row("b"));
+
+        Assert.Equal(CategorizerOutcome.Suggested, result.Rows["a"].Outcome);
+
+        // Not `abstained`, which is the distinction that decides whether the row is
+        // ever asked about again: an abstention is a final answer and takes the row
+        // out of the queue for ever. Nothing answered about this one.
+        Assert.Equal(CategorizerOutcome.Unusable, result.Rows["b"].Outcome);
+        Assert.Equal(CategorizerAnswer.Nothing, result.Rows["b"].Answer);
+        Assert.True(CategorizerOutcome.CountsAgainstTheCap(result.Rows["b"].Outcome));
+    }
+
+    // An answer with no id cannot be paired with anything, and guessing which row it
+    // belonged to is the bug the ids exist to make impossible. The row it was meant
+    // for reports as unanswered, which is the loud version of the same fact.
+    [Fact]
+    public async Task An_answer_with_no_id_is_dropped_rather_than_given_to_a_row()
+    {
+        var client = ClientThat((_, _) => Json(
+            """{"answers":[{"category":"groceries","source":"rules"}]}"""));
+
+        var result = await SweepMany(client, default, Row("a"));
+
+        Assert.Equal(CategorizerOutcome.Unusable, result.Rows["a"].Outcome);
+    }
+
+    // **Added by a mutation sweep, and kept although that mutation survived** -- which
+    // is the interesting half. Weakening the guard above from "a non-empty id" to "an
+    // id at all" is an *equivalent* mutant: an answer keyed under the empty string
+    // matches no row this application sends, because every id is a Guid, so the row
+    // it was meant for reports as unanswered either way. #92 recorded the same shape
+    // for its `null < 30`.
+    //
+    // The test stays because it asserts the behaviour rather than the guard: an
+    // answer whose id says nothing does not get given to a row. The `Length: > 0`
+    // half of the pattern is kept for the symmetry with the null case and not for
+    // anything a test can hold.
+    [Fact]
+    public async Task An_answer_with_an_empty_id_is_dropped_too()
+    {
+        var client = ClientThat((_, _) => Json(
+            """{"answers":[{"id":"","category":"groceries","source":"rules"}]}"""));
+
+        var result = await SweepMany(client, default, Row("a"));
+
+        Assert.Equal(CategorizerOutcome.Unusable, result.Rows["a"].Outcome);
+    }
+
+    // A row that was never sent cannot be written to, and the entries that were sent
+    // are unaffected by one arriving. It is worth a log line and nothing more.
+    [Fact]
+    public async Task An_answer_for_a_row_that_was_not_sent_is_ignored()
+    {
+        var client = ClientThat((_, _) => Json(
+            """
+            {"answers":[
+              {"id":"a","category":"groceries","source":"rules"},
+              {"id":"somebody-elses-row","category":"health","source":"rules"}
+            ]}
+            """));
+
+        var result = await SweepMany(client, default, Row("a"));
+
+        Assert.Equal(CategorizerOutcome.Suggested, result.Rows["a"].Outcome);
+        Assert.Single(result.Rows);
+    }
+
+    // **A failure of the call is not a failure of any row in it**, which is the one
+    // place #93 could have changed what #92 measured and deliberately does not. The
+    // sweep charges only the oldest row for this; here the assertion is that it is
+    // given what it needs to -- one word about the call, and no rows at all, rather
+    // than twenty per-row failures it would have to recognise as one event.
+    [Fact]
+    public async Task A_batch_that_fails_as_a_whole_reports_one_reason_and_no_rows()
+    {
+        var client = ClientThat((_, _) => throw new HttpRequestException("no route"));
+
+        var result = await SweepMany(client, default, Row("a"), Row("b"), Row("c"));
+
+        Assert.Equal(CategorizerOutcome.Unreachable, result.CallFailure);
+        Assert.Empty(result.Rows);
+    }
+
+    // #64's numbers count questions about transactions, and a batch asks as many
+    // questions as it carries rows. Counting a failed batch of three as one timeout
+    // would leave "3 timed out" reading as "1", silently -- the same failure
+    // CategorizerKind was invented to prevent, one field along.
+    [Fact]
+    public async Task A_failed_batch_is_counted_once_for_every_row_it_carried()
+    {
+        var metrics = NewMetrics();
+        var client = ClientThat((_, _) => throw new HttpRequestException("no route"), metrics: metrics);
+
+        await SweepMany(client, default, Row("a"), Row("b"), Row("c"));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(3, Counted(window, CategorizerOutcome.Unreachable));
+        Assert.Equal(3, window.ByKind[CategorizerKind.Sweep]);
+    }
+
+    [Fact]
+    public async Task A_batch_that_answers_is_counted_once_for_every_row_it_answered()
+    {
+        var metrics = NewMetrics();
+        var client = ClientThat(
+            (_, _) => Json(
+                """
+                {"answers":[
+                  {"id":"a","category":"groceries","source":"rules"},
+                  {"id":"b","category":null,"source":"rules"}
+                ]}
+                """),
+            metrics: metrics);
+
+        await SweepMany(client, default, Row("a"), Row("b"));
+
+        var window = metrics.TakeWindow();
+        Assert.NotNull(window);
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Suggested));
+        Assert.Equal(1, Counted(window, CategorizerOutcome.Abstained));
+        Assert.Equal(2, window.ByKind[CategorizerKind.Sweep]);
+    }
+
+    // Nothing owed is the ordinary state of this application and is not an event. The
+    // Python side refuses a request that asks nothing, so sending one would be a
+    // `refused` counted every five seconds -- which would make the one line that is
+    // supposed to mean something is wrong mean nothing at all.
+    [Fact]
+    public async Task An_empty_batch_sends_nothing_and_counts_nothing()
+    {
+        var metrics = NewMetrics();
+        var called = false;
+        var client = ClientThat(
+            (_, _) =>
+            {
+                called = true;
+                return Json(BatchSuggestion);
+            },
+            metrics: metrics);
+
+        var result = await client.SweepCategoriesAsync([], default);
+
+        Assert.False(called);
+        Assert.Null(result.CallFailure);
+        Assert.Empty(result.Rows);
+        Assert.Null(metrics.TakeWindow());
+    }
+
+    // The batch goes to its own path, and the per-row calls do not. Getting this
+    // wrong would be a 404 or a 422 on every tick, which is `refused` -- a word that
+    // reads as the categorizer misbehaving rather than as a URL typed here.
+    [Fact]
+    public async Task The_batch_and_the_single_row_call_go_to_different_paths()
+    {
+        var paths = new List<string>();
+        var client = ClientThat((request, _) =>
+        {
+            paths.Add(request.RequestUri!.AbsolutePath);
+            return Json(request.RequestUri!.AbsolutePath.EndsWith("batch", StringComparison.Ordinal)
+                ? BatchSuggestion
+                : Suggestion);
+        });
+
+        await Ask(client);
+        await Sweep(client);
+
+        Assert.Equal(["/categorize", "/categorize/batch"], paths);
     }
 }

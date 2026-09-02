@@ -3532,6 +3532,203 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   what this change removes. Marking imported rows as owing a category is one
   property assignment away and is not in this pass.
 
+- **Many rows in one call, and an explicit act that puts the forgotten ones into
+  the queue -- decided 2026-09-02** (#93). `POST /categorize/batch` on the
+  Python service, fanned out by `src/categorizer/src/categorizer/batch.py`; the
+  sweep sends a batch rather than a row; `POST
+  /api/transactions/backfill-categories` marks every uncategorised row as owing
+  one, and the screen is
+  `src/landmoney.client/src/components/BackfillCategories.tsx`. 32 new .NET
+  tests and 22 new Python tests, none of which opens a socket. No new dependency
+  and no migration.
+
+  **What a batch buys is not the round trip**, and getting that the wrong way
+  round would have produced an endpoint worth nothing. Twenty HTTP requests to a
+  service on the same network cost a few milliseconds more than one; twenty
+  *model* calls at about 2.1 s each cost forty-two seconds. The gain is that the
+  rows are asked about **concurrently**, and one round trip is what makes that
+  possible at all -- the caller cannot fan out on its own without deciding how
+  many connections it may open at another service, which is a decision belonging
+  to the side that knows what it is calling. Eight at a time by default, clamped
+  to sixteen. **Concurrency changes when the calls happen and never how many
+  there are**, so it is not a lever on the bill.
+
+  **The answers are keyed by an id the caller chooses, and this is #93's last
+  trap answered by the type rather than by care.** A batch that answers
+  positionally and drops one row shifts every answer after it -- one transaction
+  categorised as its neighbour, stored, with nothing about the data that looks
+  wrong afterwards. With ids, a dropped row is a *missing* row, which the caller
+  can see. `BatchItem` inherits from `CategorizeRequest` and `BatchAnswer` from
+  `CategorizeResponse`, so the per-row shape is preserved by construction and a
+  rule added to the single-row contract is in the batch without anybody
+  remembering.
+
+  **The response may carry fewer answers than the request carried items**, on
+  purpose: a row whose predictor raises is left out and logged, so the other
+  ninety-nine keep the answers they were already paid for. On the .NET side that
+  row reports as `unusable` rather than `abstained`, and the difference decides
+  whether it is ever asked about again -- an abstention is a final answer and
+  takes the row out of the queue for ever.
+
+  **Two budgets, because eight seconds is right for one row and wrong for a
+  hundred.** #93's fourth trap, and the answer is a second `HttpClient` --
+  `CategorizerBatchHttp`, whose only job is to be a type DI can hang a second
+  configuration on. `Categorizer:BatchTimeoutSeconds` is 60 against about 26 for
+  a full hundred-row batch. Raising the single number instead would re-price the
+  failure that number was chosen for: #67's preview waits it out on the path
+  where somebody is typing. **`ConnectTimeoutSeconds` is deliberately shared**
+  -- "the service is not there" costs the same whichever call found out, and it
+  is the failure a sweep meets most often, since the categorizer scales to zero
+  (#61). Measured with the container stopped: a tick gives up at **2009 ms**,
+  and the log line names `Categorizer:BatchTimeoutSeconds` and its value beside
+  the elapsed, so a reader can see that the shorter clock fired. That is #59's
+  misnamed-clock lesson applied to the second budget rather than repeated on it.
+
+  What lost: a second `CategorizerClient`-shaped class, which duplicates four
+  `catch` blocks whose words are `CategorizerOutcome`'s -- two copies of a
+  vocabulary are two copies that drift, which is the failure #64 spent an issue
+  preventing. And `IHttpClientFactory` with two named clients, which keeps one
+  class and changes how `CategorizerClient` is constructed, so all 21 tests that
+  build one with an `HttpMessageHandler` -- #39's seam -- would have to learn
+  about a factory in order to keep testing something that had not changed. A
+  third option, setting `HttpClient.Timeout` to infinite and giving every call a
+  linked `CancellationTokenSource`, is the tidiest and makes "every network
+  client has a timeout" a rule somebody has to remember at each call site, which
+  `CLAUDE.md` names as the shape of rule that does not hold.
+
+  **#64's counters are recorded once per row and not once per call**, which is
+  what keeps them meaning what they meant. Until this change one call was one
+  question about one transaction, so "8 timed out" meant eight rows got no
+  category; counting a failed batch of twenty as one timeout would leave the
+  same sentence describing something twenty times smaller, silently -- the
+  failure `CategorizerKind` was invented to prevent, one field along. The unit
+  is a question about a transaction, and a batch asks as many as it carries
+  rows. The elapsed time recorded against each is the *call's*, which is
+  truthful rather than convenient: every row waited exactly that long. Measured
+  -- six rows in one 46 ms call, and the summary read `8 recorded (save=0,
+  preview=0, sweep=8) -- 5 suggested, 3 abstained`.
+
+  **A batch that fails as a whole charges one attempt to the oldest row only**,
+  and this is the one place #93 could have changed what #92 measured. A batch
+  failure says nothing about any particular row in it, so charging all twenty
+  would abandon a backlog after two and a half minutes of outage, where #92's
+  per-row loop cost one row in the same time. It still terminates, which is what
+  the cap is actually for: the batch is ordered oldest-first, so a permanent
+  failure retires the head of the queue after `maxAttempts` ticks and starts on
+  the next. Measured with the categorizer stopped -- after six ticks the oldest
+  row stood at **9 attempts and the other four at 0**, and restarting it drained
+  all five.
+
+  What that gives up against `CountsAgainstTheCap`'s own reasoning, said
+  plainly: a batch that timed out may have reached the model for every row and
+  been billed for all of them, and one attempt is recorded. That reasoning was
+  written for a call carrying one row. The bill is bounded by the row count and
+  by the spend limit at Anthropic (#87); what this counter bounds is an infinite
+  retry, and it still does.
+
+  **The batch cap is written in two languages and pinned by a test.**
+  `MAX_BATCH_ITEMS` is 100 in `contracts.py` and `CategorizerBatch.MaxItems`
+  here, and `CategorizerBatchCapTests` reads the Python file the way
+  `CategoriesTests` reads `categories.py`. The failure it prevents is total and
+  silent: a sweep configured past the cap is a 422 on **every tick, for ever**,
+  which reads in a log as the categorizer misbehaving and leaves every row owed
+  a category and one attempt poorer. The configured batch size is clamped rather
+  than refused at startup, because the cost of clamping is a slower sweep.
+
+  **The import still does not mark its rows, and that is the decision the
+  backfill exists to make possible.** #92 wrote that marking them was "one
+  property assignment away", and it is. What that assignment does not do is
+  #93's third trap -- "whatever runs this should know how many rows it is about
+  to pay for before it starts". A three-hundred row file is three hundred model
+  calls at 0.62 US cents each (#87), so the count goes on the button and the
+  person presses it. It also reaches what an automatic mark could not: a row
+  abandoned at the cap was already marked once, so nothing about the import
+  would ever look at it again.
+
+  **`PendingCategorization.Backfillable` is the predicate, and its attempts
+  condition is what makes running it twice safe.** A row already in the queue is
+  left where it is, so a second backfill does not reset a budget the sweep is
+  halfway through; a row that reached the cap is picked up again, which is the
+  whole of "anything the categorizer missed while it was down". Ownership is
+  nowhere in the handler -- `AppDbContext`'s global filter applies to
+  `ExecuteUpdate` the same way it applies to a `SELECT`, which is #89's argument
+  for an endpoint over a `psql` script, arriving where getting it wrong would
+  bill one person for another person's spending. Verified with two accounts: A's
+  backfill marked 1 and left B's identically-shaped row untouched.
+
+  **#63's hole is reopened on the day #63 said to, and accepted rather than
+  closed.** Clearing a category writes null to both columns, so a row a person
+  deliberately blanked is indistinguishable from one nothing ever touched -- and
+  #63 wrote "reopen it the day something re-categorises existing rows". This is
+  that change, and a backfill therefore asks about a cleared row again. It is
+  accepted because the backfill is an explicit act by the same person who did
+  the clearing, it overwrites a blank rather than a label, and the alternative
+  #63 costed -- storing `category = null, source = human` -- breaks the
+  invariant that a source exists exactly when a category does, which three files
+  now rely on. `A_row_a_person_cleared_is_queued_again_which_is_the_known_cost`
+  is where that trade is written down as a test, so changing it means saying
+  what changing it means.
+
+  **A row that came back with no category is asked about again, and that is a
+  feature rather than a leak in the idempotence.** An abstention leaves
+  category, source and marker all null, which is indistinguishable from a row
+  nothing has ever asked about -- so a second backfill asks about those. It is
+  how a switch from the rules to the model reaches the rows the rules declined,
+  and it is the other reason the count is on the screen first. Measured: seven
+  imported rows, one labelled by hand, backfill marked **6**, five gained a
+  category from one 46 ms call, `Lidl` abstained; a second backfill marked **1**
+  and nothing on screen changed.
+
+  **Found on the way, and it is the most important paragraph here because it is
+  not about #93 at all: nothing the Python package logs was ever written down.**
+  uvicorn calls `dictConfig` with its own configuration, which declares the
+  `uvicorn`, `uvicorn.error` and `uvicorn.access` loggers and **no root logger**
+  -- read out of `uvicorn.config.LOGGING_CONFIG` in the running container rather
+  than remembered. A logger like `categorizer.main` therefore propagates to a
+  root with no handler, where `logging.lastResort` drops anything below WARNING.
+  So **#64's `model_call` line, which is how many model calls were billed, and
+  #65's `cache` line, which is the running hit rate, have never appeared in a
+  container** -- both described as "the durable record" for a service that
+  scales to zero and keeps nothing in memory. One `logging.basicConfig` in
+  `main.py` fixes all three lines. It cannot duplicate uvicorn's own output,
+  because `uvicorn` and `uvicorn.access` both set `propagate: false`, checked in
+  the same dump.
+
+  It was found by checking that #93's own summary line reached the container's
+  output, which is the general lesson rather than the instance: **a log line
+  nobody has watched arrive is a log line that does not exist**, and three
+  issues in a row wrote one and read it in a test instead.
+
+  **Checked by breaking it, per #21: eleven mutations on the .NET half and seven
+  on the Python half, one at a time, reverted with `git checkout` from the
+  commit rather than from memory.** Seventeen were caught. The harness carries
+  the two traps this repository has already paid for -- it builds before it
+  tests and reports a build failure as invalid rather than as a kill (#89), and
+  it refuses a substitution matching zero or two places (#21) -- and the first
+  fired once, on a mutation of the id guard that did not compile.
+
+  The one that survived is worth keeping. Weakening `answer.Id is not { Length:
+  > 0 }` to `is not { }` is an **equivalent mutant**: an answer keyed under the
+  empty string matches no row this application sends, because every id is a
+  Guid, so the row it was meant for reports as unanswered either way. That is
+  the same shape #92 recorded for its `null < 30`. The test written to kill it
+  is kept anyway, because it asserts the behaviour rather than the guard.
+
+  A third harness trap, met here for the first time: **`git stash` around a
+  sweep that runs `git checkout -- .` loses the stash.** An uncommitted test
+  disappeared and had to be rewritten. Commit first, always -- which is what #21
+  already said about reverting, one step earlier in the same procedure.
+
+  **What is not automated, said plainly.** The backfill handler's own query --
+  that it applies `Backfillable` and does not ignore the filter -- is a one-line
+  deletion in a method that reaches `AppDbContext`, which is the wall
+  `AuthorizationTests` and #62 both document; it was checked by hand against the
+  compose stack with two accounts instead. The sweep's tick is the same. And the
+  client half has no test framework at all (#67 recorded the same for its own
+  debounce), so the count on the button, the card that hides itself and the
+  three states are checked by `tsc`, by `oxlint` and by reading. The screen was
+  not opened in a browser, because signing in means typing a password.
+
 ## How work flows
 
 Agreed 2026-08-05. This replaces committing straight to `main`, for Claude as

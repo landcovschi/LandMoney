@@ -54,6 +54,50 @@ public static class PendingCategorization
             && transaction.CategorizationAttempts < maxAttempts
             && transaction.CategorySource != CategorySources.Human;
 
+    /// <summary>The rows a backfill may put into the queue, given the cap. #93.</summary>
+    // The sweep only ever sees rows something already marked as owing a category, so
+    // there has to be a way to mark rows nothing marked -- #62's imported ones, which
+    // arrive with no category by design, and the rows the sweep gave up on while the
+    // categorizer was down. This is that predicate, and it is deliberately not the
+    // obvious `Category == null`.
+    //
+    // **`CategorySource != Human` is the trap #93 names**, and it is the same
+    // condition <see cref="Owed"/> carries for the same reason: a row a person
+    // labelled must never be predicted over. `CategorySources.MayOverwrite` is the
+    // rule and cannot be called here, because EF cannot translate a method into SQL;
+    // the two are pinned to each other by a test instead.
+    //
+    // **`Category == null` and not "has no useful category"**, which means a row a
+    // person deliberately *cleared* is marked again and asked about again. That is
+    // #63's known hole -- clearing writes null to both columns, so a cleared row is
+    // indistinguishable from one nothing ever touched -- and #63 says to reopen it
+    // "the day something re-categorises existing rows", which is today. It is
+    // accepted rather than closed: the backfill is an explicit act by the same person
+    // who did the clearing, it overwrites a blank rather than a label, and the
+    // alternative #63 costed -- storing `category = null, source = human` -- breaks
+    // the invariant that a source exists exactly when a category does, which three
+    // files now rely on.
+    //
+    // **The attempts condition is what makes running it twice safe.** A row that is
+    // already in the queue is left alone, so a second backfill does not reset the
+    // budget of a row the sweep is halfway through. A row that reached the cap is
+    // picked up again, which is the whole of "anything the categorizer missed while
+    // it was down".
+    //
+    // What it does *not* protect against, said out loud: a row the categorizer
+    // answered and abstained on looks exactly like a row nothing ever asked about --
+    // both have no category, no source and no marker. So a second backfill asks about
+    // those again. That is deliberate rather than tolerated: it is how a switch from
+    // the rules to the model reaches the rows the rules declined, and it is why the
+    // count is put on the screen before the button is pressed rather than reported
+    // after.
+    public static Expression<Func<Transaction, bool>> Backfillable(int maxAttempts) =>
+        transaction =>
+            transaction.Category == null
+            && transaction.CategorySource != CategorySources.Human
+            && (transaction.CategorizationAttempts == null
+                || transaction.CategorizationAttempts >= maxAttempts);
+
     /// <summary>How many charged attempts a row gets before the sweep gives up on it.</summary>
     // The ceiling #92's fourth trap asks for, and it lives here rather than on
     // CategorizerSweep because it has two readers: the sweep, which applies it, and
