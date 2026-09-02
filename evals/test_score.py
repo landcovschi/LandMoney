@@ -20,6 +20,7 @@ hand-built example rather than believed.
 
 import io
 import json
+import logging
 import tempfile
 import unittest
 from collections import Counter
@@ -46,8 +47,10 @@ from score import (  # noqa: I001 -- must come first
     check,
     load,
     main,
+    SpendLog,
     render_confusion,
     render_misses,
+    render_spend,
     score,
 )
 
@@ -772,6 +775,194 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("linella", out.getvalue())
         self.assertIn("groceries", out.getvalue())
+
+
+class SpendTests(unittest.TestCase):
+    """What a run cost, read off the adapter's own log line. #96.
+
+    Nothing here calls an API. The contract being tested is the `key=value` shape
+    of #64's `model_call` line -- which that line's docstring says exists "because
+    this is the line something will eventually parse" -- so these tests are what
+    stops the two halves drifting without anybody noticing that a table full of
+    dashes is the symptom.
+    """
+
+    @staticmethod
+    def _log(**fields: object) -> None:
+        logging.getLogger("categorizer.anthropic_predictor").info(
+            "model_call outcome=%s model=%s effort=%s elapsed_ms=%.0f "
+            "input_tokens=%s output_tokens=%s cost_usd=%s",
+            fields.get("outcome", "answered"),
+            fields.get("model", "claude-opus-5"),
+            fields.get("effort", "low"),
+            fields.get("elapsed_ms", 2100),
+            fields.get("input_tokens", 1173),
+            fields.get("output_tokens", 11),
+            fields.get("cost_usd", "0.006140"),
+        )
+
+    def test_the_calls_a_run_made_are_counted(self):
+        with SpendLog() as spending:
+            self._log()
+            self._log()
+
+        self.assertEqual(2, spending.spend().calls)
+
+    def test_tokens_and_money_are_totalled_across_the_run(self):
+        with SpendLog() as spending:
+            self._log(input_tokens=1000, output_tokens=10, cost_usd="0.005250")
+            self._log(input_tokens=1200, output_tokens=12, cost_usd="0.006300")
+
+        spend = spending.spend()
+
+        self.assertEqual(2200, spend.input_tokens)
+        self.assertEqual(22, spend.output_tokens)
+        self.assertAlmostEqual(0.01155, spend.cost_usd, places=6)
+
+    def test_a_thousand_transactions_is_the_run_scaled_by_its_own_call_count(self):
+        """The number #96 asks for, and it is per *call* rather than per saved row.
+
+        The application makes two to four calls per transaction -- #67's preview
+        plus the save (#87) -- so this is a rate for comparing models and not a
+        forecast of a bill. The docstring on the property says so; this asserts the
+        arithmetic it describes.
+        """
+        with SpendLog() as spending:
+            self._log(cost_usd="0.006000")
+            self._log(cost_usd="0.004000")
+
+        self.assertAlmostEqual(5.0, spending.spend().cost_per_1000, places=6)
+
+    def test_an_unpriced_call_makes_the_whole_run_unpriced(self):
+        """All or nothing, and the alternative is the dangerous one.
+
+        Summing only the priced calls produces a total that looks whole, is too
+        small, and has nothing on it to say which calls it left out. #64 writes
+        `unpriced` whenever the price variables are not set, which is the ordinary
+        state of a machine nobody has told the rates to.
+        """
+        with SpendLog() as spending:
+            self._log(cost_usd="0.006000")
+            self._log(cost_usd="unpriced")
+
+        spend = spending.spend()
+
+        self.assertIsNone(spend.cost_usd)
+        self.assertIsNone(spend.cost_per_1000)
+
+    def test_a_call_that_reported_no_usage_makes_the_token_totals_unknown(self):
+        """`unknown` is not zero, which is the rule #64 wrote for the log line.
+
+        A response that carried no usage and a call that used no tokens are
+        different facts, and adding them together is a total that is quietly too
+        small -- in the direction that makes a model look cheaper than it is.
+        """
+        with SpendLog() as spending:
+            self._log(input_tokens=1173)
+            self._log(input_tokens="unknown")
+
+        self.assertIsNone(spending.spend().input_tokens)
+
+    def test_latency_is_the_median_and_the_tail_and_both_are_real_calls(self):
+        """Nearest-rank, matching #64's CategorizerMetrics on the .NET side.
+
+        A mean describes no call that happened, which is exactly the number a table
+        comparing models on latency must not print.
+        """
+        with SpendLog() as spending:
+            for ms in (100, 100, 100, 100, 5000):
+                self._log(elapsed_ms=ms)
+
+        spend = spending.spend()
+
+        self.assertAlmostEqual(0.1, spend.seconds_per_call, places=3)
+        self.assertAlmostEqual(5.0, spend.p95_seconds, places=3)
+
+    def test_lines_that_are_not_model_calls_are_ignored(self):
+        """The adapter logs other things -- a missing credential, a cache line.
+
+        Counting one of those as a call would report a run that made more requests
+        than it has rows, which is the shape of a number nobody would question.
+        """
+        with SpendLog() as spending:
+            logging.getLogger("categorizer.cache").info("cache outcome=hit hit_rate=0.5")
+            self._log()
+
+        self.assertEqual(1, spending.spend().calls)
+
+    def test_the_handler_is_taken_off_again(self):
+        """A handler left on a module-level logger outlives the run that wanted it,
+        and the next run would then count this one's calls as well."""
+        logger = logging.getLogger("categorizer")
+        before = list(logger.handlers)
+
+        with SpendLog():
+            pass
+
+        self.assertEqual(before, logger.handlers)
+
+    def test_the_logger_level_is_restored(self):
+        """Set on the way in because a module logger is NOTSET and inherits WARNING
+        from the root -- attaching a handler without this collects nothing, silently,
+        and reports a model that apparently made no calls.
+
+        **The level is set to a known value first, and a mutation is why.** Written
+        as "remember whatever it is, then compare", this test passed with the restore
+        deleted: every other test in this class leaves the logger at INFO when the
+        restore is gone, so by the time this one runs the value it remembers is
+        already the mutated one. A test that reads its expectation out of state the
+        other tests are corrupting cannot fail -- which is the same shape #64 found
+        in a test that asserted only that something had been logged.
+        """
+        logger = logging.getLogger("categorizer")
+        previous = logger.level
+        logger.setLevel(logging.WARNING)
+
+        try:
+            with SpendLog():
+                self.assertEqual(logging.INFO, logger.level)
+
+            self.assertEqual(logging.WARNING, logger.level)
+        finally:
+            logger.setLevel(previous)
+
+    def test_the_sentinel_is_the_empty_string_because_that_is_what_an_unset_variable_is(self):
+        """#96, and it is what a mutation asked for.
+
+        Every other test here names `NO_EFFORT` symbolically, so changing its *value*
+        changes both sides of the comparison at once and kills nothing. The value is
+        load-bearing on its own: `CATEGORIZER_EFFORT=` in a shell, and an env var
+        set to nothing, both arrive as the empty string. A sentinel of "none" would
+        leave that arriving as a literal effort level, and every request would be a
+        400 on every model -- including the Opus runs, which do take the parameter.
+        """
+        from categorizer.anthropic_predictor import NO_EFFORT
+
+        self.assertEqual("", NO_EFFORT)
+
+    def test_an_unpriced_run_says_which_variables_are_missing(self):
+        """A table row with no price in it is the commonest way #96's table ends up
+        incomplete, and the reason is always these two variables."""
+        with SpendLog() as spending:
+            self._log(cost_usd="unpriced")
+
+        printed = render_spend(spending.spend())
+
+        self.assertIn("CATEGORIZER_PRICE_INPUT_PER_MTOK", printed)
+        self.assertIn("CATEGORIZER_PRICE_OUTPUT_PER_MTOK", printed)
+
+    def test_the_rules_path_prints_no_cost_block_at_all(self):
+        """`main` only renders the block when calls were made, and the rules make
+        none. A row of zeroes would invite a reader to compare a substring scan with
+        a model on price, which is a comparison of two different things."""
+        out = io.StringIO()
+
+        with redirect_stdout(out):
+            code = main([])
+
+        self.assertEqual(0, code)
+        self.assertNotIn("USD/1000", out.getvalue())
+        self.assertNotIn("seconds/call", out.getvalue())
 
 
 if __name__ == "__main__":

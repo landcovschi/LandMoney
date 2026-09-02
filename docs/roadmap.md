@@ -920,6 +920,27 @@ again by itself after 7 days.
        state the application already handles, a wrong category is stored as if it
        were true
 
+       **What that number costs was measured on 2026-09-02, in #96**, which is the
+       half #60 deliberately left open: four runs, one table, section 9 of
+       `docs/evals.md`. `claude-opus-5` at `low`, `medium` and `high` score 98.9%,
+       100.0% and 100.0% -- a 1.1-point spread against a **3-point noise floor**,
+       so the three are a tie this set cannot resolve and the table says so rather
+       than ranking them. `claude-haiku-4-5` scores **88.6%** at a seventh of the
+       price and a third of the latency, and that gap *is* outside the noise
+
+       **Production stays on `claude-opus-5` at `effort=low`**, which is what #87
+       deployed -- recorded because "we looked and left it" and "nobody looked" are
+       different states. Haiku's saving is under a dollar a month against a
+       subscription already facing 15-20 when the Postgres free year ends, which is
+       the arithmetic that killed the Redis cache in #87; and Haiku answers three
+       rows *wrongly* where Opus declines one, which the metric prices identically
+       and the application does not
+
+       **Effort is not a cost lever, measured a second time**: `low` to `high` is
+       a 4.4% rise for triple the output tokens, because the prompt is ~97% of the
+       bill. The whole exercise cost about 1.05 USD against a 2.50 ceiling decided
+       before the first call
+
        **`other` went 0/3 to 3/3**, which is #60's specific question answered.
        Section 6 records a 90.9% structural ceiling on any abstaining substring
        baseline, because one category of eleven is unreachable by merchant-name

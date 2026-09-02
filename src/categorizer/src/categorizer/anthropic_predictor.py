@@ -72,6 +72,24 @@ DEFAULT_MAX_TOKENS: Final[int] = 2048
 # saving without them.
 DEFAULT_EFFORT: Final[str] = "low"
 
+# **The value that means "do not send `effort` at all", and it exists because the
+# parameter is not universal.** #96 scores this prompt against `claude-haiku-4-5`,
+# and `output_config.effort` is an Opus-family parameter: Haiku 4.5 rejects it, so
+# with an effort always attached the cheap model cannot be measured at all.
+#
+# An empty string rather than a list of models that take it. A table here would be
+# a second place that has to know which models Anthropic ships and what each one
+# accepts, and it goes stale silently -- which is the same argument #22 and #24
+# make about pinning action majors from memory, and #35 about reading `az --help`
+# rather than a blog post. The model and the effort are set together, one env var
+# each, by whoever knows which model they are naming.
+#
+# The cost of the route taken, said out loud: a typo'd `CATEGORIZER_EFFORT=` is
+# indistinguishable from a deliberate one, and it silently changes what is being
+# measured. The scorer's header prints the effort it ran with, so a run that
+# dropped it says so above its own number.
+NO_EFFORT: Final[str] = ""
+
 # What one call cost, as far as this process can tell -- #64.
 #
 # **No default price, and that is the decision this whole section turns on.** The
@@ -487,10 +505,7 @@ class AnthropicPredictor:
             # the sentinel, enforced by the API. `_answer_from` checks anyway, and
             # that is not belt-and-braces: this constraint is a property of one
             # route to one API, and the check is a property of this adapter.
-            output_config={
-                "format": {"type": "json_schema", "schema": RESPONSE_SCHEMA},
-                "effort": self._effort,
-            },
+            output_config=self._output_config(),
         )
         # The usage travels back beside the answer rather than being read from a
         # field on `self`, so that two calls cannot interleave and report each
@@ -498,6 +513,33 @@ class AnthropicPredictor:
         # `async def` -- see main.py), so that is a real race and not a theoretical
         # one.
         return _answer_from(message), _usage_from(message)
+
+    def _output_config(self) -> dict[str, object]:
+        """What constrains the answer, and how hard the model works at it.
+
+        Both keys live inside `output_config`: `format` constrains the answer to the
+        schema, `effort` controls how hard the model thinks about it.
+
+        The schema is what makes "an answer outside the vocabulary" almost
+        unreachable rather than merely unlikely -- the enum is CATEGORIES plus the
+        sentinel, enforced by the API. `_answer_from` checks anyway, and that is not
+        belt-and-braces: this constraint is a property of one route to one API, and
+        the check is a property of this adapter.
+
+        **`effort` is omitted entirely when it is empty**, and the key is left out
+        rather than sent as null -- see NO_EFFORT for why the choice is
+        configuration rather than a table of models. `format` is never optional:
+        every model this could name has to answer inside the vocabulary, and a run
+        that quietly dropped the schema would be measuring a different task.
+        """
+        config: dict[str, object] = {
+            "format": {"type": "json_schema", "schema": RESPONSE_SCHEMA},
+        }
+
+        if self._effort != NO_EFFORT:
+            config["effort"] = self._effort
+
+        return config
 
 
 def _category_of(answer: str) -> Category | None:

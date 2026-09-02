@@ -1651,6 +1651,12 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   model at this effort, which is what would have to be re-measured before raising
   `CATEGORIZER_EFFORT`.
 
+  **That re-measurement happened on 2026-09-02 in #96 and the headroom holds:**
+  `medium` is 2.26 s and `high` 2.24 s against `low`'s 2.15, with the p95 slightly
+  *better* at the higher efforts. On this task the effort knob moves latency
+  hardly at all -- which also means there is no latency saving to chase by
+  lowering it.
+
   **`evals/baseline.json` still records the rules, deliberately.** It is what CI
   asserts on every pull request, `check` refuses to compare across predictors, and
   the model must never run on a pull request -- one API call per row would turn the
@@ -2894,7 +2900,9 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   `max_tokens=2048` headroom `anthropic_predictor.py` reserves for thinking is
   never touched -- its comment is right about why it is there and wrong about it
   costing anything. `CATEGORIZER_EFFORT` is a latency and quality lever and **is
-  not a cost lever**; the only cost lever is the prompt. And **input is ~1,173
+  not a cost lever**; the only cost lever is the prompt. (Measured a second time in
+  #96, from the other direction: `low` to `high` is 6.17 -> 6.44 USD per 1000 calls,
+  a 4.4% rise for triple the output tokens.) And **input is ~1,173
   where `prompt.py`'s text measures ~700**: the other ~450 is `RESPONSE_SCHEMA` and
   the message framing, so anything that prices this by measuring the file is low by
   60%.
@@ -4174,6 +4182,152 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   framework at all, so the merge, the cursor race and the button are checked by
   `tsc`, by `oxlint` and by reading. The screen was not opened in a browser, because
   signing in means typing a password.
+
+- **What accuracy costs: four runs, one table, and production unchanged -- decided
+  2026-09-02** (#96). Section 9 of `docs/evals.md` is the table and the argument;
+  `evals/score.py` gained a `Spend` block that reports seconds per call and USD per
+  1000, and `anthropic_predictor.py` gained `NO_EFFORT`. 11 new Python tests, none
+  of which opens a socket. No new dependency.
+
+  **The exercise cost about 1.05 USD against a ceiling of 2.50 decided before the
+  first call**, which is #96's second trap answered in the shape it asks for -- the
+  number of runs is recorded beside their results rather than chosen after seeing an
+  interesting one. The estimate was high because thinking on a one-word
+  classification writes far less than a coding task does.
+
+  **The thing that had to be fixed before anything could be measured:
+  `output_config.effort` is an Opus-family parameter and `claude-haiku-4-5` rejects
+  it.** Measured rather than taken from documentation, in a two-call probe costing
+  about 0.2 of a cent, because the failure it was looking for is a 400 on every row
+  -- which reads as the model being unavailable rather than as one key too many:
+
+      This model does not support the effort parameter.
+
+  So the adapter can now be told to omit the key, by `CATEGORIZER_EFFORT=`. **An
+  empty string rather than a table of which models take the parameter**, and that is
+  the decision rather than the shortcut: a list here is a second place that has to
+  know what Anthropic ships and what each model accepts, and it goes stale silently
+  -- the same argument #22 and #24 make about pinning action majors from memory and
+  #35 makes about reading `az --help` rather than a blog post. What it costs is that
+  a typo'd empty value is indistinguishable from a deliberate one; the scorer's
+  header prints the effort it ran with, so a run that dropped it says so above its
+  own number.
+
+  **The numbers.** 53 rows, prompt `sha256:c8ad9d9fd16f`, no cache, published rates
+  on the day:
+
+      claude-opus-5     low       98.9%   1 abstention   0 errors   2.15 s   6.17 USD/1000
+      claude-opus-5     medium   100.0%   0              0          2.26 s   6.32
+      claude-opus-5     high     100.0%   0              0          2.24 s   6.44
+      claude-haiku-4-5  (none)    88.6%   3              2          0.81 s   0.89
+      rules             --        56.1%  22              1          ~0       0.00
+
+  **The first three rows are a tie and the table says so instead of ranking them.**
+  The noise floor on this set is about 3 points and the spread across the three
+  efforts is 1.1 -- a third of it. #96's first trap is "a model two points behind is
+  not behind", and this is the first result in this project close enough to be
+  tempted by it. The `low` run also reproduced #60's 98.9% exactly, which is the
+  cheapest available check that nothing about the scorer moved underneath the
+  number.
+
+  **Haiku is the one comparison that survives the noise floor**, at 10.3 points
+  below -- and the percentage understates it. `low` misses one row and *declines*
+  it; Haiku misses five and answers three of them wrongly. Point 3 of
+  `docs/evals.md` says the metric charges an abstention and a confident error
+  identically and that the owner does not: a null is a state the application renders
+  honestly and a person corrects in one click (#63), and a wrong category is stored
+  as though it were true.
+
+  **Effort is not a cost lever, now measured from both directions.** #87 established
+  it by composition -- the answer is ~11 tokens and the prompt ~1,175, so the prompt
+  is 97% of the bill. #96 establishes it by experiment: `low` to `high` is 6.17 ->
+  6.44 USD per 1000, a **4.4% rise for triple the output tokens**. Latency did not
+  move either (2.15, 2.26, 2.24 s), and the p95 is slightly *better* at the higher
+  efforts -- so there is no saving to chase in either direction on this task.
+
+  **Haiku reads the same prompt as 844 input tokens against Opus's 1,175**, which is
+  a different tokenizer and not a different prompt. Worth writing down because it is
+  exactly the arithmetic somebody would do to avoid paying for a second run: a price
+  estimate for one model cannot be scaled from another's token count.
+
+  **The decision is that production changes nothing -- `claude-opus-5` at
+  `effort=low`, which is what #87 deployed** -- and it is recorded because "we
+  looked and left it" and "nobody looked" are different states, and only one of them
+  is worth having spent a dollar on. Haiku's saving is genuine and too small to buy
+  the quality: 80-160 calls a month (#67's preview plus the save) is about 0.50-1.00
+  USD on Opus against 0.07-0.14 on Haiku, so the difference is under a dollar a
+  month against a subscription already facing 15-20 when the Postgres free year ends
+  (#34). That is the arithmetic that killed the Redis cache in #87, reused. `medium`
+  is refused for the opposite reason: it scored 100% and cannot be shown to be
+  better, and changing production on 1.1 points would be the mistake the noise floor
+  exists to prevent.
+
+  **What would change it, written down so the next reader does not have to
+  re-derive it**: real rows (#47) putting `low` more than three points behind
+  `medium`, which is one environment variable and 2.4%; or the abstention rate
+  annoying in practice, since the single row separating them is an abstention rather
+  than an error. And if volume ever makes the bill felt, the lever is neither the
+  model nor the effort but the ~1,150-token constant prefix -- Anthropic's prompt
+  caching over it, which #65 named and which is still not taken.
+
+  **`Spend` reads the adapter's own `model_call` line rather than measuring the
+  charge a second time**, which is #64's arithmetic reused. That line's docstring
+  already said it was `key=value` "because this is the line something will
+  eventually parse"; this is the something, and it parses the rendered message
+  rather than `record.args` by position, because the key names are the documented
+  contract and the argument order is not. Two arithmetics for one charge is two
+  numbers that can disagree, and the one in the log is what the deployed service
+  reports. It also keeps `Predictor` unwidened -- the port returns a category and a
+  source, and reaching through it for a token count is what #65 refused when the
+  cache wanted the same thing.
+
+  Three details of that which are decisions rather than plumbing. **The handler sets
+  the logger's level as well as attaching itself**, because a module logger is
+  NOTSET and inherits WARNING from the root -- attaching without it collects nothing,
+  silently, and reports a model that apparently made no calls. **A total is all or
+  nothing**: one `unpriced` call makes the run unpriced and one `unknown` usage makes
+  the token totals unknown, because a partial sum looks like a whole one and has
+  nothing on it to say which calls it left out -- #64's rule that `unknown` is not
+  `0`, arriving at the thing that adds them up. And **the block is printed only when
+  calls were made**, so the rules path prints a score and no cost block rather than a
+  row of zeroes inviting a comparison between a substring scan and a model on price.
+
+  **`baseline.json` is untouched and `--check` still passes**, which was verified
+  rather than assumed: the rules still score 56.1% / 56.6% over 53 rows after the
+  scorer grew a measurement path. The model must never run on a pull request -- one
+  API call per row would turn the required check into a bill -- so none of these
+  numbers is a thing CI asserts, and they live in prose where they can carry their
+  caveats.
+
+  **Checked by breaking it, per #21: 14 mutations, 12 killed and 2 survived**, both
+  of which were real and both of which now die.
+
+  `NO_EFFORT` changed from `""` to `"none"` survived, because every test named the
+  constant symbolically and so changed both sides of the comparison at once. The
+  value is load-bearing on its own: `CATEGORIZER_EFFORT=` in a shell arrives as the
+  empty string, so a sentinel of `"none"` would leave that arriving as a literal
+  effort level and make every request a 400 -- including the Opus runs, which do
+  take the parameter. Same shape as #92's `Owing = 1`, and the same answer: a test
+  that names what the value *means*.
+
+  **The second is the better find, because the test looked like it worked.**
+  Deleting the level restore in `SpendLog.__exit__` passed -- the test remembered
+  whatever level it found and compared against that, and with the restore gone every
+  *other* test in the class leaves the logger at INFO, so by the time this one ran
+  the value it remembered was already the mutated one. **A test that reads its
+  expectation out of state the other tests are corrupting cannot fail.** It now sets
+  a known level first. The same shape #64 recorded for a test that asserted only
+  that something had been logged.
+
+  **What this table is not, and it is the caveat that matters most.** Every warning
+  in section 7 stands and none is repaired by having four rows instead of one: **the
+  eval set was written by Claude and every predictor scored against it is Claude**,
+  in English, when real entries would be Russian and Romanian. Three of the four
+  rows sit at or above 98.9% on a set section 8 already called saturated -- and a
+  tie between `low`, `medium` and `high` is what a saturated set looks like from the
+  inside, not evidence that the three are equivalent on anything harder. #47 remains
+  the single most valuable open item in the project, and this exercise did not move
+  it.
 
 ## How work flows
 

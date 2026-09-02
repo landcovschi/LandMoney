@@ -727,3 +727,150 @@ optimistic" has become the thing that stops work rather than a caveat on it.
 `baseline.json` is untouched. It records the rules on `transactions.csv`, CI
 asserts it on every pull request, and none of the above is a number a required
 check may depend on.
+
+
+## 9. What accuracy costs: four runs, one table, and a decision
+
+Written 2026-09-02 for #96. Section 7 established that the model beats the rules
+by 42.8 points and left the other half of the question open: **the project could
+say the model was good and could not say whether it was worth what it cost.**
+
+### What was run, and what it cost to find out
+
+Four runs, the same 53 rows, the same scorer, the same prompt at
+**sha256:c8ad9d9fd16f**, no cache, decided before the first call and not extended
+afterwards -- which is #96's second trap, and the reason the number of runs is
+recorded here beside their results.
+
+```
+set -a; . ./.env; set +a
+CATEGORIZER_MODEL=claude-opus-5    CATEGORIZER_EFFORT=low     ... --predictor model
+CATEGORIZER_MODEL=claude-opus-5    CATEGORIZER_EFFORT=medium  ... --predictor model
+CATEGORIZER_MODEL=claude-opus-5    CATEGORIZER_EFFORT=high    ... --predictor model
+CATEGORIZER_MODEL=claude-haiku-4-5 CATEGORIZER_EFFORT=        ... --predictor model
+```
+
+with `CATEGORIZER_PRICE_INPUT_PER_MTOK` and `CATEGORIZER_PRICE_OUTPUT_PER_MTOK`
+set per run to the published rates on the day. **The whole exercise cost about
+1.05 USD**, against a ceiling of 2.50 decided in advance; the estimate was high
+because thinking on a one-word classification writes far less than a coding task
+does.
+
+### The table
+
+| predictor | effort | macro recall | accuracy | abstentions | confident errors | s/call | p95 | USD/1000 calls |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `claude-opus-5` | `low` | 98.9% | 98.1% | 1 | 0 | 2.15 | 3.22 | 6.17 |
+| `claude-opus-5` | `medium` | 100.0% | 100.0% | 0 | 0 | 2.26 | 3.21 | 6.32 |
+| `claude-opus-5` | `high` | 100.0% | 100.0% | 0 | 0 | 2.24 | 3.05 | 6.44 |
+| `claude-haiku-4-5` | *not supported* | 88.6% | 90.6% | 3 | 2 | 0.81 | 1.02 | 0.89 |
+| rules | -- | 56.1% | 56.6% | 22 | 1 | ~0 | -- | 0.00 |
+
+Prices are the published Anthropic rates read on 2026-09-02 -- 5.00/25.00 USD per
+million tokens for `claude-opus-5`, 1.00/5.00 for `claude-haiku-4-5`. They are
+written here, with the date, and **not** into any file the code reads: #64's rule
+is that a rate in the source stays confident and becomes wrong, and a table in a
+document can carry the date that makes it checkable.
+
+**USD/1000 is per *call*, not per transaction.** The application makes two to four
+calls per saved row -- #67's suggestion while typing, plus the save, which
+deliberately does not trust the browser -- so a month of forty transactions is
+80-160 calls. This column compares models; it does not forecast a bill.
+
+### The first three rows are a tie, and saying so is the point
+
+The noise floor on this set is about **3 points** -- 53 rows at roughly 4 per
+category, established in section 2. The spread across `low`, `medium` and `high`
+is **1.1 points**, which is a third of it.
+
+So the table is not a ranking of those three. `medium` and `high` did not beat
+`low`; they scored inside the distance this set cannot resolve, and the one row
+that separates them is a single transaction that `low` declined and the others
+placed. **A model two points behind is not behind** -- #96's first trap, and this
+is the first time this project has had a result close enough to be tempted by it.
+
+Haiku is the row that is *not* a tie: 10.3 points below `low` is more than three
+times the noise floor, and it is the only comparison in this table that survives
+it.
+
+### Effort is a latency and quality lever and is not a cost lever, measured twice
+
+`low` to `high` is **6.17 -> 6.44 USD/1000, a 4.4% rise**, for triple the output
+tokens (623 -> 1203 across the run). That is #87's finding arriving from the other
+direction: the answer is about eleven tokens and the prompt is about 1,175, so the
+prompt is ~97% of the bill and nothing the model *writes* can move it much.
+
+Latency did not move either -- 2.15, 2.26, 2.24 seconds, with the p95 slightly
+*better* at the higher efforts than the lower. On this task the effort knob is
+close to free in both directions, which is worth knowing mostly because it means
+there is no saving to chase there.
+
+### Haiku fails differently, and the difference matters more than the percentage
+
+Point 3 of this document says the metric cannot tell an abstention from a
+confident error, and that the two cost the owner very different amounts of
+attention. This is the first table where that distinction separates two systems:
+
+- `claude-opus-5` at `low` misses **one row, and declines it** -- 0 confident errors.
+- `claude-haiku-4-5` misses **five, and answers three of them wrongly** -- `other`
+  read as `health`, `other` as `shopping`.
+
+A wrong category is written into `transactions.category` and shown on the screen
+as a fact. An abstention leaves the column null, which the interface already
+renders honestly as "no category" and which a person can correct in one click
+(#63). So the gap between these two rows is wider than 10.3 points suggests.
+
+Haiku also reads the same prompt as **844 input tokens against Opus's 1,175** --
+a different tokenizer, not a different prompt. Worth writing down because it means
+a price estimate for one model cannot be scaled from another's token count, which
+is exactly the arithmetic somebody would do to avoid paying for a second run.
+
+### The decision: production stays on `claude-opus-5` at `effort=low`
+
+Which is what #87 deployed, so the decision is to change nothing -- and it is
+recorded because "we looked and left it" and "nobody looked" are different states
+and only one of them is worth having spent a dollar on.
+
+**Why not Haiku, when it is seven times cheaper and 2.7 times faster.** The saving
+is real and too small to buy the quality: at 80-160 calls a month, Opus costs about
+**0.50-1.00 USD a month** and Haiku about **0.07-0.14**. The difference is under a
+dollar a month against a subscription already facing 15-20 USD when the Postgres
+free year ends (#34). That is the same arithmetic that killed the Redis cache in
+#87 -- a saving that is genuine, and smaller than the thing it would cost. Latency
+is not the argument either: 2.15 s sits inside the 6-second adapter timeout and the
+8-second client budget (#59), and since #92 no user waits for it at all.
+
+**Why not `medium`, when it scored 100%.** Because 1.1 points on a set with a
+3-point noise floor is not a result, and changing production on it would be
+precisely the mistake this section spent a paragraph naming. It is also 2.4% dearer
+for a difference that cannot be shown.
+
+**What would change it.** If real rows (#47) put `low` meaningfully behind
+`medium` -- meaningfully being more than three points -- the upgrade costs 2.4% and
+is one environment variable. If the deployed abstention *rate* turns out to annoy
+in practice, the same is true, since the single row separating them is an
+abstention rather than an error. And if this ever runs at a volume where the bill
+is felt, the lever to reach for is not the model or the effort but the ~1,150-token
+constant prefix: Anthropic's prompt caching over it is where 97% of the cost is,
+costs no monthly charge, and is a change to the adapter (#65 records that route and
+it is still not taken).
+
+### What this table is not
+
+Every caveat in section 7 stands and none of them is repaired by having four rows
+instead of one. **The eval set was written by Claude and every predictor scored
+against it is Claude**, in English, when real entries would be Russian and
+Romanian; three of these four rows are at or above 98.9% on a set section 8 already
+called saturated. A tie between `low`, `medium` and `high` is what a saturated set
+looks like from the inside, and it is not evidence that the three are equivalent on
+anything harder.
+
+The one comparison here that does not depend on the set being hard is the failure
+*shape* -- abstention against confident error -- because that is a property of how
+a model behaves when it is unsure, and Haiku's two wrong answers were on `other`,
+the category section 7 records as the one a substring baseline cannot reach at all.
+
+`baseline.json` is untouched. It records the rules on `transactions.csv`, CI asserts
+it on every pull request, and nothing in this section is a number a required check
+may depend on -- for the reason section 7 gives: the model must never run on a pull
+request, because one API call per row would turn a required check into a bill.
