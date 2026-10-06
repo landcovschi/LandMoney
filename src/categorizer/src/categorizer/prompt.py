@@ -22,7 +22,8 @@ the model is *told* is a property of one predictor being scored against it.
 """
 
 import hashlib
-from typing import Final, Sequence
+import json
+from typing import Final, Mapping, Sequence
 
 from categorizer.categories import CATEGORIES, NO_PREDICTION
 
@@ -154,10 +155,14 @@ def system_prompt(with_examples: bool) -> str:
     return _BASE_PROMPT + ("\n\n" + _EXAMPLES_INSTRUCTION if with_examples else "")
 
 
-# Unchanged bytes, and that is asserted rather than hoped: `test_prompt.py` pins
-# this to sha256:c8ad9d9fd16f, which is the digest #60 recorded beside 98.9% and the
-# one every cache key written since #65 carries. If this moves, the recorded number
-# is describing a prompt that no longer exists.
+# Unchanged bytes, and since #97 that is asserted rather than hoped:
+# `evals/model-score.json` records sha256:c8ad9d9fd16f -- the digest #60 measured
+# 98.9% under and the one every cache key written since #65 carries -- and
+# `python evals/score.py --check-prompt` turns `build` red when this no longer hashes
+# to it. If this moves, the recorded number is describing a prompt that no longer
+# exists, and the build now says so instead of a comment.
+#
+# Until #97 this comment said `test_prompt.py` pinned the digest. Nothing did.
 SYSTEM_PROMPT: Final[str] = system_prompt(False)
 
 # What this prompt is, in twelve hex characters. Two things read it, and it lives
@@ -179,7 +184,9 @@ SYSTEM_PROMPT: Final[str] = system_prompt(False)
 # What it deliberately does not cover: RESPONSE_SCHEMA. A vocabulary change moves
 # this digest anyway, because the category names appear verbatim in the block
 # above -- but a change to the schema's *shape* alone would not, and would need the
-# `v1` in `cache.py`'s key prefix.
+# `v1` in `cache.py`'s key prefix. The schema has its own digest below, for #97's
+# guard rather than for the cache key: widening this one would have re-labelled
+# c8ad9d9fd16f, which is quoted beside every number this project has measured.
 def fingerprint(with_examples: bool) -> str:
     """Twelve hex characters of whichever prompt was actually sent.
 
@@ -235,3 +242,24 @@ RESPONSE_SCHEMA: Final[dict[str, object]] = {
     "required": ["category"],
     "additionalProperties": False,
 }
+
+
+def schema_fingerprint(schema: Mapping[str, object]) -> str:
+    """Twelve hex characters of a response schema, in the order a request carries it.
+
+    #97. The schema is the other half of what this file sends with every call, and
+    the model reads it -- #87 measured the schema and the message framing at about
+    450 of the ~1,173 input tokens -- so a guard over the system prompt alone would
+    let `"required": []`, or a second property, through as though nothing the model
+    sees had changed.
+
+    **Not `sort_keys`.** The digest is of the schema as it is sent, and sorting would
+    make it describe a normalised schema no request ever carried. Whether reordering
+    two keys changes what the model does is exactly the question a guard should not
+    answer on the model's behalf; asking for a number is cheaper than being wrong
+    about it.
+    """
+    return hashlib.sha256(json.dumps(schema, separators=(",", ":")).encode("utf-8")).hexdigest()[:12]
+
+
+SCHEMA_FINGERPRINT: Final[str] = schema_fingerprint(RESPONSE_SCHEMA)

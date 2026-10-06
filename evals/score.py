@@ -31,12 +31,23 @@ be reported separately from the percentage.
 is what CI runs -- #58. Without it a CI step that merely runs the scorer is green
 while the number drifts, because printing a number is all it takes to exit 0.
 
+    python evals/score.py --check-prompt
+
+`--check-prompt` is #97, and it scores nothing. The model's number cannot be
+re-measured on a pull request -- one API call per row would turn the required
+check into a bill -- so what CI can assert is that `model-score.json` records the
+prompt `prompt.py` sends today. A prompt edited without a re-measured number
+beside it turns `build` red; whether the new number is honest is beyond it.
+
 Exit code 0 means a number was produced. Exit code 1 means one was not -- an
 unreadable file, a label outside the vocabulary, or an empty set. A scorer that
 prints 0.0% when it could not score anything is worse than one that refuses.
 Exit code 2 is `--check` finding a number it did not expect: the run worked, and
-the answer moved. Three codes rather than two, because "the scorer is broken" and
-"the baseline moved" want different reactions from whoever reads the red step.
+the answer moved. Exit code 3 is `--check-prompt` finding a prompt the recorded
+model number was not measured under. Four codes rather than two, because "the
+scorer is broken", "the baseline moved" and "the prompt moved" want three
+different reactions from whoever reads the red step -- the second is fixed by
+editing a number the run just printed, the third by spending money to get one.
 
 Stdlib only, on purpose, and it stayed that way after #39 moved the rules into
 `src/categorizer/`. That move is why the `sys.path` line below exists: the
@@ -81,6 +92,13 @@ from categorizer.categories import (
 )
 from categorizer.rules import RULES, predict as predict_by_rules
 
+# At module scope, unlike the adapter, because `--check-prompt` runs on the
+# runner's own python on every pull request. `prompt.py` imports nothing but the
+# vocabulary, and #97 makes that load-bearing: the day it imports pydantic, this
+# line fails on the runner with ModuleNotFoundError -- loudly, and on the step that
+# guards the prompt rather than somewhere unrelated.
+from categorizer.prompt import FINGERPRINT, SCHEMA_FINGERPRINT
+
 # The eval set's columns, in order. Checked exactly rather than by lookup, so a
 # renamed or reordered column is an error instead of a silent column of None.
 COLUMNS = ("occurred_at", "amount", "currency", "description", "category")
@@ -107,6 +125,30 @@ BASELINE_PLACES = "{:.1%}"
 # did not say which would compare a model run against the rules baseline and call
 # the difference drift -- reporting the thing #60 exists to measure as a failure.
 REQUIRED_BASELINE_KEYS = ("set", "predictor", "rows", "accuracy", "macro_recall")
+
+# The model's recorded score -- #97 -- and what produced it. A separate file from
+# baseline.json rather than a second entry in it, because the two are asserted in
+# opposite ways: the rules number is reproduced by re-running the rules on every
+# pull request, and this one never is, since a run costs one API call per row. What
+# CI checks here is the prompt it was measured under, and nothing about the number.
+MODEL_SCORE = Path(__file__).parent / "model-score.json"
+
+# What `check_prompt` insists the record carries. #97's last trap is why `model`
+# and `effort` are on the list: a digest pins the prompt, and without those two the
+# number beside it could float to whatever model somebody ran last. `retrieval` is
+# here because a with-examples run is sent a different prompt, so its number cannot
+# be recorded against the one this check compares.
+REQUIRED_MODEL_SCORE_KEYS = (
+    "set",
+    "rows",
+    "model",
+    "effort",
+    "retrieval",
+    "prompt",
+    "schema",
+    "accuracy",
+    "macro_recall",
+)
 
 # The implementations `--predictor` will build. `rules` is the default and the
 # only one that is free; `model` costs an API call per row.
@@ -863,6 +905,152 @@ def check(
     return 2
 
 
+def check_prompt(
+    record_path: Path = MODEL_SCORE,
+    prompt: str = FINGERPRINT,
+    schema: str = SCHEMA_FINGERPRINT,
+) -> int:
+    """Whether the model's recorded number was measured under today's prompt. 0, 1 or 3.
+
+    #97. The digests are of what the model is sent -- `prompt.py` renders the system
+    prompt out of its three pieces and serialises the schema, and the digest is
+    taken of the result -- so an edited comment passes and an edited category
+    description does not. Hashing the file's bytes would get both of those the
+    wrong way round.
+
+    1 when the record cannot be compared at all, 3 when it can and the prompt has
+    moved, and the split is the same one `check` makes between 1 and 2: a broken
+    record is fixed by editing a file, a moved prompt by paying for a run, and
+    whoever reads the red step needs to know which before deciding.
+
+    What it cannot do is #97's first trap: know whether the number in the record
+    came from a run. It asserts that somebody recorded one under this prompt, and
+    the commit that adds it should not claim more than that.
+    """
+    try:
+        recorded = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(
+            f"Cannot read the model's recorded score at {record_path}: {error}",
+            file=sys.stderr,
+        )
+        return 1
+
+    missing = [key for key in REQUIRED_MODEL_SCORE_KEYS if key not in recorded]
+    if missing:
+        print(f"{record_path} is missing {', '.join(missing)}.", file=sys.stderr)
+        return 1
+
+    problems = _unrecorded(recorded)
+    if problems:
+        # Exit 1, and deliberately not 0 with the digests matching. A record whose
+        # digests are current and whose number is "TODO" is the exact shape of a
+        # prompt change that arrived without a number -- the thing #97 exists to
+        # stop -- reached by the one route the digest comparison cannot see.
+        print(
+            f"{record_path} does not record a number this check can stand behind:",
+            *(f"  - {problem}" for problem in problems),
+            sep="\n",
+            file=sys.stderr,
+        )
+        return 1
+
+    moved = [
+        f"  - {what}: recorded sha256:{recorded[key]}"
+        for key, what, current in (
+            ("prompt", "the system prompt", prompt),
+            ("schema", "the response schema", schema),
+        )
+        if recorded[key] != current
+    ]
+
+    if not moved:
+        # One line rather than silence, so the step's log says what the build is
+        # standing on rather than only that it stood.
+        print(
+            f"{record_path.name}: {_described(recorded)}, measured under "
+            f"prompt.py sha256:{prompt} and schema sha256:{schema}."
+        )
+        return 0
+
+    # The current digests are deliberately not printed. Copying them out of this
+    # message into the record would turn the step green with the old number beside
+    # them -- the one failure this check cannot detect -- while the honest route, a
+    # model run, prints both digests in its own header anyway. Which half moved is
+    # named instead, because that is what says whether a schema edit or a wording
+    # edit is the reason.
+    print(
+        f"prompt.py no longer sends what {record_path.name} says the model was measured under:",
+        *moved,
+        "",
+        f"So {_described(recorded)} describes a prompt that no longer exists,",
+        "and a prompt change has to arrive with a number. Re-measure it -- one API",
+        "call per row; evals/README.md has the command and how to get the key to it --",
+        "then copy the digests from the header the run prints, and the two",
+        "percentages beneath them, into",
+        f"  {record_path}",
+        "in this same change. This check can tell that a number was recorded under",
+        "the current prompt. It cannot tell whether the number is honest.",
+        sep="\n",
+        file=sys.stderr,
+    )
+    return 3
+
+
+def _unrecorded(recorded: Mapping[str, object]) -> list[str]:
+    """What stops a model-score record from saying which run produced its number.
+
+    Kept to what is needed for the number to mean something: a model by name, an
+    effort that may be empty -- `NO_EFFORT`, the parameter not sent, which is how
+    Haiku was measured in #96 -- a row count, and two fractions. Not whether they
+    are plausible; a guard that second-guessed 98.9% would be pretending to know
+    something about the run that it does not.
+    """
+    problems: list[str] = []
+
+    if not isinstance(recorded["model"], str) or not recorded["model"].strip():
+        problems.append(f"model: {recorded['model']!r} names no model")
+    if not isinstance(recorded["effort"], str):
+        problems.append(
+            f"effort: {recorded['effort']!r} is not a string -- an empty one means "
+            "the parameter was not sent"
+        )
+    if recorded["retrieval"] != "off":
+        problems.append(
+            f"retrieval: {recorded['retrieval']!r} -- a run with examples is sent a "
+            "different system prompt, so its number cannot be pinned to this one"
+        )
+    if not _is_count(recorded["rows"]):
+        problems.append(f"rows: {recorded['rows']!r} is not a number of rows")
+    for key in ("accuracy", "macro_recall"):
+        if not _is_fraction(recorded[key]):
+            problems.append(f"{key}: {recorded[key]!r} is not a fraction between 0 and 1")
+
+    return problems
+
+
+def _is_count(value: object) -> bool:
+    # bool is an int in Python, and `true` is not a row count.
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_fraction(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 <= value <= 1
+    )
+
+
+def _described(recorded: Mapping[str, object]) -> str:
+    effort = recorded["effort"] or "not sent"
+    return (
+        f"{BASELINE_PLACES.format(recorded['macro_recall'])} macro recall from "
+        f"{recorded['model']} at effort={effort} over {recorded['rows']} rows "
+        f"of {recorded['set']}"
+    )
+
+
 class ModelCallFailed(logging.Handler):
     """Counts the adapter's ERROR records, so a broken run cannot print a number.
 
@@ -1048,8 +1236,14 @@ def build_predictor(
         # itself rather than off the mode that built it, so it cannot claim an
         # embedding model that did not answer -- #66's last trap, since changing
         # that model invalidates every vector.
+        #
+        # The schema's digest joined it in #97, and for the reader of
+        # `model-score.json` rather than of the report: these two strings are what
+        # `--check-prompt` compares, so the run that produces a number has to be
+        # the thing that prints them.
         f"{predictor.model}, effort={predictor.effort}, "
         f"prompt.py sha256:{fingerprint(store is not None)}, "
+        f"schema sha256:{SCHEMA_FINGERPRINT}, "
         f"retrieval={predictor.retrieval}, "
         f"cache={'on' if use_cache else 'off'}",
     )
@@ -1061,6 +1255,12 @@ def main(argv: list[str] | None = None) -> int:
         "--check",
         action="store_true",
         help="also compare the score against baseline.json, and exit 2 if it moved",
+    )
+    parser.add_argument(
+        "--check-prompt",
+        action="store_true",
+        help=f"score nothing; exit 3 if prompt.py no longer sends the prompt "
+        f"{MODEL_SCORE.name} records the model's number under",
     )
     parser.add_argument(
         "--set",
@@ -1114,6 +1314,25 @@ def main(argv: list[str] | None = None) -> int:
         help="also print every missed row with its description",
     )
     args = parser.parse_args(argv)
+
+    if args.check_prompt:
+        # Before the CSV is read, because nothing here is scored: the record's
+        # number came from a run that cannot be repeated on a pull request, and the
+        # rules number for this commit belongs to `--check`.
+        #
+        # Together with `--check` it is refused rather than both being run. One
+        # invocation can only exit with one code, and #97 asks for "the prompt
+        # moved" and "the baseline moved" to stay distinguishable -- which two CI
+        # steps give for free and one combined exit code would quietly take away.
+        if args.check:
+            print(
+                "--check-prompt and --check are two checks with two exit codes; run them",
+                "as two commands.",
+                sep="\n",
+                file=sys.stderr,
+            )
+            return 1
+        return check_prompt(MODEL_SCORE)
 
     try:
         rows = load(args.path)
