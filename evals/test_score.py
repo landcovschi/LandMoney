@@ -429,6 +429,9 @@ class LanguageTests(unittest.TestCase):
 
         self.assertIn("not UTF-8", caught.exception.problems[0])
         self.assertIn("cp1251", caught.exception.problems[0])
+        # The half a person can act on. A mutation sweep deleted it and the two
+        # assertions above stayed green.
+        self.assertIn("CSV UTF-8", caught.exception.problems[0])
 
     def test_the_script_survives_an_output_stream_in_a_code_page(self):
         """Found by running it: a redirected stream on this machine was cp1251, which
