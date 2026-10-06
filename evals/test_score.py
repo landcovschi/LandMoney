@@ -24,6 +24,7 @@ import logging
 import tempfile
 import unittest
 from collections import Counter
+from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
 from decimal import Decimal
@@ -37,7 +38,9 @@ from score import (  # noqa: I001 -- must come first
     BASELINE,
     COLUMNS,
     DEFAULT_SET,
+    MODEL_SCORE,
     PREDICTORS,
+    REQUIRED_MODEL_SCORE_KEYS,
     CategoryScore,
     EvalSetError,
     Report,
@@ -45,8 +48,10 @@ from score import (  # noqa: I001 -- must come first
     build_predictor,
     build_store,
     check,
+    check_prompt,
     load,
     main,
+    model_label,
     SpendLog,
     render_confusion,
     render_misses,
@@ -55,6 +60,7 @@ from score import (  # noqa: I001 -- must come first
 )
 
 from categorizer.categories import CATEGORIES, KNOWN, NO_PREDICTION
+from categorizer.prompt import FINGERPRINT, SCHEMA_FINGERPRINT, fingerprint
 from categorizer.rules import RULES, predict
 
 
@@ -564,6 +570,259 @@ class BaselineTests(unittest.TestCase):
         recorded = json.loads(BASELINE.read_text(encoding="utf-8"))
 
         self.assertEqual(recorded["set"], DEFAULT_SET.name)
+
+
+class PromptRecordTests(unittest.TestCase):
+    """`--check-prompt` -- #97 -- against hand-built records and made-up digests.
+
+    The same rule as `BaselineTests`, for the same reason: **nothing in here asserts
+    that the shipped record matches today's prompt.** That comparison is the CI
+    step, and a prompt edit has to turn `build` red on the step whose message names
+    `model-score.json` -- not on a test here, which somebody would then edit until
+    it was green. What is asserted about the shipped file is only its shape.
+    """
+
+    PROMPT = "aaaaaaaaaaaa"
+    SCHEMA = "bbbbbbbbbbbb"
+
+    def record(self, **fields) -> Path:
+        """A record of the model measured under PROMPT and SCHEMA."""
+        recorded = {
+            "set": "transactions.csv",
+            "rows": 53,
+            "model": "claude-opus-5",
+            "effort": "low",
+            "retrieval": "off",
+            "prompt": self.PROMPT,
+            "schema": self.SCHEMA,
+            "accuracy": 0.981,
+            "macro_recall": 0.989,
+        }
+        recorded.update(fields)
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        json.dump(recorded, handle)
+        handle.close()
+        path = Path(handle.name)
+        self.addCleanup(path.unlink)
+        return path
+
+    def without(self, key: str) -> Path:
+        path = self.record()
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+        del recorded[key]
+        path.write_text(json.dumps(recorded), encoding="utf-8")
+        return path
+
+    def check(self, record: Path, prompt: str = PROMPT, schema: str = SCHEMA):
+        """Run the comparison, returning its exit code, its stdout and its stderr."""
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = check_prompt(record, prompt, schema)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_record_of_the_prompt_sent_today_passes_and_says_what_it_stands_on(self):
+        code, said, _ = self.check(self.record())
+
+        self.assertEqual(code, 0)
+        self.assertIn("98.9%", said)
+        self.assertIn("claude-opus-5", said)
+        self.assertIn("effort=low", said)
+
+    def test_a_moved_system_prompt_is_exit_3_and_names_the_file_to_update(self):
+        """#97's first acceptance test: "a message that says which file records the
+        number"."""
+        record = self.record()
+
+        code, _, said = self.check(record, prompt="cccccccccccc")
+
+        self.assertEqual(code, 3)
+        self.assertIn(str(record), said)
+        self.assertIn("system prompt", said)
+        self.assertNotIn("response schema", said)
+
+    def test_a_moved_schema_is_exit_3_on_its_own(self):
+        """The schema is sent with every call and the model reads it, so a change to
+        it alone is a change to what was measured -- and the message says which half
+        moved, because that is what a reader needs to decide whether it matters."""
+        code, _, said = self.check(self.record(), schema="cccccccccccc")
+
+        self.assertEqual(code, 3)
+        self.assertIn("response schema", said)
+        self.assertNotIn("system prompt", said)
+
+    def test_a_moved_prompt_is_not_the_baselines_exit_2(self):
+        """#97's third acceptance test, and the reason for a code of its own. "The
+        baseline moved" is fixed by editing a number the run just printed; "the
+        prompt moved" is fixed by paying for a run. The two must not share a code or
+        a sentence."""
+        code, _, said = self.check(self.record(), prompt="cccccccccccc")
+
+        self.assertNotEqual(code, 2)
+        self.assertNotIn("baseline", said)
+        self.assertIn("number", said)
+
+    def test_the_failure_does_not_print_the_digest_that_would_turn_it_green(self):
+        """Copying the current digest out of a red step into the record is green with
+        the old number beside it -- the one failure this check cannot see. The honest
+        route, a model run, prints the digest in its own header; this does not."""
+        code, _, said = self.check(
+            self.record(), prompt="cccccccccccc", schema="dddddddddddd"
+        )
+
+        self.assertEqual(code, 3)
+        self.assertNotIn("cccccccccccc", said)
+        self.assertNotIn("dddddddddddd", said)
+
+    def test_the_failure_says_what_it_cannot_know(self):
+        """#97's first trap, said in the step as well as in the commit: a green step
+        means a number was recorded under this prompt, not that it is a true one."""
+        _, _, said = self.check(self.record(), prompt="cccccccccccc")
+
+        self.assertIn("cannot tell whether the number is honest", said)
+
+    def test_a_record_that_cannot_be_read_is_exit_1_and_not_3(self):
+        malformed = self.record()
+        malformed.write_text("{not json", encoding="utf-8")
+
+        missing, _, _ = self.check(Path("no-such-record.json"))
+        unreadable, _, _ = self.check(malformed)
+
+        self.assertEqual(missing, 1)
+        self.assertEqual(unreadable, 1)
+
+    def test_a_number_that_does_not_say_what_produced_it_is_refused(self):
+        """#97's last trap: "the recorded number has to say which model and which
+        effort produced it, or the hash pins the prompt while the number floats".
+        Every required key, one at a time.
+
+        **Named here rather than read from REQUIRED_MODEL_SCORE_KEYS**, and a
+        mutation sweep is why. Looping over the constant meant that deleting
+        `effort` from it deleted it from this test too, and the suite stayed green
+        over a record that no longer had to say which effort produced its number --
+        #96's lesson about a sentinel named symbolically, one constant along.
+        """
+        required = (
+            "set",
+            "rows",
+            "model",
+            "effort",
+            "retrieval",
+            "prompt",
+            "schema",
+            "accuracy",
+            "macro_recall",
+        )
+        self.assertEqual(set(REQUIRED_MODEL_SCORE_KEYS), set(required))
+
+        for key in required:
+            with self.subTest(key=key):
+                code, _, said = self.check(self.without(key))
+
+                self.assertEqual(code, 1)
+                self.assertIn(key, said)
+
+    def test_current_digests_beside_no_number_is_refused_rather_than_passed(self):
+        """The route around the digest comparison: update the two hashes, leave the
+        number for later. That is a prompt change arriving without a number, which is
+        the whole of what #97 exists to stop."""
+        for field, value in (
+            ("macro_recall", "TODO"),
+            ("macro_recall", None),
+            ("accuracy", 98.1),
+            ("macro_recall", True),
+            ("rows", 0),
+            ("rows", True),
+            ("model", ""),
+            ("effort", None),
+        ):
+            with self.subTest(field=field, value=value):
+                code, _, said = self.check(self.record(**{field: value}))
+
+                self.assertEqual(code, 1)
+                self.assertIn(field, said)
+
+    def test_an_empty_effort_is_a_run_that_did_not_send_the_parameter(self):
+        """`NO_EFFORT`, which is how `claude-haiku-4-5` was measured in #96. A legal
+        record, and its line says so rather than printing `effort=`."""
+        code, said, _ = self.check(self.record(model="claude-haiku-4-5", effort=""))
+
+        self.assertEqual(code, 0)
+        self.assertIn("effort=not sent", said)
+
+    def test_a_number_measured_with_retrieval_is_refused(self):
+        """A with-examples run is sent `fingerprint(True)`, so its number cannot be
+        recorded against the base prompt this check compares -- and accepting it
+        would let a lexical-retrieval score stand in for the prompt production
+        sends."""
+        code, _, said = self.check(self.record(retrieval="lexical"))
+
+        self.assertEqual(code, 1)
+        self.assertIn("retrieval", said)
+
+    def test_main_reads_no_csv_for_it(self):
+        """It scores nothing, so an eval set that cannot be loaded is not its
+        problem -- the step must fail on the prompt or not at all."""
+        record = self.record(prompt=FINGERPRINT, schema=SCHEMA_FINGERPRINT)
+
+        with mock.patch("score.MODEL_SCORE", record), redirect_stdout(io.StringIO()):
+            code = main(["--check-prompt", "--set", "no-such-set.csv"])
+
+        self.assertEqual(code, 0)
+
+    def test_main_compares_against_the_digests_prompt_py_produces(self):
+        """The defaults are the real digests, which is the half of the wiring a
+        hand-built digest cannot reach: a record of anything else is exit 3."""
+        with mock.patch("score.MODEL_SCORE", self.record()), redirect_stderr(io.StringIO()):
+            code = main(["--check-prompt"])
+
+        self.assertEqual(code, 3)
+
+    def test_with_check_it_is_refused_rather_than_one_swallowing_the_other(self):
+        """One process exits with one code, so running both would make "the prompt
+        moved" and "the baseline moved" indistinguishable again -- in the step #97
+        added to keep them apart."""
+        with redirect_stderr(io.StringIO()) as said:
+            code = main(["--check", "--check-prompt"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("two commands", said.getvalue())
+
+    def test_a_model_run_prints_both_digests_the_record_is_compared_on(self):
+        """The honest route to an updated record is a run, so the run has to print
+        what the record needs -- otherwise the only place to read a current digest is
+        `python -c`, which is the route that skips the number."""
+        label = model_label(
+            "claude-opus-5", "low", with_examples=False, retrieval="off", use_cache=False
+        )
+
+        self.assertIn(f"prompt.py sha256:{FINGERPRINT}", label)
+        self.assertIn(f"schema sha256:{SCHEMA_FINGERPRINT}", label)
+
+    def test_a_run_with_examples_prints_the_prompt_it_was_sent(self):
+        """Which is why such a run cannot be recorded: its prompt digest is not the
+        one `--check-prompt` compares."""
+        label = model_label(
+            "claude-opus-5", "low", with_examples=True, retrieval="lexical", use_cache=False
+        )
+
+        self.assertIn(f"prompt.py sha256:{fingerprint(True)}", label)
+        self.assertNotIn(FINGERPRINT, label)
+
+    def test_the_shipped_record_describes_the_default_eval_set(self):
+        recorded = json.loads(MODEL_SCORE.read_text(encoding="utf-8"))
+
+        self.assertEqual(recorded["set"], DEFAULT_SET.name)
+
+    def test_the_shipped_record_carries_a_number_and_what_produced_it(self):
+        """Its shape and nothing more: the record checked against its own digests, so
+        whether those digests are current stays the CI step's question."""
+        recorded = json.loads(MODEL_SCORE.read_text(encoding="utf-8"))
+
+        code, _, said = self.check(MODEL_SCORE, recorded["prompt"], recorded["schema"])
+
+        self.assertEqual(code, 0, said)
 
 
 class PredictorTests(unittest.TestCase):

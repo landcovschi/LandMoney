@@ -228,6 +228,22 @@ jobs:
       - name: The baseline must not have moved
         run: python evals/score.py --check
 
+      # #97. The model's number cannot be re-measured here -- one API call per row
+      # would turn this required check into a bill -- so what is asserted is that
+      # evals/model-score.json records the prompt prompt.py sends today, digested
+      # from the rendered text and the schema rather than from the file's bytes.
+      #
+      # A step of its own and exit 3 rather than more work for the step above: "the
+      # baseline moved" is fixed by editing a number the run just printed, "the
+      # prompt moved" by paying for a run, and the step name is the first thing a
+      # red build shows. Inside `build` for the reason the Python half is: a job of
+      # its own would not be the required check.
+      #
+      # It knows that a number was recorded under this prompt. It cannot know
+      # whether the number is honest.
+      - name: A prompt change must arrive with a number
+        run: python evals/score.py --check-prompt
+
       # -----------------------------------------------------------------------
       # The migration bundle -- #37.
       #

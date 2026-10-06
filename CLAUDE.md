@@ -1664,6 +1664,11 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   where it can carry its caveats; a JSON file cannot say "the set was written by the
   thing being measured".
 
+  **Half of that stopped being true on 2026-10-06 in #97.** The number is now also
+  in `evals/model-score.json`, beside the two digests it was measured under, because
+  prose does not fail a build. The caveats still live in prose, and nothing compares
+  the number with a run. See the #97 entry at the end of this list.
+
   **The fake is a fake *client*, not a fake predictor**, and both exist. The
   endpoint's seam is `dependency_overrides` and was already tested in #39; the
   awkward cases #59 lists -- an answer outside the vocabulary, an empty answer, a
@@ -2537,6 +2542,12 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   prompt, or the call is labelled with instructions about examples that are not
   there, and an empty corpus would orphan every cache entry written since #65 for
   no gain.
+
+  **"Pinned by a test" was not true, and #97 is what found it.** No test has ever
+  asserted that digest -- `git log -S` over the tests finds it only as a fixture
+  value in `test_cache.py`. The tests asserted that the no-examples prompt *sent*
+  is `system_prompt(False)`, which is a different property. Since #97 the digest is
+  pinned, by `evals/model-score.json` and a CI step rather than by a test.
 
   **Anthropic has no embedding model.** Its own documentation says so and points at
   **Voyage AI**, so this is the first time the project depends on anything but
@@ -4350,6 +4361,103 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   inside, not evidence that the three are equivalent on anything harder. #47 remains
   the single most valuable open item in the project, and this exercise did not move
   it.
+
+- **A prompt change arrives with a number: `evals/model-score.json` and
+  `score.py --check-prompt`, exit 3 -- decided 2026-10-06** (#97). The record holds
+  the model's number with the model, the effort, the set, the row count and two
+  digests; the check compares the digests with what `prompt.py` produces today; CI
+  runs it as its own step inside `build`. 18 new scorer tests and 5 new categorizer
+  tests, none of which opens a socket. No new dependency.
+
+  **What it fixes is that the highest-leverage file in the repository was the one
+  with no guard.** `--check` re-runs the rules on every pull request, which is
+  strictly better than any hash, and the model cannot be re-run there -- one call
+  per row would turn the required check into a bill. So the model's number lived in
+  prose next to `sha256:c8ad9d9fd16f`, and prose does not fail a build.
+
+  **What it cannot do, and the commit says so rather than letting the step imply
+  otherwise: know whether the number is honest.** It asserts that somebody wrote a
+  number down beside the current digests. Two things make the honest route the
+  easy one without pretending to enforce it. The red step **does not print the new
+  digests** -- copying them out of it into the record is green with the old number
+  beside them, the one failure the check cannot see -- while a model run prints
+  both in its header. And a record whose digests are current and whose number is
+  `"TODO"`, `98.9` instead of `0.989`, or missing a model or an effort, is exit 1:
+  that is a prompt change without a number, reached by the one route the digest
+  comparison cannot see.
+
+  **Exit 3, not `--check`'s 2, and a step of its own, not a mode of the step
+  above.** "The baseline moved" is fixed by editing a number the run just printed;
+  "the prompt moved" by paying for a run. Run together, one process can exit with
+  one code, so `--check --check-prompt` is refused rather than letting one swallow
+  the other.
+
+  **Two digests, not one, and the old one is unchanged.** `FINGERPRINT` covers the
+  rendered system prompt and deliberately not the schema (#65's comment says so),
+  and it is in every cache key and beside every number this project has measured.
+  Widening it to the schema would have re-labelled `c8ad9d9fd16f` everywhere for a
+  guard's sake. `SCHEMA_FINGERPRINT` is the second, of `RESPONSE_SCHEMA` as the
+  request carries it -- **not `sort_keys`**, because a guard unsure whether a
+  reordered key matters to the model should ask for a number rather than decide it
+  cannot. It was computed on 2026-10-06 as `972701c22b0d` over a schema unchanged
+  since #59, so it describes #60's and #96's runs alike; checked in `git log` rather
+  than assumed, because a digest recorded beside a number measured under a
+  different schema would be the exact lie this exists to prevent.
+
+  **The digests are of what the model is sent, which is #97's second trap.** The
+  rendered string, not the file's bytes: an edited comment passes, while a change
+  to a category description, a boundary rule or a sentence of the base prompt each
+  fails -- all measured by editing `prompt.py` and running the step. A vocabulary
+  change in `categories.py` fails too, because the names are in the prompt. That is
+  not the guard extended to a file `--check` already covers; it is a vocabulary edit
+  reaching the model.
+
+  **What lost: a pytest test in the categorizer comparing `FINGERPRINT` with a
+  constant.** Smaller, and it fails as "a test broke" rather than as "the prompt
+  moved", which invites editing the constant until it is green -- the reason
+  `test_score.py` has never asserted today's rules number either. It would also
+  have had the service reading `evals/`, which #39 forbids in the other direction.
+
+  **`prompt.py` must now stay importable without the categorizer's dependencies**,
+  and that is a constraint this change adds rather than one it found.
+  `score.py` imports it at module scope on the runner's own python. Checked the way
+  #96 recorded, with `pydantic`, `anthropic`, `redis`, `fastapi` and `httpx2` made
+  unimportable: 81 scorer tests and both checks pass.
+
+  **The comment above `SYSTEM_PROMPT` had claimed since #66 that `test_prompt.py`
+  pinned `c8ad9d9fd16f`, and the #66 entry above said the same. Nothing did** --
+  `git log -S` over the tests finds the digest only as a cache-key fixture. That is
+  the gap #97 describes, sitting for five weeks in two sentences saying it was
+  closed. Both are corrected rather than deleted, the way #91 corrected the holdout:
+  a claim of protection written beside the thing it protects is read as the
+  protection, and nobody re-checks it.
+
+  **Checked by breaking it, per #21: sixteen mutations, one at a time, reverted
+  with `git checkout` from the commit.** Fourteen were caught first time. The
+  harness carries the three traps already paid for here -- a substitution matching
+  zero or two places is refused (#21), a mutant that does not parse is invalid
+  rather than killed (#89), and nothing is stashed (#93).
+
+  The two survivors were both real. **Deleting `effort` from the required keys
+  survived because the test looped over that same constant**, so the mutation took
+  the key out of the test too -- #96's sentinel lesson exactly, one constant along;
+  the keys are now named in the test. **Deleting the schema digest from a model
+  run's header survived because the header was built past `import anthropic`**,
+  which this stdlib-only suite cannot make; it is now `model_label`, a pure function
+  the suite reaches. Re-run: sixteen of sixteen.
+
+  **Deliberately not covered, each said out loud in `evals/README.md`.**
+  `_EXAMPLES_INSTRUCTION` and `render_examples`, which are only sent with retrieval
+  on, while the recorded number was measured with it off: covering them needs a
+  with-retrieval number, and there is none to record since the holdout is spent.
+  `_user_message`'s framing, which the model reads on every call and which lives in
+  the adapter. The model and the effort production runs, which come from Azure
+  environment variables no check here can read. And **the eval set** -- the one
+  #90 will hit first: a `transactions.csv` that gains rows fails `--check` for the
+  rules and leaves this record describing a set that no longer exists, with
+  nothing red. Mentioned rather than built, per this file's rule about adjacent
+  problems; comparing the record's row count with the set is one line when it is
+  wanted.
 
 ## How work flows
 

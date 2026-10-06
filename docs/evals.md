@@ -606,6 +606,19 @@ was quietly edited shut.
   where it can carry the caveats above; a JSON file cannot say "the set was
   written by the thing being measured".
 
+  **Since #97 the number is also in `evals/model-score.json`**, and the sentence
+  above is left standing because what it says about the caveats is still true.
+  What changed is that prose does not fail a build: `prompt.py` could be edited and
+  merged with nothing measuring the result. The file records 98.9% beside the
+  model, the effort and two digests -- `sha256:c8ad9d9fd16f` for the system prompt
+  and `sha256:972701c22b0d` for the response schema, the second computed on
+  2026-10-06 over a schema unchanged since #59, so it describes the runs of #60 and
+  #96 alike. `python evals/score.py --check-prompt` exits 3 on every pull request
+  where `prompt.py` no longer sends what those two describe. It does not compare
+  the number with anything and cannot tell whether a new one came from a run.
+  This section is still where the number is argued; the file is where the build
+  reads it. `evals/README.md` has what it does not cover.
+
 ## 8. Retrieval, and the eval set running out of room
 
 Written 2026-08-29 for #66, which asked for the user's own history to be used as

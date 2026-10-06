@@ -1,0 +1,13 @@
+{
+  "note": "The model's recorded score, and exactly what produced it -- #97. `python evals/score.py --check-prompt` fails when prompt.py no longer sends what `prompt` and `schema` record, so a prompt change has to arrive with a re-measured number in the same change. It can tell that a number was recorded under the current prompt; it cannot tell whether the number is honest. Nothing compares the percentages here against a run -- the model never runs in CI -- and their caveats are in docs/evals.md sections 7 and 9. evals/README.md says how to update this file.",
+  "recorded": "2026-09-02",
+  "set": "transactions.csv",
+  "rows": 53,
+  "model": "claude-opus-5",
+  "effort": "low",
+  "retrieval": "off",
+  "prompt": "c8ad9d9fd16f",
+  "schema": "972701c22b0d",
+  "accuracy": 0.981,
+  "macro_recall": 0.989
+}
