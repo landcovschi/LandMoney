@@ -4544,6 +4544,13 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   csv reader with a `UnicodeDecodeError` about a byte. This is #98's encoding trap,
   and the .NET import has refused cp1251 the same way since #62.
 
+  **Checked by breaking it, per #21: six mutations, reverted with `git checkout`
+  from the commit.** All six were caught in the end. The one that survived at first
+  was the advice in the code-page refusal: deleting "save it as CSV UTF-8" left a
+  test green because it asserted only the diagnosis. It now asserts the half a
+  person can act on. The `--baseline` default is caught only by the CI steps, not
+  by a test, which is the right place: it is what those steps run.
+
   **Not done, said plainly: the model's 100% is not in `model-score.json`.** #97's
   check asks only for the English number to be re-measured when the prompt moves.
   After the next prompt change, this number describes a prompt that no longer
