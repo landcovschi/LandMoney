@@ -97,7 +97,7 @@ from categorizer.rules import RULES, predict as predict_by_rules
 # vocabulary, and #97 makes that load-bearing: the day it imports pydantic, this
 # line fails on the runner with ModuleNotFoundError -- loudly, and on the step that
 # guards the prompt rather than somewhere unrelated.
-from categorizer.prompt import FINGERPRINT, SCHEMA_FINGERPRINT
+from categorizer.prompt import FINGERPRINT, SCHEMA_FINGERPRINT, fingerprint
 
 # The eval set's columns, in order. Checked exactly rather than by lookup, so a
 # renamed or reordered column is an error instead of a silent column of None.
@@ -1173,7 +1173,6 @@ def build_predictor(
     from categorizer.anthropic_predictor import AnthropicPredictor
     from categorizer.cache import REDIS_URL_ENV
     from categorizer.contracts import CategorizeRequest
-    from categorizer.prompt import fingerprint
 
     # **The cache is off unless it is asked for, and that is #65's second trap
     # aimed at the one place it bites hardest.** The service caches because the
@@ -1236,16 +1235,35 @@ def build_predictor(
         # itself rather than off the mode that built it, so it cannot claim an
         # embedding model that did not answer -- #66's last trap, since changing
         # that model invalidates every vector.
-        #
-        # The schema's digest joined it in #97, and for the reader of
-        # `model-score.json` rather than of the report: these two strings are what
-        # `--check-prompt` compares, so the run that produces a number has to be
-        # the thing that prints them.
-        f"{predictor.model}, effort={predictor.effort}, "
-        f"prompt.py sha256:{fingerprint(store is not None)}, "
+        model_label(
+            predictor.model,
+            predictor.effort,
+            with_examples=store is not None,
+            retrieval=predictor.retrieval,
+            use_cache=use_cache,
+        ),
+    )
+
+
+def model_label(
+    model: str, effort: str, *, with_examples: bool, retrieval: str, use_cache: bool
+) -> str:
+    """What a model run prints above its number.
+
+    Its own function since #97, and not for reuse. The schema's digest joined the
+    header then, for the reader of `model-score.json` rather than of the report:
+    these are the two strings `--check-prompt` compares, so the run that produces a
+    number has to be the thing that prints them. Built inside `build_predictor` the
+    label was reachable only past an import of the `anthropic` package, which this
+    folder's tests cannot make on the runner -- and a mutation sweep deleted the
+    schema digest from it with every test still green.
+    """
+    return (
+        f"{model}, effort={effort}, "
+        f"prompt.py sha256:{fingerprint(with_examples)}, "
         f"schema sha256:{SCHEMA_FINGERPRINT}, "
-        f"retrieval={predictor.retrieval}, "
-        f"cache={'on' if use_cache else 'off'}",
+        f"retrieval={retrieval}, "
+        f"cache={'on' if use_cache else 'off'}"
     )
 
 

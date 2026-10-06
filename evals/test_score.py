@@ -51,6 +51,7 @@ from score import (  # noqa: I001 -- must come first
     check_prompt,
     load,
     main,
+    model_label,
     SpendLog,
     render_confusion,
     render_misses,
@@ -59,7 +60,7 @@ from score import (  # noqa: I001 -- must come first
 )
 
 from categorizer.categories import CATEGORIES, KNOWN, NO_PREDICTION
-from categorizer.prompt import FINGERPRINT, SCHEMA_FINGERPRINT
+from categorizer.prompt import FINGERPRINT, SCHEMA_FINGERPRINT, fingerprint
 from categorizer.rules import RULES, predict
 
 
@@ -694,8 +695,28 @@ class PromptRecordTests(unittest.TestCase):
     def test_a_number_that_does_not_say_what_produced_it_is_refused(self):
         """#97's last trap: "the recorded number has to say which model and which
         effort produced it, or the hash pins the prompt while the number floats".
-        Every required key, one at a time."""
-        for key in REQUIRED_MODEL_SCORE_KEYS:
+        Every required key, one at a time.
+
+        **Named here rather than read from REQUIRED_MODEL_SCORE_KEYS**, and a
+        mutation sweep is why. Looping over the constant meant that deleting
+        `effort` from it deleted it from this test too, and the suite stayed green
+        over a record that no longer had to say which effort produced its number --
+        #96's lesson about a sentinel named symbolically, one constant along.
+        """
+        required = (
+            "set",
+            "rows",
+            "model",
+            "effort",
+            "retrieval",
+            "prompt",
+            "schema",
+            "accuracy",
+            "macro_recall",
+        )
+        self.assertEqual(set(REQUIRED_MODEL_SCORE_KEYS), set(required))
+
+        for key in required:
             with self.subTest(key=key):
                 code, _, said = self.check(self.without(key))
 
@@ -767,6 +788,27 @@ class PromptRecordTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("two commands", said.getvalue())
+
+    def test_a_model_run_prints_both_digests_the_record_is_compared_on(self):
+        """The honest route to an updated record is a run, so the run has to print
+        what the record needs -- otherwise the only place to read a current digest is
+        `python -c`, which is the route that skips the number."""
+        label = model_label(
+            "claude-opus-5", "low", with_examples=False, retrieval="off", use_cache=False
+        )
+
+        self.assertIn(f"prompt.py sha256:{FINGERPRINT}", label)
+        self.assertIn(f"schema sha256:{SCHEMA_FINGERPRINT}", label)
+
+    def test_a_run_with_examples_prints_the_prompt_it_was_sent(self):
+        """Which is why such a run cannot be recorded: its prompt digest is not the
+        one `--check-prompt` compares."""
+        label = model_label(
+            "claude-opus-5", "low", with_examples=True, retrieval="lexical", use_cache=False
+        )
+
+        self.assertIn(f"prompt.py sha256:{fingerprint(True)}", label)
+        self.assertNotIn(FINGERPRINT, label)
 
     def test_the_shipped_record_describes_the_default_eval_set(self):
         recorded = json.loads(MODEL_SCORE.read_text(encoding="utf-8"))
