@@ -31,6 +31,12 @@ be reported separately from the percentage.
 is what CI runs -- #58. Without it a CI step that merely runs the scorer is green
 while the number drifts, because printing a number is all it takes to exit 0.
 
+    python evals/score.py --set evals/transactions-ru-ro.csv --check --baseline evals/baseline-ru-ro.json
+
+#98 added a second set, the same eleven categories in Russian and Romanian, with
+a recorded score of its own -- so a Russian substring added to the rules to
+flatter that number has to say so in the same change, like any other move.
+
     python evals/score.py --check-prompt
 
 `--check-prompt` is #97, and it scores nothing. The model's number cannot be
@@ -300,6 +306,25 @@ def load(path: Path) -> list[Row]:
     """
     if not path.exists():
         raise EvalSetError(path, ["the file does not exist"])
+
+    # #98. Once a description may be Cyrillic or Romanian, a spreadsheet saving in
+    # the machine's code page is the likeliest way this file gets written, and the
+    # csv reader then fails mid-iteration with a bare UnicodeDecodeError -- a
+    # traceback about a byte, for a file that opens fine in the program that saved
+    # it. Decoded once up front so the refusal is a sentence, the way the .NET
+    # import refuses cp1251 by name (#62). Reading a few kilobytes twice is the
+    # price, and it is not worth avoiding.
+    try:
+        path.read_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise EvalSetError(
+            path,
+            [
+                f"not UTF-8 -- byte 0x{error.object[error.start]:02x} at offset "
+                f"{error.start}. A spreadsheet saving in a code page such as cp1251 "
+                "does this; save it as CSV UTF-8 instead."
+            ],
+        )
 
     problems: list[str] = []
     rows: list[Row] = []
@@ -1272,7 +1297,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="also compare the score against baseline.json, and exit 2 if it moved",
+        help="also compare the score against the recorded baseline, and exit 2 if it moved",
+    )
+    # #98. One baseline per eval set, because `transactions-ru-ro.csv` is scored as
+    # a set of its own rather than as rows inside `transactions.csv`. A path rather
+    # than a name derived from --set: a mapping nobody wrote down is one somebody
+    # renames a file past. Pairing the wrong two is safe -- `check` compares the
+    # recorded `set` with the file scored and refuses, exit 1, rather than calling
+    # one set's number the other's drift.
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=BASELINE,
+        help=f"the recorded score --check compares against (default: {BASELINE.name})",
     )
     parser.add_argument(
         "--check-prompt",
@@ -1487,9 +1524,36 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print(render_misses(report))
     if args.check:
-        return check(report, args.path, BASELINE, args.predictor)
+        return check(report, args.path, args.baseline, args.predictor)
     return 0
 
 
+def use_utf8_output() -> None:
+    """Write UTF-8 to stdout and stderr whatever the platform would have picked.
+
+    #98, and found by the first run over `transactions-ru-ro.csv` rather than
+    predicted. On Windows, Python writes a redirected stream in the locale's code
+    page -- cp1251 on this machine -- which holds Cyrillic and not Romanian's
+    a-circumflex, s-comma or t-comma (U+00E2, U+0219, U+021B).
+    So `--misses` died with a UnicodeEncodeError on the first Romanian row, and
+    `> result.txt`, which the docstring above recommends, would have done the same.
+    The model path is the expensive half of it: the progress line prints every
+    description to stderr, so a paid run would have stopped at the first Romanian
+    row with every call before it already billed.
+
+    UTF-8 rather than `errors="backslashreplace"` on the code page: the second never
+    crashes, and writes a file that is half Cyrillic and half `\\xe2` escapes, which
+    nobody can read. A console is unaffected -- Python already talks to one in
+    UTF-16 -- and a Linux runner is UTF-8 already, which is why CI could never have
+    shown this.
+
+    At the entry point and not inside `main`, because the tests call `main` with
+    the streams redirected to `StringIO`, which has no encoding to change.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
+
+
 if __name__ == "__main__":
+    use_utf8_output()
     raise SystemExit(main())

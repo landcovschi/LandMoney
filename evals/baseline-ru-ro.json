@@ -1,0 +1,9 @@
+{
+  "note": "The recorded score of the rules baseline on the Russian and Romanian set -- #98. `python evals/score.py --set evals/transactions-ru-ro.csv --check --baseline evals/baseline-ru-ro.json` fails when the run does not reproduce it. A rule added to move this number is tuning against the rows it is scored on, which #98 names as the trap; evals/README.md says when moving it is legitimate.",
+  "recorded": "2026-10-06",
+  "set": "transactions-ru-ro.csv",
+  "predictor": "rules",
+  "rows": 44,
+  "accuracy": 0.114,
+  "macro_recall": 0.114
+}

@@ -106,6 +106,17 @@ usings and imports, typos, boilerplate, running linters and tests.
   repository, which is why this had to be said out loud on 2026-08-23. The
   chat conversation is Russian and stays that way -- it is not published, and
   nobody has to read it later.
+
+  **One exemption, decided by the owner on 2026-10-06 in #98: descriptions in
+  `evals/*.csv` may be in the language they were typed in.** The rule exists for
+  tooling and for prose; a UTF-8 CSV read by Python and nothing else is data, and
+  keeping it English meant every number in the project was measured on input in a
+  language the real entries are not typed in. The category labels stay English --
+  they are a vocabulary, not text. Test fixtures whose subject *is* a language or
+  an encoding were already the same kind of data (`CsvTextTests` since #62,
+  `LanguageTests` since #98), and the comments around them stay English. Section
+  6 of `docs/evals.md` records the opposite ruling of 2026-08-26; this reverses it
+  in the open rather than by quietly making an exception, which is what #98 asked.
 - .NET 10 (LTS). Python >= 3.12 with `uv` when the categorizer arrives.
 - Money is `decimal`, never `double` or `float`. Amounts are stored with their
   currency; there is no implicit conversion anywhere.
@@ -4458,6 +4469,87 @@ Decided 2026-08-05. Recorded here so it is not re-argued from scratch.
   nothing red. Mentioned rather than built, per this file's rule about adjacent
   problems; comparing the record's row count with the set is one line when it is
   wanted.
+
+- **Russian and Romanian eval rows, in a set of their own -- decided 2026-10-06**
+  (#98). `evals/transactions-ru-ro.csv`, 44 rows; `evals/baseline-ru-ro.json` and a
+  `--baseline` flag on `score.py`, so CI asserts the rules' number there too;
+  `docs/evals.md` section 10 is the account. 5 new scorer tests. No new dependency.
+
+  **The decision #98 was about is the owner's, and it was asked for rather than
+  assumed.** Section 6 of `docs/evals.md` recorded the opposite ruling on
+  2026-08-26, and `CLAUDE.md` has twice recorded a recommendation being taken as a
+  decision only the owner could make. So the question was put with the reasoning
+  attached -- the rule exists for tooling and prose, and a UTF-8 CSV only Python
+  reads is data -- and the answer is written beside the rule it exempts from, in
+  "Technical conventions" above.
+
+  **A file of its own, because a `language` column was not available and the
+  script cannot tell.** The application's export (#89) writes exactly
+  `score.py`'s `COLUMNS` and `LabelledCsvTests` pins the two, so a sixth column
+  breaks the one route real labels have into `evals/`. Splitting by script puts
+  Romanian typed without diacritics on the English side, which is the confusion
+  the split exists to avoid. With a file, the language is known by construction,
+  and 56.1%, 98.9% and `model-score.json` keep describing the set they were
+  measured on. What it costs is #98's own phrasing, "one set, split by language",
+  which becomes two sets from one scorer. #90's real export will be mixed and will
+  bring the question back.
+
+  **The rows are Claude's again, on the owner's instruction**, and it was put to
+  them as a choice against waiting for #90. Written before `rules.py` was opened in
+  that session. 22 Russian and 22 Romanian, two per category per language, typed
+  rather than composed, with Romanian both with and without diacritics, two Russian
+  rows in Latin transliteration, and eight rows exercising the boundary rules.
+
+  **Rules: 11.4% macro recall, against 56.1% in English, and 0 of 22 in Russian.**
+  All 39 misses are abstentions. The five Romanian hits are all English showing
+  through: `cafea` contains `cafe`, `taxa` contains `tax`, and `concert`,
+  `spotify` and `icloud` are spelt the same in both languages. **Model: 44 of 44**,
+  at 1,177 input tokens a call -- about two more than in English -- and 0.27 USD
+  for the run, which was the figure quoted before it started. Run once and not
+  twice, because the second run was not in the quote.
+
+  **The 100% is the least informative number here, and the docs say why before
+  anyone celebrates it.** A set written by Claude and answered perfectly by Claude
+  is saturated, the way section 8 called the English one. What it rules out is
+  narrow: on these rows, language is not where the model's optimism was hiding. The
+  descriptions that would actually test it are the ones a person invents for
+  themselves.
+
+  **`baseline-ru-ro.json` exists because of #98's own trap.** That trap is "not a
+  reason to add Russian substrings -- doing that would tune the baseline against
+  the rows it is scored on". Without a recorded number, that change moves nothing
+  that anyone checks. With one, it is a red step until the same commit moves the
+  file and says why. **`--baseline` takes a path rather than deriving one from
+  `--set`**, because a naming convention nobody wrote down is one somebody renames
+  a file past. Pairing the wrong two is safe: `check` compares the recorded `set`
+  with the file scored and refuses, exit 1.
+
+  **Found by running it, and it would have cost money: a cp1251 crash.** On
+  Windows a redirected stream is written in the locale's code page, and here that
+  is cp1251, which holds Cyrillic and not Romanian's a-circumflex. `--misses` died
+  on the first Romanian row. The model path's progress line prints every
+  description to stderr, so a paid run would have died there with every earlier
+  call already billed. It was found on the free rules run before the paid one,
+  and that ordering is worth keeping. `score.py` now writes UTF-8 to both streams,
+  at the entry point rather than inside `main`, because the tests redirect `main`
+  into `StringIO`.
+
+  It was **reproduced by accident in the same session**, by a one-line probe
+  printing these rows to a piped stdout. That is the trap's real shape: on this
+  machine, any Python that prints a Romanian description into a pipe fails. A UTF-8
+  Linux runner cannot show it at all, so the test sets `PYTHONIOENCODING=cp1251` on
+  a subprocess.
+
+  **A CSV saved in a code page is refused by name**, rather than dying inside the
+  csv reader with a `UnicodeDecodeError` about a byte. This is #98's encoding trap,
+  and the .NET import has refused cp1251 the same way since #62.
+
+  **Not done, said plainly: the model's 100% is not in `model-score.json`.** #97's
+  check asks only for the English number to be re-measured when the prompt moves.
+  After the next prompt change, this number describes a prompt that no longer
+  exists, with nothing red. A second record and a loop in `check_prompt` would fix
+  it. Left out because #98 did not ask, per this file's rule about adjacent
+  problems.
 
 ## How work flows
 

@@ -195,6 +195,10 @@ finding rather than a broken script -- it is the strongest argument the model
 half of slice 4 will ever get, and it belongs in the record rather than being
 patched around by quietly adding non-English substrings.
 
+**Measured on 2026-10-06 in #98, and the prediction held:** 0 of 22 Russian rows
+and 5 of 22 Romanian ones, every Romanian hit an English root or a brand name
+showing through. No substring was added. Section 10 has the run.
+
 ## 4. The held-out rows
 
 **Spent on 2026-08-29 in #66, and recorded as burned on 2026-09-02 in #91.**
@@ -426,6 +430,10 @@ what the new rows copy.
    baseline reads optimistic is now deliberately preserved, and the day it is
    tested is the day that rule is relaxed for `evals/*.csv` alone.
 
+   **That day was 2026-10-06, in #98.** The owner relaxed it for exactly that, and
+   section 10 is the test. `transactions.csv` stays English, so the 56.1% below
+   still describes what it always did.
+
 That third point is the one to weigh: in English, at 53 rows, a plausible
 personal-finance set converges on the set it replaces. Seven descriptions
 survive from the first set unchanged -- `haircut`, `dry cleaning`, `blood
@@ -573,7 +581,10 @@ Three caveats, and the first is the one that matters most.
 2. **The descriptions are all English, deliberately** (section 6, point 3). Real
    entries would be Russian and Romanian. That is the second most likely way this
    reads optimistic, and it is preserved on purpose by the repository's
-   English-only rule.
+   English-only rule. **Tested on 2026-10-06 in #98, and it was not where the
+   optimism was:** the same model scored 44 of 44 Russian and Romanian rows. Read
+   section 10 before taking comfort in that, because caveat 1 applies to those rows
+   in full.
 3. **53 rows, 3 to 8 per category.** `score.py` still warns below 3, and a single
    row is 1.9 points of accuracy. A 42.8-point gap survives that easily; a future
    comparison between two models would not.
@@ -887,3 +898,161 @@ the category section 7 records as the one a substring baseline cannot reach at a
 it on every pull request, and nothing in this section is a number a required check
 may depend on -- for the reason section 7 gives: the model must never run on a pull
 request, because one API call per row would turn a required check into a bill.
+
+## 10. Russian and Romanian, and what the language costs
+
+Written 2026-10-06 for #98, which asked one question first: is
+`evals/transactions.csv` subject to the repository's English rule?
+
+### The decision
+
+**No -- descriptions in `evals/*.csv` may be in the language they were typed in.**
+The owner decided it in the open, and `CLAUDE.md` carries it beside the rule. The
+rule exists for tooling and for prose: PowerShell 5.1 reads a `.ps1` as ANSI, and
+documents are read by people. A UTF-8 CSV read by Python and by nothing else is
+data. The eleven category labels stay English, because they are a vocabulary and
+not text.
+
+This reverses the ruling of 2026-08-26 that section 6, point 3 records, and it
+leaves `transactions.csv` exactly as it is. The question the old ruling left open
+was what the English set had been hiding. That is answered by a second set beside
+it, without rewriting the first.
+
+### The set
+
+`evals/transactions-ru-ro.csv`: **44 rows, 22 in Russian and 22 in Romanian**, two
+per category per language, so four per category in the file -- above the floor of
+three that section 1 sets. Russian is dated July and Romanian August, so the file
+reads in date order and in language blocks at once.
+
+**Written by Claude, on the owner's instruction, which makes it the third set
+with that origin.** Caveat 1 of section 7 applies to it in full and is the first
+thing to read about the numbers below. The rows were written before `rules.py` was
+opened in that session, which is what keeps the rules' number from being tuned to
+them. Nothing does the same for the model.
+
+How they are written, since that is all a synthetic set can get right:
+
+- **As typed**, matching section 6: lower case, no punctuation, real Chisinau
+  merchants (`линелла`, `кауфланд`, `тукано`, `старнет`, `фелиция`, `la placinte`,
+  `lukoil`, `librarius`).
+- **Romanian with and without diacritics** -- `pâine și lapte` beside
+  `cumparaturi linella` -- because phone keyboards make both common. The `ș` and
+  `ț` are the comma-below forms (U+0219, U+021B), not the cedilla ones a legacy
+  code page produces.
+- **Two Russian rows in Latin transliteration**, `abonement v zal` and `otpravil
+  posylku`, which is how Russian gets typed on a Romanian keyboard.
+- **Eight boundary rows**, one or more per rule of section 1:
+  - coffee beans from a supermarket (`кофе в зернах кауфланд`) against coffee in
+    a cafe (`cafea tucano`)
+  - home internet (`интернет старнет`) against the mobile plan (`мобильный оранж`)
+  - a holiday flight (`билеты в анталью`)
+  - car insurance (`asigurare rca masina`)
+  - a book (`carte librarius`) against a laptop (`ноутбук максимум`)
+
+### Why a file of its own, and not rows inside `transactions.csv`
+
+#98 asked for "two numbers from one scorer, over one set, split by language", and
+the split is where that reading ran out.
+
+- **A sixth `language` column** was the natural way to mark each row, and it is
+  not available. The application's export (#89) writes exactly the five columns of
+  `score.py`'s `COLUMNS`, `LabelledCsvTests` pins the two together, and the app
+  does not know what language a person typed in.
+- **Detecting the language from the script** puts Cyrillic on one side and Latin
+  on the other. That files Romanian typed without diacritics (`paine`, `cafea`)
+  under English, which is the one confusion this measurement exists to avoid.
+
+A separate file makes the language known by construction. It also keeps 56.1%,
+98.9% and `model-score.json` describing the set they were measured on. The cost
+is that the phrasing above becomes two sets from one scorer. #90 will bring the
+question back: a real export is mixed by nature, and its rows will not arrive
+sorted by language.
+
+### The numbers
+
+Both predictors, the same scorer, the same prompt (`sha256:c8ad9d9fd16f`, schema
+`sha256:972701c22b0d`), `claude-opus-5` at `effort=low`, no cache:
+
+| set | rows | rules macro recall | rules accuracy | model macro recall | model accuracy |
+| --- | --- | --- | --- | --- | --- |
+| English, `transactions.csv` | 53 | 56.1% | 56.6% | 98.9% | 98.1% |
+| Russian | 22 | 0.0% | 0.0% | 100.0% | 100.0% |
+| Romanian | 22 | 22.7% | 22.7% | 100.0% | 100.0% |
+| **Russian and Romanian** | **44** | **11.4%** | **11.4%** | **100.0%** | **100.0%** |
+
+The two per-language rows have two rows per category, so their macro averages are
+coarse. They were computed by hand from the per-row answers rather than by
+`score.py`, which scores files and not halves of them.
+
+**The rules: 56.1% to 11.4%, and to exactly zero in Cyrillic.** Section 3
+predicted this on 2026-08-24, before there was a single row. All 39 misses are
+abstentions, and there are no confident errors, so this is coverage, not
+confusion -- the same shape as on the English set. Every Romanian hit is English
+showing through:
+
+- `cafea` contains `cafe`, and `taxa` contains `tax`
+- `concert`, `spotify` and `icloud` are spelt the same in both languages
+
+So 22.7% is not the rules reading Romanian. It is a measure of how much English a
+Romanian description happens to contain.
+
+**No substring was added, and CI now holds that.** The step **The non-English
+baseline must not have moved** runs `--check` against `evals/baseline-ru-ro.json`.
+A Russian substring added to `rules.py` would move this number, and then it has to
+move that file in the same change and say why. That is #98's first trap turned
+into a red step.
+
+**The model: 44 of 44, no abstentions, no confident errors.** It costs the same as
+in English:
+
+- 1.79 s per call (p95 2.92 s)
+- 1,177 input tokens per call, against about 1,175 in English -- a Cyrillic
+  description costs a handful of tokens more, not a multiple
+- 6.20 USD per 1000 calls
+- 0.27 USD for the run, which was the figure quoted before it started
+
+It was run once, where #60 ran twice: the second run was not in the quote.
+
+### What this says, and what it cannot
+
+- **The rules' dependence on English is now a measurement and not a sentence.**
+  In this project's vocabulary, the gap between the two predictors is 42.8
+  points in English and 88.6 in Russian and Romanian.
+- **Language was not where the model's optimism was hiding -- on these rows.**
+  That claim is narrow on purpose. A set written by Claude and answered perfectly
+  by Claude is saturated, the way section 8 says the English set is. A tie at 100%
+  cannot tell "understands Russian spending" from "recognises how a Claude model
+  phrases Russian spending". The descriptions that would actually test it are the
+  ones a person invents for themselves -- abbreviations, half-transliterations,
+  a merchant's nickname -- and only #90 has those.
+- **A perfect score proves nothing about the remaining gaps.** It does not test
+  languages mixed within one description, and it does not test descriptions so
+  terse that the language is unknowable (`ttt`, `x5`).
+
+### What running it found, which reading could not
+
+**`--misses` crashed on the first Romanian row.** On Windows, Python writes a
+redirected stream in the locale's code page, and on this machine that is cp1251:
+it holds Cyrillic, and it does not hold `â`. The model path was the expensive half
+of the bug. Its progress line prints every description to stderr, so a paid run
+would have died on the first Romanian row after every call before it had been
+billed. `score.py` now writes UTF-8 to both streams. The fix is at the entry point
+and not inside `main`, because the tests redirect `main` into `StringIO`.
+`LanguageTests` reproduces the crash with `PYTHONIOENCODING=cp1251`, which is how
+a UTF-8 Linux runner can fail the way this machine did.
+
+**A CSV saved in a code page is now refused by name.** Before #98 it died inside
+the csv reader with a `UnicodeDecodeError` about a byte. This is #98's encoding
+trap, and the likeliest way it gets sprung is a spreadsheet saving the Russian
+half of this file in cp1251. The .NET import has refused cp1251 the same way since
+#62.
+
+### Not covered, said plainly
+
+**The model's 100.0% here is not in `model-score.json`.** #97's check asks for the
+English number to be re-measured when the prompt moves. Nothing asks for this one,
+so after the next prompt change it will describe a prompt that no longer exists,
+with nothing turning red. The fix is a second record and a loop in
+`check_prompt`. It was left out because #98 did not ask for it, and the next
+prompt change is the day it starts to cost something.
