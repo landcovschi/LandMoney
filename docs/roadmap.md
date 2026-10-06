@@ -723,6 +723,12 @@ again by itself after 7 days.
        Romanian score close to zero, and that is a finding to record rather than
        patch around -- it is the strongest argument the model half will get
 
+       **Measured 2026-10-06 in #98**, after the owner exempted `evals/*.csv`
+       descriptions from the English rule: 44 Russian and Romanian rows in
+       `evals/transactions-ru-ro.csv`, rules **11.4%** (0 of 22 in Russian), model
+       100.0%. No substring was added, and `baseline-ru-ro.json` makes CI hold
+       that. `docs/evals.md` section 10
+
        **Re-scored 2026-08-26 against the second set: macro recall 56.1%,
        accuracy 56.6% on 53 rows** -- the number that stands. Down 4.7 points,
        which #47 predicted and called the point of the exercise; read it as the

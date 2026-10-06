@@ -33,6 +33,10 @@ python evals/score.py --check
 ```
 
 ```bash
+python evals/score.py --set evals/transactions-ru-ro.csv --check --baseline evals/baseline-ru-ro.json
+```
+
+```bash
 python evals/score.py --check-prompt
 ```
 
@@ -44,7 +48,7 @@ python evals/test_score.py
 uv run --project src/categorizer python evals/score.py --predictor model --confusion --misses
 ```
 
-The first four work from the repository root, and only from there -- `score.py` finds
+The first five work from the repository root, and only from there -- `score.py` finds
 the categorizer package by a path relative to its own file, and `test_score.py`
 imports `score` from its own folder. `score.py` prints a per-category table, the
 accuracy and the macro recall, and exits 0 when it produced a number and 1 when
@@ -52,7 +56,7 @@ it could not -- an unreadable file, a label outside the vocabulary, or a set
 with no rows. A scorer that answers 0.0% when it scored nothing is worse than
 one that refuses.
 
-The fifth is #60 and is the only command here that is not free. `--predictor
+The sixth is #60 and is the only command here that is not free. `--predictor
 model` sends **one API call per row** and nothing caches, so a run over
 `transactions.csv` is 53 calls; it needs `ANTHROPIC_API_KEY` in the environment,
 and it borrows the categorizer's virtual environment because the `anthropic`
@@ -232,6 +236,14 @@ and the descriptions are still English, which is now a standing decision rather
 than an oversight and is the single most likely way this baseline reads
 optimistic.
 
+**That last clause was tested on 2026-10-06 in #98.** `transactions-ru-ro.csv`
+holds 44 rows in Russian and Romanian, the same eleven categories four times each,
+again written by Claude on the owner's instruction. The rules score **11.4%**
+there -- zero in Cyrillic -- and `baseline-ru-ro.json` records that, so CI asserts
+it the way it asserts 56.1%. The model scores 100.0%, which is in `docs/evals.md`
+**section 10** together with why that perfect score is not the comfort it looks
+like. `transactions.csv` is unchanged and still English.
+
 Replacing these rows with real ones is still a change to two CSV files and
 nothing else -- the loader, the metric and the rules do not know where a row
 came from.
@@ -339,6 +351,12 @@ application, and the loader enforces them rather than trusting them:
 A description containing a comma needs quoting, which any editor writing CSV
 does for you. Blank lines between labelling sessions are allowed. Excel's UTF-8
 BOM is handled.
+
+**A description may be in the language it was typed in** -- #98, and the one
+exemption from the repository's English rule, in `CLAUDE.md`. The category stays
+one of the eleven English words. The file must be UTF-8: a spreadsheet saving in
+a code page such as cp1251 is refused by name, and in Excel the choice to make is
+"CSV UTF-8", not plain "CSV".
 
 ## Where the model plugs in
 

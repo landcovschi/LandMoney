@@ -228,6 +228,19 @@ jobs:
       - name: The baseline must not have moved
         run: python evals/score.py --check
 
+      # #98. The same eleven categories in Russian and Romanian, as a set of its
+      # own with a recorded score of its own. The rules are English substrings and
+      # score near zero here, which is a finding rather than a fault -- and the
+      # trap #98 names is "fixing" it by adding Russian substrings, which tunes the
+      # baseline against the rows it is scored on. This step is what makes that
+      # change say so: baseline-ru-ro.json moves in the same commit or the step is
+      # red.
+      #
+      # The runner's locale is UTF-8, so it cannot show the cp1251 crash #98 found
+      # on Windows; test_score.py reproduces that with PYTHONIOENCODING instead.
+      - name: The non-English baseline must not have moved
+        run: python evals/score.py --set evals/transactions-ru-ro.csv --check --baseline evals/baseline-ru-ro.json
+
       # #97. The model's number cannot be re-measured here -- one API call per row
       # would turn this required check into a bill -- so what is asserted is that
       # evals/model-score.json records the prompt prompt.py sends today, digested

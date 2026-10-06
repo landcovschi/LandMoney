@@ -21,6 +21,9 @@ hand-built example rather than believed.
 import io
 import json
 import logging
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from collections import Counter
@@ -378,6 +381,81 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(load(self.csv()), [])
 
 
+class LanguageTests(unittest.TestCase):
+    """#98: descriptions in the languages they are typed in.
+
+    What these guard is the plumbing rather than the number. The number for
+    `transactions-ru-ro.csv` is asserted by the CI step that runs `--check` against
+    `baseline-ru-ro.json`, for the reason `BaselineTests` gives.
+    """
+
+    RUSSIAN = "кофе в зернах кауфланд"
+    ROMANIAN = "pâine și lapte"
+
+    def written(self, data: bytes) -> Path:
+        handle = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+        handle.write(data)
+        handle.close()
+        path = Path(handle.name)
+        self.addCleanup(path.unlink)
+        return path
+
+    def rows_text(self) -> str:
+        return (
+            ",".join(COLUMNS)
+            + f"\n2026-07-14,189.00,MDL,{self.RUSSIAN},groceries"
+            + f"\n2026-08-12,38.00,MDL,{self.ROMANIAN},groceries\n"
+        )
+
+    def test_cyrillic_and_romanian_diacritics_load_exactly_as_typed(self):
+        """S-comma (U+0219), not s-cedilla (U+015F): they are different code points,
+        and a loader that normalised one into the other would change what the model
+        reads. The two fixture strings are the only non-English text in this file,
+        and they are data -- the same exemption #62's CsvTextTests already used."""
+        rows = load(self.written(self.rows_text().encode("utf-8")))
+
+        self.assertEqual([row.description for row in rows], [self.RUSSIAN, self.ROMANIAN])
+
+    def test_a_file_saved_in_a_code_page_is_refused_by_name(self):
+        """The issue's encoding trap. cp1251 holds the Russian row and not the
+        Romanian one, so the commonest way to break this file is a spreadsheet that
+        saves only the half it can -- and the refusal has to say what happened
+        rather than raise a UnicodeDecodeError about a byte."""
+        russian_only = ",".join(COLUMNS) + f"\n2026-07-14,189.00,MDL,{self.RUSSIAN},groceries\n"
+        path = self.written(russian_only.encode("cp1251"))
+
+        with self.assertRaises(EvalSetError) as caught:
+            load(path)
+
+        self.assertIn("not UTF-8", caught.exception.problems[0])
+        self.assertIn("cp1251", caught.exception.problems[0])
+        # The half a person can act on. A mutation sweep deleted it and the two
+        # assertions above stayed green.
+        self.assertIn("CSV UTF-8", caught.exception.problems[0])
+
+    def test_the_script_survives_an_output_stream_in_a_code_page(self):
+        """Found by running it: a redirected stream on this machine was cp1251, which
+        holds Cyrillic and not a-circumflex, so `--misses` died on the first Romanian
+        row. On a model run the progress line would have done it after the calls were
+        paid for.
+
+        PYTHONIOENCODING stands in for the Windows locale, so this fails on a UTF-8
+        Linux runner too when the fix is removed -- which is the only reason it can
+        be a test rather than a note."""
+        path = self.written(self.rows_text().encode("utf-8"))
+        script = Path(__file__).resolve().parent / "score.py"
+
+        done = subprocess.run(
+            [sys.executable, str(script), "--set", str(path), "--misses"],
+            capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "cp1251"},
+        )
+
+        self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace"))
+        self.assertIn(self.ROMANIAN, done.stdout.decode("utf-8"))
+        self.assertIn(self.RUSSIAN, done.stdout.decode("utf-8"))
+
+
 class BaselineTests(unittest.TestCase):
     """The `--check` comparison of #58, against hand-built reports only.
 
@@ -559,6 +637,28 @@ class BaselineTests(unittest.TestCase):
         recorded = json.loads(BASELINE.read_text(encoding="utf-8"))
 
         self.assertIn(recorded["predictor"], PREDICTORS)
+
+    def test_baseline_names_the_file_check_reads(self):
+        """#98's flag, shown to be read rather than ignored: a baseline recorded for
+        another set is refused, where the default one would have passed."""
+        elsewhere = self.baseline(set="somewhere-else.csv")
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as said:
+            code = main(["--check", "--baseline", str(elsewhere)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("somewhere-else.csv", said.getvalue())
+
+    def test_the_shipped_non_english_baseline_describes_a_set_beside_it(self):
+        """Not the number -- which file it is about, and that the file exists. A
+        name matching nothing would make the CI step exit 1 for ever, as a broken
+        check rather than as drift."""
+        path = BASELINE.parent / "baseline-ru-ro.json"
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(recorded["set"], "transactions-ru-ro.csv")
+        self.assertEqual(recorded["predictor"], "rules")
+        self.assertTrue((BASELINE.parent / recorded["set"]).exists())
 
     def test_the_shipped_baseline_describes_the_default_eval_set(self):
         """Not the number -- the file it claims to be about.
