@@ -1162,6 +1162,15 @@ the thing that produced the number can be shown.
       categorizer's own tests came with it: nothing had touched the Python tree
       on a pull request until then
 
+      **#97 added the model's half, on 2026-10-06, as far as a free check can
+      reach.** The model cannot run on a pull request, so its number was prose
+      and `prompt.py` -- the highest-leverage file in the repository -- had no
+      guard at all. `evals/model-score.json` now records the number beside
+      digests of the system prompt and the response schema, and `python
+      evals/score.py --check-prompt` exits 3 when `prompt.py` no longer sends
+      what they describe. It asserts that a number was recorded under the current
+      prompt, never that the number is true
+
 ## Deliberately not doing
 
 Recorded so they do not creep back in:

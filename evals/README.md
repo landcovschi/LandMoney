@@ -33,6 +33,10 @@ python evals/score.py --check
 ```
 
 ```bash
+python evals/score.py --check-prompt
+```
+
+```bash
 python evals/test_score.py
 ```
 
@@ -40,7 +44,7 @@ python evals/test_score.py
 uv run --project src/categorizer python evals/score.py --predictor model --confusion --misses
 ```
 
-The first three work from the repository root, and only from there -- `score.py` finds
+The first four work from the repository root, and only from there -- `score.py` finds
 the categorizer package by a path relative to its own file, and `test_score.py`
 imports `score` from its own folder. `score.py` prints a per-category table, the
 accuracy and the macro recall, and exits 0 when it produced a number and 1 when
@@ -48,7 +52,7 @@ it could not -- an unreadable file, a label outside the vocabulary, or a set
 with no rows. A scorer that answers 0.0% when it scored nothing is worse than
 one that refuses.
 
-The fourth is #60 and is the only command here that is not free. `--predictor
+The fifth is #60 and is the only command here that is not free. `--predictor
 model` sends **one API call per row** and nothing caches, so a run over
 `transactions.csv` is 53 calls; it needs `ANTHROPIC_API_KEY` in the environment,
 and it borrows the categorizer's virtual environment because the `anthropic`
@@ -127,6 +131,76 @@ points, so nothing a rule can do hides inside that rounding.
 because `score.py` imports `categories` and `rules` as top-level modules and it
 is the script's own folder that lands on `sys.path`. That is the price of having
 no package yet.
+
+## The model's number, and the prompt it was measured under
+
+#97. `baseline.json` is checked by re-running the rules, which are free. The
+model's number cannot be checked that way -- one API call per row would turn the
+required check into a bill -- so before #97 it lived only in prose in
+`docs/evals.md`, and `prompt.py` could be edited and merged with nothing measuring
+the result.
+
+**`model-score.json`** now records the model's number with what produced it: the
+model, the effort, the set and its row count, and two digests -- of the system
+prompt as the model reads it, and of the response schema as the request carries
+it. `--check-prompt` scores nothing; it compares those two digests with what
+`prompt.py` produces today, and CI runs it on every pull request as its own step.
+
+| exit | means | what to do |
+| --- | --- | --- |
+| 0 | the record names the prompt sent today | nothing |
+| 1 | the record cannot be compared -- unreadable, a key missing, no number, a run with retrieval | fix the file |
+| 3 | `prompt.py` no longer sends what the record was measured under | re-measure, then update the record |
+
+**3 and not `--check`'s 2**, because the two want different reactions: the
+baseline moving is fixed by editing a number the run just printed, the prompt
+moving by paying for a run.
+
+The digests are of what the model is **sent**, not of the file's bytes. An edited
+comment passes. An edited category description, boundary rule or sentence of the
+prompt fails, and so does an edit to `RESPONSE_SCHEMA` alone. So does a change to
+the vocabulary in `categories.py`, because the category names are in the prompt
+-- that is a vocabulary edit reaching the model, not the guard extended to a file
+`--check` already covers by re-running it.
+
+### Updating it, which costs money
+
+1. Run the model with the command above -- one API call per row of
+   `transactions.csv`, and the key arrives the way the paragraph after it says.
+2. Copy `prompt.py sha256:` and `schema sha256:` from the header the run prints,
+   and the macro recall and accuracy beneath it, into `model-score.json`. Write
+   the percentages as fractions, `0.989` for 98.9%, as `baseline.json` does.
+3. Update `recorded`, and `model` and `effort` if they changed.
+4. Put the new number in `docs/evals.md` with whatever it changes about the
+   argument there, in the same change.
+
+The red step deliberately does not print the new digests. Copying them out of
+it into the record would be green with the old number beside them -- the one
+failure this check cannot see -- while the run that produces a real number
+prints both anyway.
+
+### What it cannot do
+
+**It cannot tell whether the number is honest.** It knows that somebody wrote a
+number down beside the current digests. A record updated without a run passes,
+and nothing here can stop that; it only makes sure the omission is a choice
+rather than something forgotten.
+
+It does not cover:
+
+- **`_EXAMPLES_INSTRUCTION` and `render_examples`.** Both are only sent with
+  retrieval on, and the recorded number was measured with it off, so an edit to
+  them changes nothing that number describes. Covering them needs a recorded
+  with-retrieval number, and there is none -- section 8 of `docs/evals.md`, and
+  the holdout it was measured on is spent.
+- **The user message's framing**, `_user_message` in `anthropic_predictor.py`:
+  `Description:`, `Amount:`, `Currency:`. The model reads it on every call and it
+  lives outside `prompt.py`.
+- **The model and the effort.** The record says which ones produced its number;
+  nothing checks that production still runs them, because production takes both
+  from environment variables in Azure that no check here can read.
+- **The eval set.** A `transactions.csv` that gained rows fails `--check` for the
+  rules and leaves the model's record describing a set that no longer exists.
 
 ## The state of this today
 
